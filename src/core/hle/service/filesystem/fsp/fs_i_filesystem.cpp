@@ -4,6 +4,15 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <map>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include "common/logging.h"
 #include "common/string_util.h"
 #include "core/file_sys/fssrv/fssrv_sf_path.h"
 #include "core/hle/service/cmif_serialization.h"
@@ -12,6 +21,78 @@
 #include "core/hle/service/filesystem/fsp/fs_i_filesystem.h"
 
 namespace Service::FileSystem {
+
+namespace {
+// Custom (EDEN_NX2_FS_LOG=1): logs the game files opened, so a long session log shows area loads
+// and cutscenes next to the FPS lines. Area/event files (Banc, Event, Movie, Bake/Scene,
+// CameraAnimation) are logged by name right away ("FS FILE"); everything else is summed per
+// folder and logged as "FS LOAD" once a burst of opens is over (1 s after it started).
+struct FsLogState {
+    std::mutex mutex;
+    std::map<std::string, std::pair<u32, u64>> folders; // folder -> files, bytes
+    std::map<std::string, std::chrono::steady_clock::time_point> last_named;
+    std::chrono::steady_clock::time_point window_start{};
+};
+
+std::string FolderOf(const std::string& path) {
+    // First two folder levels, e.g. "TerrainArc/KokiriForest" or "Pack/Actor".
+    const size_t start = path.starts_with("/") ? 1 : 0;
+    const size_t first = path.find('/', start);
+    if (first == std::string::npos) {
+        return "(root)";
+    }
+    const size_t second = path.find('/', first + 1);
+    return path.substr(start, (second == std::string::npos ? first : second) - start);
+}
+
+void LogFsOpen(const std::string& path, u64 size) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_FS_LOG");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    static FsLogState st;
+    std::scoped_lock lk{st.mutex};
+    const auto now = std::chrono::steady_clock::now();
+    if (!st.folders.empty() && now - st.window_start >= std::chrono::seconds{1}) {
+        std::vector<std::pair<u64, std::string>> by_bytes;
+        u64 total{};
+        u32 files{};
+        for (const auto& [folder, stat] : st.folders) {
+            by_bytes.emplace_back(stat.second, folder);
+            total += stat.second;
+            files += stat.first;
+        }
+        std::sort(by_bytes.rbegin(), by_bytes.rend());
+        std::string top;
+        for (size_t i = 0; i < by_bytes.size() && i < 8; ++i) {
+            top += fmt::format("{}{} {}K", i ? ", " : "", by_bytes[i].second,
+                               by_bytes[i].first / 1024);
+        }
+        const auto ago = std::chrono::duration_cast<std::chrono::milliseconds>(now - st.window_start);
+        LOG_INFO(Service_FS, "FS LOAD (began {:.1f} s ago) {} files {} KiB: {}",
+                 static_cast<double>(ago.count()) / 1000.0, files, total / 1024, top);
+        st.folders.clear();
+    }
+    if (st.folders.empty()) {
+        st.window_start = now;
+    }
+    auto& folder = st.folders[FolderOf(path)];
+    ++folder.first;
+    folder.second += size;
+    const std::string_view p = std::string_view{path}.substr(path.starts_with("/") ? 1 : 0);
+    if (p.starts_with("Banc/") || p.starts_with("Event/") || p.starts_with("Movie/") ||
+        p.starts_with("Bake/Scene/") || p.starts_with("CameraAnimation/")) {
+        auto& last = st.last_named[path];
+        if (last == std::chrono::steady_clock::time_point{} || now - last >= std::chrono::seconds{30}) {
+            LOG_INFO(Service_FS, "FS FILE {} ({} KiB)", path, size / 1024);
+        }
+        last = now;
+    }
+}
+} // Anonymous namespace
 
 IFileSystem::IFileSystem(Core::System& system_, FileSys::VirtualDir dir_, SizeGetter size_getter_)
     : ServiceFramework{system_, "IFileSystem"}, backend{std::make_unique<FileSys::Fsa::IFileSystem>(
@@ -104,6 +185,7 @@ Result IFileSystem::OpenFile(OutInterface<IFile> out_interface,
     FileSys::VirtualFile vfs_file{};
     R_TRY(backend->OpenFile(&vfs_file, FileSys::Path(path->str),
                             static_cast<FileSys::OpenMode>(mode)));
+    LogFsOpen(path->str, vfs_file ? vfs_file->GetSize() : 0);
 
     *out_interface = std::make_shared<IFile>(system, vfs_file);
     R_SUCCEED();

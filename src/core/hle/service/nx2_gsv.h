@@ -34,6 +34,7 @@
 #include "core/core.h"
 #include "core/arm/dynarmic/window_trace.h"
 #include "core/device_memory.h"
+#include "core/loader/nso.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
 #include "core/frontend/framebuffer_layout.h"
@@ -172,6 +173,9 @@ private:
 //   value. The counter is a SyncCounterId, the bitwise NOT of the host1x syncpoint id; mode 0
 //   compares 32-bit wrapping, mode 1 64-bit. Eden's guest syncpoints back it.
 // - TIPC 202(slot): cancel the slot's request.
+inline std::atomic<s64> g_syncpt_action_lock_ns{};   // custom timing
+inline std::atomic<s64> g_syncpt_action_signal_ns{}; // custom timing
+
 class INx2SyncptSession final : public ServiceFramework<INx2SyncptSession> {
 public:
     explicit INx2SyncptSession(Core::System& system_)
@@ -269,12 +273,18 @@ private:
             TipcReplyWords(ctx, {});
             return;
         }
+        // Custom (EDEN_NX2_IPC_TIME=1): where this call's time goes, every 5 s.
+        static const bool time_parts = std::getenv("EDEN_NX2_IPC_TIME") != nullptr;
+        using sclock = std::chrono::steady_clock;
+        const auto t_begin = sclock::now();
         auto& request = m_requests[slot];
         Cancel(request);
+        const auto t_cancel = sclock::now();
         // A new request starts unsignalled. Slots are reused by different client objects: title 1's
         // movie player got slot 0 after NVN's fence waits had left it signalled, took that as a
         // decoded frame and aborted when the decoder had none.
         event->Clear(system.Kernel());
+        const auto t_clear = sclock::now();
         request.syncpoint = syncpoint;
         request.pending = true;
         auto& manager = system.Host1x().GetSyncpointManager();
@@ -283,13 +293,51 @@ private:
         request.handle = manager.RegisterGuestAction(
             syncpoint, static_cast<u32>(value),
             [shared = m_shared, &kernel = system.Kernel(), &request, event] {
+                const auto a0 = std::chrono::steady_clock::now();
                 std::scoped_lock lk{shared->mutex};
+                const auto a1 = std::chrono::steady_clock::now();
                 if (!shared->alive) {
                     return;
                 }
-                request.pending = false;
+                // Only a still-pending request signals: with EDEN_NX2_SYNCPT_UNLOCKED_ACTIONS the
+                // action can run just after a cancel took it out of the list.
+                if (!request.pending.exchange(false)) {
+                    return;
+                }
                 event->Signal(kernel);
+                const auto a2 = std::chrono::steady_clock::now();
+                g_syncpt_action_lock_ns += (a1 - a0).count();
+                g_syncpt_action_signal_ns += (a2 - a1).count();
             });
+        if (time_parts) {
+            const auto t_end = sclock::now();
+            const auto ms = [](sclock::duration d) {
+                return std::chrono::duration<double, std::milli>(d).count();
+            };
+            static double cancel_ms{}, clear_ms{}, register_ms{}, max_register_ms{};
+            static u32 calls{}, inline_done{};
+            static auto window = t_end;
+            cancel_ms += ms(t_cancel - t_begin);
+            clear_ms += ms(t_clear - t_cancel);
+            const double reg = ms(t_end - t_clear);
+            register_ms += reg;
+            max_register_ms = (std::max)(max_register_ms, reg);
+            ++calls;
+            inline_done += request.pending ? 0 : 1;
+            if (t_end - window >= std::chrono::seconds{5}) {
+                LOG_INFO(Service,
+                         "syncpt 201 5s: {} calls ({} already reached) | cancel {:.0f} ms, event "
+                         "clear {:.0f} ms, register {:.0f} ms (max {:.1f}) | wake-ups (all threads): "
+                         "lock {:.0f} ms, event signal {:.0f} ms | syncpoint guard wait {:.0f} ms",
+                         calls, inline_done, cancel_ms, clear_ms, register_ms, max_register_ms,
+                         g_syncpt_action_lock_ns.exchange(0) / 1e6,
+                         g_syncpt_action_signal_ns.exchange(0) / 1e6,
+                         ::g_syncpoint_guard_wait_ns.exchange(0) / 1e6);
+                cancel_ms = clear_ms = register_ms = max_register_ms = 0;
+                calls = inline_done = 0;
+                window = t_end;
+            }
+        }
         TipcReplyWords(ctx, {});
     }
 
@@ -1469,6 +1517,45 @@ private:
             }
         }
     }};
+    // EDEN_NX2_TRIM_ZERO=<seconds>: that often, resident guest pages holding only zeros leave the
+    // working set (Common::HostMemory::TrimZeroPages). OoT boots with ~2 GB of them on a 16 GB PC.
+    std::jthread m_zero_trim_thread{[this](std::stop_token stop) {
+        const char* value = std::getenv("EDEN_NX2_TRIM_ZERO");
+        const int interval = value != nullptr ? std::atoi(value) : 0;
+        if (interval <= 0) {
+            return;
+        }
+        Common::SetCurrentThreadName("nx2:ZeroTrim");
+        Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+        // After the boot (first 2 minutes) almost nothing new is found, and each pass reads all of
+        // the resident guest memory: then only every EDEN_NX2_TRIM_ZERO_LATER seconds (default 60).
+        const char* later_value = std::getenv("EDEN_NX2_TRIM_ZERO_LATER");
+        const int later = later_value != nullptr ? std::atoi(later_value) : 60;
+        const auto boot = std::chrono::steady_clock::now();
+        auto& buffer = system.DeviceMemory().buffer;
+        while (!stop.stop_requested()) {
+            const bool booting = std::chrono::steady_clock::now() - boot < std::chrono::minutes{2};
+            const int wait = booting ? interval : later;
+            if (wait <= 0) {
+                return;
+            }
+            for (int i = 0; i < wait * 10 && !stop.stop_requested(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            }
+            if (stop.stop_requested()) {
+                break;
+            }
+            const auto start = std::chrono::steady_clock::now();
+            const auto [resident, trimmed] = buffer.TrimZeroPages();
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - start)
+                                .count();
+            LOG_INFO(Service,
+                     "ZERO TRIM: {} MiB of guest memory resident, {} MiB of all-zero pages trimmed "
+                     "in {} ms; kernel zero-filled {} MiB so far",
+                     resident >> 20, trimmed >> 20, ms, Common::HostMemory::ZeroFilledBytes() >> 20);
+        }
+    }};
 };
 
 inline bool Nx2VideoTraceEnabled() {
@@ -1846,7 +1933,36 @@ private:
                 m_stats.frame_us += frame;
                 m_stats.max_frame_us = (std::max)(m_stats.max_frame_us, frame);
                 m_stats.hitches += frame > 100'000 ? 1 : 0;
+                // Custom (EDEN_NX2_HITCH_LOG=1): every frame over 50 ms, plus a one-line summary
+                // per second, so hitches line up with the log lines around them.
+                static const bool hitch_log = [] {
+                    const char* value = std::getenv("EDEN_NX2_HITCH_LOG");
+                    return value != nullptr && value[0] == '1';
+                }();
+                if (hitch_log) {
+                    static long long sec_frames{}, sec_total_us{}, sec_max_us{}, sec_slow{};
+                    static auto sec_start = entered;
+                    ++sec_frames;
+                    sec_total_us += frame;
+                    sec_max_us = (std::max)(sec_max_us, frame);
+                    if (frame > 50'000) {
+                        ++sec_slow;
+                        LOG_WARNING(Service, "HITCH frame {} ms (fence wait {} ms)",
+                                    frame / 1000, to_us(waited - entered) / 1000);
+                    }
+                    if (entered - sec_start >= std::chrono::seconds{1}) {
+                        const double secs =
+                            std::chrono::duration<double>(entered - sec_start).count();
+                        LOG_INFO(Service, "FPS {:.1f} avg {:.1f} ms max {:.1f} ms slow(>50ms) {}",
+                                 sec_frames / secs, sec_total_us / 1000.0 / sec_frames,
+                                 sec_max_us / 1000.0, sec_slow);
+                        sec_frames = sec_total_us = sec_max_us = sec_slow = 0;
+                        sec_start = entered;
+                    }
+                }
+                UpdateOotFpsMode(frame);
             }
+            UpdateOotRealtime(entered);
             m_stats.last_present = entered;
             if (++m_stats.presents == 600) {
                 LOG_INFO(Service,
@@ -1895,6 +2011,155 @@ private:
         bool deadline_reset{};
     } m_frame_trace;
 
+    // Custom (EDEN_NX2_OOT_FPS=30|60|auto): writes Ocarina's FPS mode request byte (see
+    // Loader::Nx2OotFpsModeFlag): 2 asks the game for its own 30 FPS mode, 1 for its 60 FPS mode.
+    // auto: 30 once frames stay over ~18.5 ms; every 15 s it tries 60 again for ~1.5 s and keeps
+    // it only if frames stay under ~17.5 ms.
+    struct OotFpsState {
+        bool thirty{};
+        double ema_us{16'667};
+        u32 slow_run{};
+        u32 frames_in_mode{};
+        bool probing{};
+        u32 switches{};
+    } m_oot_fps;
+
+    void UpdateOotFpsMode(long long frame_us) {
+        const u64 flag = Loader::Nx2OotFpsModeFlag().load(std::memory_order_relaxed);
+        if (flag == 0) {
+            return;
+        }
+        static const int setting = [] {
+            const char* value = std::getenv("EDEN_NX2_OOT_FPS");
+            if (value == nullptr) {
+                return 0;
+            }
+            return value[0] == '3' ? 30 : value[0] == '6' ? 60 : -1;
+        }();
+        auto& s = m_oot_fps;
+        const bool was_thirty = s.thirty;
+        s.ema_us += (static_cast<double>(frame_us) - s.ema_us) / 16.0;
+        ++s.frames_in_mode;
+        if (setting == 30 || setting == 60) {
+            s.thirty = setting == 30;
+        } else if (!s.thirty) {
+            s.slow_run = s.ema_us > 18'500 ? s.slow_run + 1 : 0;
+            if (s.probing && s.frames_in_mode >= 90) {
+                s.probing = false;
+                s.thirty = s.ema_us > 17'500;
+            } else if (!s.probing && s.slow_run >= 45) {
+                s.thirty = true;
+            }
+        } else if (s.frames_in_mode >= 450) { // ~15 s at 30 FPS: try 60 again
+            s.thirty = false;
+            s.probing = true;
+            s.ema_us = 16'667;
+            s.slow_run = 0;
+        }
+        if (s.thirty != was_thirty) {
+            s.frames_in_mode = 0;
+            if (++s.switches <= 200 || s.switches % 100 == 0) {
+                LOG_INFO(Service, "OOT FPS: {} mode (frame avg {:.1f} ms{})", s.thirty ? 30 : 60,
+                         s.ema_us / 1000.0, s.probing ? ", trying 60" : "");
+            }
+        }
+        system.ApplicationMemory().Write8(flag, s.thirty ? 2 : 1);
+    }
+
+    // Custom (EDEN_NX2_OOT_REALTIME=1): game time follows the clock in Ocarina, the way Hookshot's
+    // real-time mode does it (NotRexed/Hookshot host/nn_vi.c realtime_step, MIT): each present
+    // writes the measured frame rate (last 5 intervals, rounding carried over, 15-60) into the
+    // graphics module's nominal rate (+0x2c8), which the game divides 60 by for its step.
+    struct OotRealtimeState {
+        std::chrono::steady_clock::time_point last{};
+        std::array<double, 5> samples{};
+        u32 count{};
+        u32 next{};
+        double carry{};
+        u64 steps{};
+        bool warned{};
+        std::chrono::steady_clock::time_point last_change{};
+    } m_oot_rt;
+
+    void UpdateOotRealtime(std::chrono::steady_clock::time_point now) {
+        const u64 slot = Loader::Nx2OotGfxModuleSlot().load(std::memory_order_relaxed);
+        if (slot == 0) {
+            return;
+        }
+        auto& s = m_oot_rt;
+        const double dt = s.last == std::chrono::steady_clock::time_point{}
+                              ? 0.0
+                              : std::chrono::duration<double>(now - s.last).count();
+        s.last = now;
+        auto& memory = system.ApplicationMemory();
+        const u64 module = memory.Read64(slot);
+        if (module == 0) {
+            return;
+        }
+        if (dt <= 0.0 || dt > 0.25) { // a load: the average starts again
+            s.count = s.next = 0;
+            s.carry = 0.0;
+            return;
+        }
+        s.samples[s.next++ % s.samples.size()] = dt;
+        s.count = (std::min<u32>)(s.count + 1, static_cast<u32>(s.samples.size()));
+        double sum = 0.0;
+        for (u32 i = 0; i < s.count; ++i) {
+            sum += s.samples[i];
+        }
+        // EDEN_NX2_OOT_REALTIME=2: whole steps only (60, 30, 20 or 15, a step of 1-4 frames), mixed so
+        // the average follows the clock: Ocarina's close-up flame effects froze on fractional steps.
+        static const bool whole_steps = [] {
+            const char* value = std::getenv("EDEN_NX2_OOT_REALTIME");
+            return value != nullptr && value[0] == '2';
+        }();
+        // EDEN_NX2_OOT_RT_MIN=<fps> (15-60, default 15): the lowest rate written. The Switch 2 runs the
+        // game at 40-60 Hz with variable refresh, so its effects may expect nothing below 40.
+        static const int rt_min = [] {
+            const char* value = std::getenv("EDEN_NX2_OOT_RT_MIN");
+            return value != nullptr ? std::clamp(std::atoi(value), 15, 60) : 15;
+        }();
+        const double ratio = std::clamp(sum / s.count * 60.0 + s.carry, 1.0, 60.0 / rt_min);
+        const int fps = whole_steps
+                            ? 60 / std::clamp(static_cast<int>(ratio + 0.5), 1, 4)
+                            : std::clamp(static_cast<int>(60.0 / ratio + 0.5), rt_min, 60);
+        const u64 field = module + 0x2c8;
+        const s32 current = static_cast<s32>(memory.Read32(field));
+        if (current < 15 || current > 60) {
+            if (!s.warned) {
+                s.warned = true;
+                LOG_WARNING(Service, "OOT realtime: nominal rate reads {}, leaving it alone", current);
+            }
+            return;
+        }
+        // EDEN_NX2_OOT_REALTIME=3 (calm): the rate changes at most once a second and only by 6 or more,
+        // no carry: some effects (close-up flames) seem to restart when the rate changes.
+        static const bool calm = [] {
+            const char* value = std::getenv("EDEN_NX2_OOT_REALTIME");
+            return value != nullptr && value[0] == '3';
+        }();
+        if (calm) {
+            s.carry = 0.0;
+            const auto since = now - s.last_change;
+            if (std::abs(fps - current) < 6 || since < std::chrono::seconds{1}) {
+                return;
+            }
+            s.last_change = now;
+            const int rounded = std::clamp((fps + 2) / 5 * 5, 15, 60);
+            memory.Write32(field, static_cast<u32>(rounded));
+            if (s.steps++ % 50 == 0) {
+                LOG_INFO(Service, "OOT realtime (calm): game's frame rate {} -> {}", current, rounded);
+            }
+            return;
+        }
+        s.carry = std::clamp(ratio - 60.0 / fps, whole_steps ? -1.0 : -0.5, whole_steps ? 1.0 : 0.5);
+        memory.Write32(field, static_cast<u32>(fps));
+        if (s.steps++ % 3000 == 0) {
+            LOG_INFO(Service, "OOT realtime: ratio {:.3f}, game's frame rate {} (module {:#x})", ratio,
+                     fps, module);
+        }
+    }
+
     // timing: present word 12, (swap interval << 16) | refresh rate. Fire Emblem: Fortune's Weave
     // sends 0x1003c during its boot logos and 0x2003c (two vblanks per frame, 30 fps) after; paced
     // at every vblank it ran at double speed. EDEN_NX2_SWAP_INTERVAL=<n> forces the interval.
@@ -1922,6 +2187,15 @@ private:
         u32 swap_interval = std::clamp<u32>(timing >> 16, 1, 4);
         if (mkw_dynamic) {
             swap_interval = 1;
+        }
+        // Ocarina in its 30 FPS mode with full time steps (UpdateOotFpsMode): two vblanks a frame.
+        static const bool oot_full_step = [] {
+            const char* value = std::getenv("EDEN_NX2_OOT_FULLSTEP");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (oot_full_step && m_oot_fps.thirty &&
+            Loader::Nx2OotFpsModeFlag().load(std::memory_order_relaxed) != 0) {
+            swap_interval = 2;
         }
         if (forced_interval != 0) {
             swap_interval = forced_interval;
@@ -2937,11 +3211,47 @@ private:
         std::vector<Tegra::Host1x::Nx2Picture> pictures;
         std::vector<u8> bytes;
         std::unique_lock lk{m_mutex};
+        // Custom (EDEN_NX2_VDEC_STATS=1): once a second, where the decode thread's time went.
+        static const bool vstats = [] {
+            const char* value = std::getenv("EDEN_NX2_VDEC_STATS");
+            return value != nullptr && value[0] == '1';
+        }();
+        using vclock = std::chrono::steady_clock;
+        const auto vms = [](vclock::duration d) {
+            return std::chrono::duration<double, std::milli>(d).count();
+        };
+        struct {
+            double wait_input{}, wait_image{}, wait_other{}, decode{}, release{}, write{};
+            u32 frames{}, inputs{}, max_inputs_queued{}, max_decoded_ahead{};
+            vclock::time_point window = vclock::now();
+        } vs;
+        const auto vreport = [&] {
+            if (!vstats || vclock::now() - vs.window < std::chrono::seconds{1}) {
+                return;
+            }
+            LOG_INFO(Service,
+                     "VDEC 1s: out {} in {} | waiting for input {:.0f} ms, for a free image {:.0f} "
+                     "ms, other {:.0f} ms | decode {:.0f} ms, release wait {:.0f} ms, write {:.0f} "
+                     "ms | max queued inputs {}, max decoded ahead {}",
+                     vs.frames, vs.inputs, vs.wait_input, vs.wait_image, vs.wait_other, vs.decode,
+                     vs.release, vs.write, vs.max_inputs_queued, vs.max_decoded_ahead);
+            vs = {};
+        };
         while (true) {
+            const auto wait_begin = vclock::now();
+            const int wait_kind = m_inputs.Empty() ? 0 : (m_free.empty() ? 1 : 2);
             m_cv.wait(lk, [&] {
                 return m_quit || m_flush || (!m_decoded.empty() && !m_free.empty()) ||
                        (!m_inputs.Empty() && m_decoded.size() < MaxDecodedAhead);
             });
+            if (vstats) {
+                const double waited = vms(vclock::now() - wait_begin);
+                (wait_kind == 0 ? vs.wait_input : wait_kind == 1 ? vs.wait_image : vs.wait_other) +=
+                    waited;
+                vs.max_decoded_ahead =
+                    (std::max)(vs.max_decoded_ahead, static_cast<u32>(m_decoded.size()));
+                vreport();
+            }
             if (m_quit) {
                 return;
             }
@@ -2966,10 +3276,17 @@ private:
                     m_release_fences.erase(it);
                 }
                 lk.unlock();
+                const auto release_begin = vclock::now();
                 if (fence) {
                     WaitForRelease(*fence);
                 }
+                const auto write_begin = vclock::now();
                 const auto [width, height] = WriteImage(decoder.get(), image, frame, bytes);
+                if (vstats) {
+                    vs.release += vms(write_begin - release_begin);
+                    vs.write += vms(vclock::now() - write_begin);
+                    ++vs.frames;
+                }
                 lk.lock();
                 // Even an image written during a flush counts: the client waits for its value.
                 m_outputs.push_back({image, width, height, frame.pts, frame.end});
@@ -2991,6 +3308,10 @@ private:
                              frame.end ? ", end of stream" : "", image);
                 }
                 continue;
+            }
+            if (vstats) {
+                vs.max_inputs_queued = (std::max)(vs.max_inputs_queued,
+                                                  static_cast<u32>(m_inputs.Size()));
             }
             Input input = m_inputs.Pop();
             if (!m_stream_ended && !m_end_queued) {
@@ -3016,7 +3337,12 @@ private:
                 decoder = std::make_unique<Tegra::Host1x::Nx2VideoDecoder>(codec);
             }
             pictures.clear();
+            const auto decode_begin = vclock::now();
             decoder->Decode(input.data, input.pts, pictures);
+            if (vstats) {
+                vs.decode += vms(vclock::now() - decode_begin);
+                ++vs.inputs;
+            }
             if (input.end) {
                 decoder->Drain(pictures);
             }

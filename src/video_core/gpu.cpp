@@ -313,6 +313,20 @@ struct GPU::Impl {
                         }
                         free_swap_counters.push_back(current_request_counter);
                     }
+                    // Custom (EDEN_NX2_COMPOSITE_ON_GPU_THREAD=1): this runs on whichever thread
+                    // reached the fence, often the video decoder's or under the syncpoint
+                    // manager's lock, and a composite takes milliseconds. Queue it for the GPU
+                    // thread instead, like a composite without fences.
+                    static const bool on_gpu_thread = [] {
+                        const char* value = std::getenv("EDEN_NX2_COMPOSITE_ON_GPU_THREAD");
+                        return value != nullptr && value[0] == '1';
+                    }();
+                    if (on_gpu_thread) {
+                        [[maybe_unused]] const u64 queued = RequestSyncOperation(
+                            [this, composite_layers] { renderer->Composite(composite_layers); });
+                        gpu_thread.TickGPU(is_async);
+                        return;
+                    }
                     renderer->Composite(composite_layers);
                 };
                 for (size_t i = 0; i < num_fences; i++) {

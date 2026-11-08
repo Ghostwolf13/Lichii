@@ -112,6 +112,83 @@ void BufferCache<P>::TickFrame() {
         return;
     }
     runtime.TickFrame(slot_buffers);
+    // Custom (EDEN_NX2_PREFLUSH): Preflushable marks set for Switch 2 titles would otherwise
+    // last forever, so every page the game ever read back (cutscenes, old ring-buffer slots)
+    // keeps being downloaded at fences. Every EDEN_NX2_PREFLUSH_EXPIRE frames (default 120,
+    // 0 = never) they are dropped: pages still read get one trap-and-flush and are marked again.
+    if (!nx2_preflushed_ranges.Empty() && frame_tick % 600 == 0) {
+        // How big the marked set is, to see whether it keeps growing while marks never expire.
+        u64 marked_bytes{};
+        size_t marked_ranges{};
+        nx2_preflushed_ranges.ForEach([&](DAddr begin, DAddr end) {
+            marked_bytes += end - begin;
+            ++marked_ranges;
+        });
+        LOG_INFO(HW_GPU, "PREFLUSH marked set: {} ranges, {} KiB (frame {}), {} KiB aged out so far",
+                 marked_ranges, marked_bytes / 1024, frame_tick,
+                 nx2_preflush_aged_pages * Core::DEVICE_PAGESIZE / 1024);
+    }
+    // Custom (EDEN_NX2_PREFLUSH_AGE=<frames>): each marked page is dropped on its own once it has
+    // been marked that long, so the set can't grow forever. Unlike EXPIRE (which drops every mark
+    // at once), a page still read just gets one trap-and-flush per age period, spread out.
+    static const u64 age_frames = [] {
+        const char* value = std::getenv("EDEN_NX2_PREFLUSH_AGE");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) : u64{0};
+    }();
+    if (age_frames != 0 && frame_tick % 60 == 0 && !nx2_preflush_page_frame.empty()) {
+        std::vector<DAddr> old_pages;
+        for (const auto& [page, marked] : nx2_preflush_page_frame) {
+            if (frame_tick - marked >= age_frames) {
+                old_pages.push_back(page);
+            }
+        }
+        std::sort(old_pages.begin(), old_pages.end());
+        const auto drop = [&](DAddr begin, DAddr end) {
+            memory_tracker.UnmarkRegionAsPreflushable(begin, end - begin);
+            read_trapped_ranges.Subtract(begin, end - begin);
+            nx2_preflushed_ranges.Subtract(begin, end - begin);
+        };
+        size_t i = 0;
+        while (i < old_pages.size()) {
+            const DAddr begin = old_pages[i];
+            DAddr end = begin + Core::DEVICE_PAGESIZE;
+            nx2_preflush_page_frame.erase(begin);
+            ++i;
+            while (i < old_pages.size() && old_pages[i] == end) {
+                nx2_preflush_page_frame.erase(end);
+                end += Core::DEVICE_PAGESIZE;
+                ++i;
+            }
+            drop(begin, end);
+        }
+        nx2_preflush_aged_pages += old_pages.size();
+    }
+    if (!nx2_preflushed_ranges.Empty()) {
+        static const u64 expire_frames = [] {
+            const char* value = std::getenv("EDEN_NX2_PREFLUSH_EXPIRE");
+            return value != nullptr ? std::strtoull(value, nullptr, 10) : u64{120};
+        }();
+        static u64 frames_since_expire{};
+        if (expire_frames != 0 && ++frames_since_expire >= expire_frames) {
+            frames_since_expire = 0;
+            u64 bytes{};
+            size_t ranges{};
+            nx2_preflushed_ranges.ForEach([&](DAddr begin, DAddr end) {
+                memory_tracker.UnmarkRegionAsPreflushable(begin, end - begin);
+                // Forget the trap too, so the next GPU write arms it again: otherwise the
+                // deduplication skips it and the guest reads stale data (overbright exposure).
+                read_trapped_ranges.Subtract(begin, end - begin);
+                bytes += end - begin;
+                ++ranges;
+            });
+            nx2_preflushed_ranges.Clear();
+            static u64 expiries{};
+            if (expiries++ % 10 == 0) {
+                LOG_INFO(HW_GPU, "PREFLUSH expired {} ranges, {} KiB (every {} frames)", ranges,
+                         bytes / 1024, expire_frames);
+            }
+        }
+    }
     if (frame_tick % 600 == 0 && !uploaded_buffer_ranges.empty()) {
         for (const auto& [address, size] : uploaded_buffer_ranges) {
             device_memory.HintCold(address, size);
@@ -282,7 +359,13 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
                                            device_addr_end_aligned - device_addr_start_aligned);
     // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
     // instead keep read traps and flush on demand.
-    const bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
+    // Custom: EDEN_NX2_PREFLUSH=1 gives Switch 2 titles the preflush path too, so pages the guest
+    // CPU has read are downloaded at fences instead of stalling on every later read.
+    static const bool nx2_preflush = [] {
+        const char* value = std::getenv("EDEN_NX2_PREFLUSH");
+        return value != nullptr && (value[0] == '1' || value[0] == '2');
+    }();
+    const bool preflush = nx2_preflush || !Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
     if (!area->preemtive) {
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
             Nx2DownloadTrace::Marked(device_addr_start_aligned,
@@ -291,6 +374,17 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
         if (preflush) {
             memory_tracker.MarkRegionAsPreflushable(
                 device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
+            if (nx2_preflush && Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
+                // Custom: remembered so TickFrame can expire the mark (see there).
+                nx2_preflushed_ranges.Add(device_addr_start_aligned,
+                                          device_addr_end_aligned - device_addr_start_aligned);
+                for (DAddr page = device_addr_start_aligned; page < device_addr_end_aligned;
+                     page += Core::DEVICE_PAGESIZE) {
+                    nx2_preflush_page_frame[page] = frame_tick;
+                }
+                read_trapped_ranges.Subtract(device_addr_start_aligned,
+                                             device_addr_end_aligned - device_addr_start_aligned);
+            }
         } else {
             if constexpr (USE_MEMORY_MAPS) {
                 cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);

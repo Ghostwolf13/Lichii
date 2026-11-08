@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <optional>
 #include <type_traits>
 #include "common/common_types.h"
@@ -109,5 +110,10 @@ public:
 private:
     Modules modules;
 };
+
+/// Custom: guest address of Ocarina's FPS mode request byte (0 = patch not applied).
+std::atomic<u64>& Nx2OotFpsModeFlag();
+/// Custom: guest address of the slot holding Ocarina's graphics module pointer (0 = not patched).
+std::atomic<u64>& Nx2OotGfxModuleSlot();
 
 } // namespace Loader

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <utility>
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 
@@ -62,6 +63,13 @@ public:
     /// it needs RAM. The contents stay; using the pages brings them back.
     void HintCold(size_t physical_offset, size_t length,
                   std::optional<size_t> virtual_offset) const;
+    /// Windows: resident pages of guest memory (backing and its views) that hold only zeros leave
+    /// the working set, like HintCold. Returns {resident bytes looked at, bytes trimmed}.
+    std::pair<size_t, size_t> TrimZeroPages() const;
+
+    /// Bytes ClearBackingRegion has filled with zeros (memset) since start.
+    static u64 ZeroFilledBytes() noexcept;
+
     /// Pages the kernel hands out (cleared or not).
     void MarkUsed(size_t physical_offset, size_t length);
 

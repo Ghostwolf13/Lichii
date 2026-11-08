@@ -60,6 +60,9 @@ enum class ImageFlagBits : u32 {
     /// device memory when the guest memory under it can hold data (Image::BindTiles), and only
     /// the parts written are uploaded.
     SparseTiles = 1 << 23,
+    /// Custom (EDEN_NX2_RT_EVICT): a render target that started undefined (EDEN_NX2_RT_FRESH);
+    /// deleted as soon as it goes unused for a few frames.
+    TransientTarget = 1 << 24,
 };
 DECLARE_ENUM_FLAG_OPERATORS(ImageFlagBits)
 

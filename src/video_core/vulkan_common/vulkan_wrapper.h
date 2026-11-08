@@ -683,6 +683,10 @@ public:
     }
 };
 
+/// Custom (EDEN_NX2_IMAGE_POOL_MIB): offers a released image to the recycling pool of
+/// MemoryAllocator. Returns true when the pool kept it (it must not be destroyed then).
+bool RecycleImage(VmaAllocator allocator, u64 key, VkImage image, VmaAllocation allocation) noexcept;
+
 class Image {
 public:
     explicit Image(VkImage handle_, VkImageUsageFlags usage_, VkDevice owner_,
@@ -691,6 +695,11 @@ public:
         : handle{handle_}, usage{usage_}, owner{owner_}, allocator{allocator_},
           allocation{allocation_}, dld{&dld_} {}
     Image() = default;
+
+    /// Non-zero: on release the image is offered to the recycling pool under this key.
+    void SetRecycleKey(u64 key) noexcept {
+        recycle_key = key;
+    }
 
     /// True for an image created without memory (an unbacked sparse image).
     bool IsUnbacked() const noexcept {
@@ -702,7 +711,8 @@ public:
 
     Image(Image&& rhs) noexcept
         : handle{std::exchange(rhs.handle, VkImage{})}, usage{rhs.usage}, owner{rhs.owner},
-          allocator{rhs.allocator}, allocation{rhs.allocation}, dld{rhs.dld} {}
+          allocator{rhs.allocator}, allocation{rhs.allocation}, dld{rhs.dld},
+          recycle_key{rhs.recycle_key} {}
 
     Image& operator=(Image&& rhs) noexcept {
         Release();
@@ -712,6 +722,7 @@ public:
         allocator = rhs.allocator;
         allocation = rhs.allocation;
         dld = rhs.dld;
+        recycle_key = rhs.recycle_key;
         return *this;
     }
 
@@ -756,6 +767,7 @@ private:
     VmaAllocator allocator = nullptr;
     VmaAllocation allocation = nullptr;
     const DeviceDispatch* dld = nullptr;
+    u64 recycle_key = 0;
 };
 
 struct MemoryLocation {

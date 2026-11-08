@@ -5,12 +5,17 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <list>
 #include <mutex>
 
 #include "common/common_types.h"
+
+#include <atomic>
+/// Custom timing: time spent waiting for SyncpointManager::guard in RegisterAction.
+inline std::atomic<long long> g_syncpoint_guard_wait_ns{};
 
 namespace Tegra {
 
@@ -60,6 +65,9 @@ public:
     void WaitGuest(u32 syncpoint_id, u32 expected_value);
 
     void WaitHost(u32 syncpoint_id, u32 expected_value);
+
+    /// Custom timing of actions run by Increment (EDEN_NX2_IPC_TIME=1).
+    static void RecordActionTime(const char* name, std::chrono::steady_clock::duration took);
 
     bool IsReadyGuest(u32 syncpoint_id, u32 expected_value) const {
         return syncpoints_guest[syncpoint_id].load(std::memory_order_acquire) >= expected_value;

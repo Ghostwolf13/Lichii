@@ -523,6 +523,10 @@ void Image::SetObjectNameEXT(const char* name) const {
 
 void Image::Release() const noexcept {
     if (handle) {
+        if (recycle_key != 0 && allocation != nullptr &&
+            RecycleImage(allocator, recycle_key, handle, allocation)) {
+            return;
+        }
         vmaDestroyImage(allocator, handle, allocation);
     }
 }

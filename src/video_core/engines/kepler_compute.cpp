@@ -27,6 +27,7 @@
 #include "video_core/nx2.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
+#include "video_core/nx2_fence_hold.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/game_dlss_status.h"
 #include "video_core/memory_manager.h"
@@ -36,6 +37,42 @@
 #endif
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/decoders.h"
+
+
+namespace {
+// Custom (EDEN_NX2_HOLD_SEMAPHORES=2): the new value is computed now, kept in the shadow and
+// latched for GPU waiters, while its memory write (what the guest CPU reads) waits on a held fence
+// until the downloads before it are in guest memory.
+template <typename Compute>
+bool ShadowSemaphoreRelease(Tegra::MemoryManager& memory_manager,
+                            VideoCore::RasterizerInterface* rasterizer, GPUVAddr address,
+                            u32 kind, Compute&& compute) {
+    if (VideoCommon::Nx2HoldSemaphoresMode() != 2) {
+        return false;
+    }
+    auto& shadow = VideoCommon::Nx2SemaphoreShadow::Get();
+    const auto device = memory_manager.GpuToCpuAddress(address);
+    std::optional<u32> shadowed;
+    if (device) {
+        shadowed = shadow.Lookup(*device);
+    }
+    const u32 base = shadowed ? *shadowed : memory_manager.Read<u32>(address);
+    const u32 value = compute(base);
+    const u64 ticket = device ? shadow.Set(*device, value) : 0;
+    if (device) {
+        Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
+    }
+    VideoCommon::g_nx2_fence_holdable_semaphore = kind;
+    rasterizer->SignalFence([mm = &memory_manager, address, value, device, ticket] {
+        mm->Write<u32>(address, value);
+        if (device) {
+            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
+            VideoCommon::Nx2SemaphoreShadow::Get().Clear(*device, ticket);
+        }
+    });
+    return true;
+}
+} // namespace
 
 namespace Tegra::Engines {
 
@@ -106,6 +143,19 @@ void KeplerCompute::ProcessNativeReportSemaphore(u32 argument) {
     }
     if ((argument >> 3) & 1) {
         const u32 reduction = (argument >> 9) & 7;
+        if (ShadowSemaphoreRelease(memory_manager, rasterizer, address, VideoCommon::Nx2SemReport, [=](u32 old_value) {
+                return reduction == 0   ? old_value + payload
+                       : reduction == 1 ? (std::min)(old_value, payload)
+                       : reduction == 2 ? (std::max)(old_value, payload)
+                       : reduction == 3 ? (old_value >= payload ? 0 : old_value + 1)
+                       : reduction == 4 ? (old_value == 0 || old_value > payload ? payload : old_value - 1)
+                       : reduction == 5 ? (old_value & payload)
+                       : reduction == 6 ? (old_value | payload)
+                                        : (old_value ^ payload);
+            })) {
+            return;
+        }
+        VideoCommon::g_nx2_fence_holdable_semaphore = VideoCommon::Nx2SemReport;
         rasterizer->SignalFence([this, address, payload, reduction] {
             const u32 old_value = memory_manager.Read<u32>(address);
             const u32 value = reduction == 0   ? old_value + payload
@@ -368,6 +418,11 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             [&](u64 address, u32 payload, u32 flags) {
                 if (!memory_manager.IsFullyMappedRange(address, sizeof(payload))) return false;
                 if (flags & (1U << 26)) {
+                    if (ShadowSemaphoreRelease(memory_manager, rasterizer, address, VideoCommon::Nx2SemQmdAdd,
+                                               [=](u32 old_value) { return old_value + payload; })) {
+                        return true;
+                    }
+                    VideoCommon::g_nx2_fence_holdable_semaphore = VideoCommon::Nx2SemQmdAdd;
                     rasterizer->SignalFence([this, address, payload] {
                         const u32 value = memory_manager.Read<u32>(address) + payload;
                         memory_manager.Write<u32>(address, value);
@@ -388,6 +443,12 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                     // NVN2 tracks QMD completion with a max release (bit 19) into a word other
                     // releases also advance: a plain write would move it backwards and leave
                     // GEQ acquires waiting forever.
+                    if (ShadowSemaphoreRelease(memory_manager, rasterizer, address, VideoCommon::Nx2SemQmdMax, [=](u32 old_value) {
+                            return (std::max)(old_value, payload);
+                        })) {
+                        return true;
+                    }
+                    VideoCommon::g_nx2_fence_holdable_semaphore = VideoCommon::Nx2SemQmdMax;
                     rasterizer->SignalFence([this, address, payload] {
                         const u32 value = (std::max)(memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);

@@ -7,6 +7,9 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -14,6 +17,7 @@
 #include <functional>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <queue>
 
@@ -25,6 +29,7 @@
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
+#include "video_core/nx2_fence_hold.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -81,11 +86,70 @@ public:
 
     void SignalFence(std::function<void()>&& func) {
         Nx2Profile::Scope profile_scope{Nx2Profile::Zone::Fence};
-        const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
+        const bool setting_delay = Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
         auto [should_flush, committed_flushes] = CommitCacheFlushes();
+        // Custom (EDEN_NX2_PREFLUSH=1): a fence that carries buffer downloads holds back its
+        // callback (the guest-visible syncpoint increment) until the host GPU reached it and the
+        // downloads were written to guest memory, so the guest never reads them stale. A
+        // syncpoint is also held while any earlier fence's downloads are still in flight: the
+        // game's compute "job finished" semaphores carry the downloads, the syncpoint the CPU
+        // waits on comes after them. Other fences stay immediate. EDEN_NX2_PREFLUSH=2 keeps preflush without this.
+        static const bool preflush_sync = [] {
+            const char* value = std::getenv("EDEN_NX2_PREFLUSH");
+            return value != nullptr && value[0] == '1';
+        }();
+        // Only syncpoint increments and compute semaphore releases are held back (they set
+        // g_nx2_fence_holdable): other callers (the query cache) free their slots right after
+        // this returns when fences are fast, so their callbacks must run now.
+        // Every later syncpoint increment waits too while one is outstanding, keeping them in
+        // order (ordering per syncpoint id only was measured slower: more read stalls).
+        const bool hold_semaphores = VideoCommon::Nx2HoldSemaphoresMode() != 0;
+        const bool holdable = std::exchange(VideoCommon::g_nx2_fence_holdable, false) |
+                              ((std::exchange(VideoCommon::g_nx2_fence_holdable_semaphore, 0u) &
+                                VideoCommon::Nx2HoldMask()) != 0 &&
+                               hold_semaphores);
+        bool delay_fence = setting_delay;
+        if (preflush_sync && !setting_delay && holdable &&
+            ((committed_flushes & BufferFlushes) != 0 ||
+             delayed_outstanding.load(std::memory_order_acquire) != 0 ||
+             pending_buffer_downloads.load(std::memory_order_acquire) != 0)) {
+            delay_fence = true;
+            delayed_outstanding.fetch_add(1, std::memory_order_acq_rel);
+            func = [this, inner = std::move(func)] {
+                inner();
+                delayed_outstanding.fetch_sub(1, std::memory_order_acq_rel);
+            };
+        }
+        if (preflush_sync && holdable) {
+            // Custom stats, once a second: how many syncpoint signals were held back, how many
+            // only because an earlier one was still outstanding (the chain), and the longest
+            // stretch the chain never emptied.
+            static u64 held{}, chained{}, immediate{};
+            static auto window = std::chrono::steady_clock::now();
+            static auto chain_start = window;
+            static double longest_chain_ms{};
+            const auto now = std::chrono::steady_clock::now();
+            if (delay_fence) {
+                ++held;
+                chained += (committed_flushes & BufferFlushes) == 0 ? 1 : 0;
+            } else {
+                ++immediate;
+                chain_start = now;
+            }
+            longest_chain_ms = (std::max)(
+                longest_chain_ms,
+                std::chrono::duration<double, std::milli>(now - chain_start).count());
+            if (now - window >= std::chrono::seconds{1}) {
+                LOG_INFO(HW_GPU, "SYNC held {} (chained {}) immediate {} longest chain {:.0f} ms",
+                         held, chained, immediate, longest_chain_ms);
+                held = chained = immediate = 0;
+                longest_chain_ms = 0;
+                window = now;
+            }
+        }
         if (!delay_fence && committed_flushes == 0 && SkipEmptyFence()) {
             Nx2Profile::Scope skipped_scope{Nx2Profile::Zone::FenceSkipped};
             func();
@@ -106,6 +170,9 @@ public:
             }
             pending_operations.emplace_back(std::move(uncommitted_operations));
             uncommitted_operations.clear(); // moved-from: make it empty explicitly
+        }
+        if ((committed_flushes & BufferFlushes) != 0) {
+            pending_buffer_downloads.fetch_add(1, std::memory_order_acq_rel);
         }
         pending_flushes.push_back(committed_flushes);
         QueueFence(new_fence);
@@ -136,6 +203,7 @@ public:
         }
         syncpoint_manager.IncrementGuest(value);
         std::function<void()> func([this, value] { syncpoint_manager.IncrementHost(value); });
+        VideoCommon::g_nx2_fence_holdable = true;
         SignalFence(std::move(func));
     }
 
@@ -211,6 +279,9 @@ private:
                 } else {
                     return;
                 }
+            }
+            if ((pending_flushes.front() & BufferFlushes) != 0) {
+                pending_buffer_downloads.fetch_sub(1, std::memory_order_acq_rel);
             }
             PopAsyncFlushes(pending_flushes.front());
             pending_flushes.pop_front();
@@ -291,6 +362,8 @@ private:
                 for (size_t i = 0; i < buffer_pops; ++i) {
                     buffer_cache.PopAsyncFlushes();
                 }
+                pending_buffer_downloads.fetch_sub(static_cast<u32>(buffer_pops),
+                                                   std::memory_order_acq_rel);
             }
             // Queries and operations keep their per-fence order.
             for (Released& released : batch) {
@@ -391,6 +464,10 @@ private:
     std::deque<std::deque<std::function<void()>>> pending_operations;
     std::deque<u8> pending_flushes; ///< Per fence: the caches that committed downloads
     u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)
+    /// Custom: syncpoint fences held back by EDEN_NX2_PREFLUSH=1 not yet released
+    std::atomic<u32> delayed_outstanding{};
+    /// Custom: fences with buffer downloads that the fencing thread has not popped yet
+    std::atomic<u32> pending_buffer_downloads{};
 
     std::mutex guard;
     std::mutex ring_guard;

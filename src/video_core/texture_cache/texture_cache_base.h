@@ -145,6 +145,22 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     std::vector<u8> astc_scan_buffer;
     u64 images_deleted{};
     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
+    std::map<u64, std::pair<u32, GPUVAddr>> uploaded_shapes; ///< Custom: TC_LOG upload tally
+    /// Custom (EDEN_NX2_RT_EVICT): fresh render targets to check, with their allocation tick and
+    /// how often they were found still in use.
+    struct TransientTarget {
+        ImageId id;
+        u64 allocation_tick;
+        u64 check_tick;
+        u32 survived;
+        bool read_only = false; ///< Depth image added by EDEN_NX2_DEPTH_TRANSIENT: never delete once GPU-written
+    };
+    std::deque<TransientTarget> transient_targets;
+    u64 transient_evictions{};
+    u64 transient_reuses{};
+    /// Custom (EDEN_NX2_RT_REUSE): moves a dead transient render target of the same shape to a new
+    /// address instead of creating a new image there. True when one was moved.
+    bool TryReuseTransientTarget(const ImageInfo& info, GPUVAddr gpu_addr);
     bool debug_stats{true}; ///< Collect what only the debug statistics lines use
 
     static constexpr s64 DEFAULT_EXPECTED_MEMORY = 1_GiB + 125_MiB;

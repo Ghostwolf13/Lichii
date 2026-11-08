@@ -718,6 +718,11 @@ private:
     /// Ranges the guest CPU read after GPU writes. A read that must flush downloads the GPU
     /// writes in all of them, so the reads that usually follow it find nothing left to flush.
     Common::RangeSet<DAddr> cpu_read_ranges;
+    /// Custom: Preflushable marks set for Switch 2 titles by EDEN_NX2_PREFLUSH, expired in TickFrame
+    Common::RangeSet<DAddr> nx2_preflushed_ranges;
+    /// Custom: frame each preflushed device page was marked, for EDEN_NX2_PREFLUSH_AGE
+    std::unordered_map<DAddr, u64> nx2_preflush_page_frame;
+    u64 nx2_preflush_aged_pages{};
     bool download_cpu_read_ranges{};
     Common::RangeSet<DAddr> gpu_modified_ranges;
     std::deque<Common::RangeSet<DAddr>> committed_gpu_modified_ranges;

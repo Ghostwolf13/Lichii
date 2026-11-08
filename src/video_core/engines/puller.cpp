@@ -11,6 +11,7 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/core.h"
+#include "video_core/nx2_fence_hold.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dma_pusher.h"
@@ -35,7 +36,14 @@ constexpr u32 Gf100BindValidMask =  0x1f0000 | Gf100BindClassMask;
 
 // Reads a semaphore word, flushing a GPU-written copy out of the buffer cache first.
 u32 ReadSemaphoreWord(DmaPusher& dma_pusher, GPUVAddr address) {
-    if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
+    const auto shadow_device = dma_pusher.memory_manager.GpuToCpuAddress(address);
+    // Custom (EDEN_NX2_HOLD_SEMAPHORES=2): a compute release whose memory write is still held.
+    if (shadow_device) {
+        if (const auto shadowed = VideoCommon::Nx2SemaphoreShadow::Get().Lookup(*shadow_device)) {
+            return *shadowed;
+        }
+    }
+    if (const auto& device = shadow_device;
         device && dma_pusher.rasterizer->MustFlushRegion(*device, sizeof(u32),
                                                           VideoCommon::CacheType::BufferCache)) {
         VideoCommon::GpuSplit::Get().Run(
@@ -518,7 +526,12 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
     // Acquires: check once after flushing pending fences; never block the GPU thread on them.
     DrainBack();
     ReleaseFences(dma_pusher);
-    const u32 word = dma_pusher.memory_manager.Read<u32>(address);
+    u32 word = dma_pusher.memory_manager.Read<u32>(address);
+    if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address)) {
+        if (const auto shadowed = VideoCommon::Nx2SemaphoreShadow::Get().Lookup(*device)) {
+            word = *shadowed;
+        }
+    }
     const bool ready = operation == 0   ? word == payload
                        : operation == 2 ? word >= payload
                        : operation == 3 ? static_cast<s32>(word - payload) >= 0

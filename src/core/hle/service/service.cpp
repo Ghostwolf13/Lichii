@@ -260,12 +260,59 @@ void CountRequest(const std::string& service, u32 command, u32 type, u32 result)
     LOG_INFO(Service, "ipc summary ({} kinds){}", lines.size(), text);
     counts.clear();
 }
+
+// Custom (EDEN_NX2_IPC_TIME=1): every 5 s, the service commands that took the most time in
+// total (handler time, plus time waiting for the service's lock), to find slow HLE calls.
+void TimeRequest(const std::string& service, u32 command, std::chrono::steady_clock::duration lock,
+                 std::chrono::steady_clock::duration handle) {
+    static const bool enabled = std::getenv("EDEN_NX2_IPC_TIME") != nullptr;
+    if (!enabled) {
+        return;
+    }
+    struct Stat {
+        u32 count{};
+        double handle_ms{}, lock_ms{}, max_ms{};
+    };
+    static std::mutex mutex;
+    static std::map<std::pair<std::string, u32>, Stat> stats;
+    static auto last = std::chrono::steady_clock::now();
+    const double handle_ms = std::chrono::duration<double, std::milli>(handle).count();
+    const double lock_ms = std::chrono::duration<double, std::milli>(lock).count();
+    std::scoped_lock lk{mutex};
+    auto& stat = stats[{service, command}];
+    ++stat.count;
+    stat.handle_ms += handle_ms;
+    stat.lock_ms += lock_ms;
+    stat.max_ms = (std::max)(stat.max_ms, handle_ms);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds{5}) {
+        return;
+    }
+    last = now;
+    std::vector<std::pair<double, std::string>> lines;
+    for (const auto& [key, st] : stats) {
+        lines.emplace_back(st.handle_ms + st.lock_ms,
+                           fmt::format("{}::{} {}x {:.0f} ms (lock {:.0f}, max {:.1f})", key.first,
+                                       key.second, st.count, st.handle_ms, st.lock_ms, st.max_ms));
+    }
+    std::sort(lines.begin(), lines.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::string text;
+    for (size_t i = 0; i < std::min<size_t>(lines.size(), 12); ++i) {
+        text += " | " + lines[i].second;
+    }
+    LOG_INFO(Service, "ipc time 5s{}", text);
+    stats.clear();
+}
 } // Anonymous namespace
 
 Result ServiceFrameworkBase::HandleSyncRequest(Kernel::KServerSession& session,
                                                HLERequestContext& ctx) {
+    const auto lock_begin = std::chrono::steady_clock::now();
     const auto guard = LockService();
+    const auto handle_begin = std::chrono::steady_clock::now();
     SCOPE_EXIT {
+        TimeRequest(service_name, ctx.GetCommand(), handle_begin - lock_begin,
+                    std::chrono::steady_clock::now() - handle_begin);
         const auto* cmd_buf = ctx.CommandBuffer();
         u32 result_word = 0;
         const u32 type = static_cast<u32>(ctx.GetCommandType());

@@ -10,6 +10,8 @@
 #include "common/container/unordered_map.h"
 #include <boost/icl/separate_interval_set.hpp>
 #include <windows.h>
+#include <psapi.h>
+#include <vector>
 #include "common/dynamic_library.h"
 
 #else // ^^^ Windows ^^^ vvv POSIX vvv
@@ -1013,6 +1015,94 @@ void HostMemory::HintCold(size_t physical_offset, size_t length,
     }
 }
 
+namespace {
+std::atomic<u64> g_zero_filled_bytes{};
+
+#ifdef _WIN32
+// A view page can be mapped without read access; such a page is simply skipped.
+bool IsZeroPage(const u8* page) {
+    __try {
+        const auto* words = reinterpret_cast<const volatile u64*>(page);
+        for (size_t i = 0; i < 4096 / sizeof(u64); ++i) {
+            if (words[i] != 0) {
+                return false;
+            }
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+#endif
+} // namespace
+
+u64 HostMemory::ZeroFilledBytes() noexcept {
+    return g_zero_filled_bytes.load(std::memory_order_relaxed);
+}
+
+std::pair<size_t, size_t> HostMemory::TrimZeroPages() const {
+#ifdef _WIN32
+    if (backing_base == nullptr) {
+        return {0, 0};
+    }
+    // Every resident page of the process, then only those of the backing and its views. The game
+    // may write a page between the check and the trim: trimming keeps the contents either way.
+    std::vector<ULONG_PTR> entries(size_t{1} << 22);
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        if (K32QueryWorkingSet(GetCurrentProcess(), entries.data(),
+                               static_cast<DWORD>(entries.size() * sizeof(ULONG_PTR)))) {
+            break;
+        }
+        if (GetLastError() != ERROR_BAD_LENGTH) {
+            return {0, 0};
+        }
+        entries.assign((std::max)(entries.size() * 2, size_t{entries[0]} + (size_t{1} << 18)), 0);
+        if (attempt == 3) {
+            return {0, 0};
+        }
+    }
+    const size_t count = (std::min)(size_t{entries[0]}, entries.size() - 1);
+    const auto in_range = [](uintptr_t page, const u8* base, size_t size) {
+        const auto begin = reinterpret_cast<uintptr_t>(base);
+        return base != nullptr && page >= begin && page < begin + size;
+    };
+    std::vector<uintptr_t> pages;
+    pages.reserve(count);
+    for (size_t i = 1; i <= count; ++i) {
+        const uintptr_t page = entries[i] & ~uintptr_t{0xFFF};
+        if (in_range(page, backing_base, backing_size) ||
+            in_range(page, virtual_base, virtual_size)) {
+            pages.push_back(page);
+        }
+    }
+    std::sort(pages.begin(), pages.end());
+    size_t trimmed = 0;
+    uintptr_t run_begin = 0;
+    uintptr_t run_end = 0;
+    const auto flush = [&] {
+        if (run_end != run_begin) {
+            VirtualUnlock(reinterpret_cast<void*>(run_begin), run_end - run_begin);
+            trimmed += run_end - run_begin;
+        }
+        run_begin = run_end = 0;
+    };
+    for (const uintptr_t page : pages) {
+        if (!IsZeroPage(reinterpret_cast<const u8*>(page))) {
+            continue;
+        }
+        if (page != run_end) {
+            flush();
+            run_begin = page;
+        }
+        run_end = page + 4096;
+    }
+    flush();
+    return {pages.size() * 4096, trimmed};
+#else
+    return {0, 0};
+#endif
+}
+
 void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
     if (length == 0) {
         return;
@@ -1047,6 +1137,7 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
 #endif
             if (!cleared) {
                 std::memset(backing_base + offset, 0, clear_end - offset);
+                g_zero_filled_bytes.fetch_add(clear_end - offset, std::memory_order_relaxed);
             }
             if (whole) {
                 granules[index].fetch_and(static_cast<u8>(~GranuleDirty), std::memory_order_release);

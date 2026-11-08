@@ -410,7 +410,7 @@ void TextureCache<P>::TickFrame() {
                           largest.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
         for (size_t i = 0; i < std::min<size_t>(12, largest.size()); ++i) {
             const Image& image = *largest[i].second;
-            LOG_DEBUG(HW_GPU, "  {} MiB: {:#x} {}x{}x{} layers {} levels {} format {} type {} flags {:#x}",
+            LOG_INFO(HW_GPU, "  {} MiB: {:#x} {}x{}x{} layers {} levels {} format {} type {} flags {:#x}",
                      largest[i].first >> 20, image.gpu_addr, image.info.size.width, image.info.size.height,
                      image.info.size.depth, image.info.resources.layers, image.info.resources.levels,
                      static_cast<u32>(image.info.format), static_cast<u32>(image.info.type),
@@ -420,8 +420,58 @@ void TextureCache<P>::TickFrame() {
         for (const auto& [format, total] : by_format) formats.emplace_back(total.first, format);
         std::sort(formats.rbegin(), formats.rend());
         for (size_t i = 0; i < std::min<size_t>(8, formats.size()); ++i) {
-            LOG_DEBUG(HW_GPU, "  format {}: {} MiB in {} images", formats[i].second, formats[i].first >> 20,
+            LOG_INFO(HW_GPU, "  format {}: {} MiB in {} images", formats[i].second, formats[i].first >> 20,
                      by_format[formats[i].second].second);
+        }
+        if (debug_stats) {
+            // Live render-target shapes: count, MiB, how many are transient, and how many were
+            // not used in the last 60 frames (dead weight).
+            struct ShapeStat {
+                u32 count{};
+                u64 bytes{};
+                u32 transient{};
+                u32 idle{};
+                u32 gpu_written{};
+                u32 tracked{};
+            };
+            std::map<std::tuple<u32, u32, u32>, ShapeStat> shapes;
+            for (const auto [image_id, image] : slot_images) {
+                if (image->info.format == PixelFormat::Invalid) {
+                    continue;
+                }
+                if (VideoCore::Surface::GetFormatType(image->info.format) ==
+                        VideoCore::Surface::SurfaceType::ColorTexture &&
+                    image->info.size.width * image->info.size.height < 640 * 360) {
+                    continue;
+                }
+                const bool is_depth = VideoCore::Surface::GetFormatType(image->info.format) !=
+                                      VideoCore::Surface::SurfaceType::ColorTexture;
+                if (!is_depth && False(image->flags & ImageFlagBits::GpuModified) &&
+                    False(image->flags & ImageFlagBits::TransientTarget)) {
+                    continue;
+                }
+                auto& stat = shapes[{static_cast<u32>(image->info.format), image->info.size.width,
+                                     image->info.size.height}];
+                ++stat.count;
+                stat.bytes += GetScaledImageSizeBytes(*image);
+                stat.transient += True(image->flags & ImageFlagBits::TransientTarget) ? 1 : 0;
+                stat.gpu_written += True(image->flags & ImageFlagBits::GpuModified) ? 1 : 0;
+                stat.tracked += True(image->flags & ImageFlagBits::Tracked) ? 1 : 0;
+                if (True(image->flags & ImageFlagBits::Registered) &&
+                    frame_tick - lru_cache.GetTick(image->lru_index) >= 60) {
+                    ++stat.idle;
+                }
+            }
+            std::vector<std::pair<u64, std::tuple<u32, u32, u32>>> order;
+            for (const auto& [key, stat] : shapes) order.emplace_back(stat.bytes, key);
+            std::sort(order.rbegin(), order.rend());
+            for (size_t i = 0; i < std::min<size_t>(12, order.size()); ++i) {
+                const auto& [format, width, height] = order[i].second;
+                const auto& stat = shapes[order[i].second];
+                LOG_INFO(HW_GPU, "  live target format {} {}x{}: {} images {} MiB, {} transient, {} idle 60+ frames, {} GPU-written, {} tracked",
+                         format, width, height, stat.count, stat.bytes >> 20, stat.transient, stat.idle,
+                         stat.gpu_written, stat.tracked);
+            }
         }
         if constexpr (requires { runtime.LogMemoryStatistics(); }) {
             runtime.LogMemoryStatistics();
@@ -439,16 +489,99 @@ void TextureCache<P>::TickFrame() {
         std::sort(shapes.rbegin(), shapes.rend());
         for (size_t i = 0; i < std::min<size_t>(10, shapes.size()); ++i) {
             const u64 key = shapes[i].second;
-            LOG_DEBUG(HW_GPU, "  created {}x: format {} type {} levels {} layers {} {}x{} (last at {:#x})",
+            LOG_INFO(HW_GPU, "  created {}x: format {} type {} levels {} layers {} {}x{} (last at {:#x})",
                      shapes[i].first, key >> 56, (key >> 52) & 0xF, (key >> 48) & 0xF,
                      (key >> 36) & 0xFFF, (key >> 18) & 0x3FFFF, key & 0x3FFFF,
                      created_shapes[key].second);
         }
         created_shapes.clear();
+        std::vector<std::pair<u32, u64>> up_shapes;
+        for (const auto& [key, value] : uploaded_shapes) up_shapes.emplace_back(value.first, key);
+        std::sort(up_shapes.rbegin(), up_shapes.rend());
+        for (size_t i = 0; i < std::min<size_t>(10, up_shapes.size()); ++i) {
+            const u64 key = up_shapes[i].second;
+            LOG_INFO(HW_GPU, "  uploaded {}x: format {} type {} levels {} layers {} {}x{} (last at {:#x})",
+                     up_shapes[i].first, key >> 56, (key >> 52) & 0xF, (key >> 48) & 0xF,
+                     (key >> 36) & 0xFFF, (key >> 18) & 0x3FFFF, key & 0x3FFFF,
+                     uploaded_shapes[key].second);
+        }
+        uploaded_shapes.clear();
         // The per-image and per-shape tallies only feed debug lines: skip them while those are off.
-        debug_stats = Common::Log::IsLevelEnabled(Common::Log::Class::HW_GPU, Common::Log::Level::Debug);
+        debug_stats = log_tc || Common::Log::IsLevelEnabled(Common::Log::Class::HW_GPU, Common::Log::Level::Debug);
         gc_deletes = gc_costly_deletes = gc_download_deletes = async_decodes_queued = 0;
         images_created = images_deleted = 0;
+    }
+    // Custom (EDEN_NX2_RT_EVICT=<frames>): fresh render targets unused for that many frames are
+    // deleted now, before the age-based collector reaches them. Ocarina's post effects leave ~15
+    // dead targets a frame; waiting 10-50 frames for each kept the cache at its limit, so the
+    // collector evicted real textures too (re-uploaded and re-decoded: ~10 GB per 600 frames).
+    static const u64 rt_evict_always = [] {
+        const char* value = std::getenv("EDEN_NX2_RT_EVICT");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
+    }();
+    // Custom (EDEN_NX2_RT_EVICT_PRESSURE=<frames>): the same early deletion, but only while the
+    // cache is over its expected size. Market Town's crowds made a new depth target every couple of
+    // frames; the dead ones piled up to 2.9 GB, the cache went 0.8 GB over the card's budget, the
+    // driver moved video memory into system RAM, and fps fell to 5-13.
+    static const u64 rt_evict_pressure = [] {
+        const char* value = std::getenv("EDEN_NX2_RT_EVICT_PRESSURE");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
+    }();
+    const bool under_pressure = total_used_memory > expected_memory;
+    const u64 rt_evict = rt_evict_always != 0
+                             ? rt_evict_always
+                             : (under_pressure ? rt_evict_pressure : 0ULL);
+    if (rt_evict == 0 && transient_targets.size() > 8192) {
+        // Not evicting now: keep the waiting list from growing without end.
+        transient_targets.erase(transient_targets.begin(),
+                                transient_targets.begin() + (transient_targets.size() - 8192));
+    }
+    if (rt_evict != 0) {
+        for (size_t budget = transient_targets.size(); budget != 0 && !transient_targets.empty();
+             --budget) {
+            TransientTarget entry = transient_targets.front();
+            if (frame_tick - entry.check_tick < rt_evict) {
+                break;
+            }
+            transient_targets.pop_front();
+            if (!slot_images.contains(entry.id)) {
+                continue;
+            }
+            Image& image = slot_images[entry.id];
+            if (image.allocation_tick != entry.allocation_tick ||
+                False(image.flags & ImageFlagBits::TransientTarget) ||
+                False(image.flags & ImageFlagBits::Registered)) {
+                continue;
+            }
+            const u64 last_use = lru_cache.GetTick(image.lru_index);
+            if (entry.read_only && True(image.flags & ImageFlagBits::GpuModified)) {
+                // The game drew into this depth image (e.g. a light-occlusion copy): it holds data
+                // only the GPU has, so it is not a throwaway (deleting it caused huge sun glare).
+                image.flags &= ~ImageFlagBits::TransientTarget;
+                continue;
+            }
+            if (frame_tick - last_use < rt_evict || True(image.flags & ImageFlagBits::IsDecoding)) {
+                // Still in use: check again later; one used for long is a lasting target.
+                if (++entry.survived < 4) {
+                    entry.check_tick = frame_tick;
+                    transient_targets.push_back(entry);
+                } else {
+                    image.flags &= ~ImageFlagBits::TransientTarget;
+                }
+                continue;
+            }
+            if (True(image.flags & ImageFlagBits::Tracked)) {
+                UntrackImage(image, entry.id);
+            }
+            UnregisterImage(entry.id);
+            DeleteImage(entry.id, false);
+            ++transient_evictions;
+        }
+    }
+    if (log_tc && frame_tick % 600 == 0 && (rt_evict_always != 0 || rt_evict_pressure != 0)) {
+        LOG_INFO(HW_GPU, "RT evict: {} dead render targets deleted early so far, {} waiting{}",
+                 transient_evictions, transient_targets.size(),
+                 under_pressure ? " (over the expected size now)" : "");
     }
     if (total_used_memory > minimum_memory) {
         RunGarbageCollector();
@@ -1770,6 +1903,16 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     }
     ++images_uploaded;
     uploaded_bytes += image.guest_size_bytes;
+    if (debug_stats) {
+        const ImageInfo& up = image.info;
+        const u64 key = (u64{static_cast<u32>(up.format)} << 56) | (u64{static_cast<u32>(up.type)} << 52) |
+                        (u64{static_cast<u32>(up.resources.levels) & 0xF} << 48) |
+                        (u64{static_cast<u32>(up.resources.layers) & 0xFFF} << 36) |
+                        (u64{up.size.width & 0x3FFFF} << 18) | (up.size.height & 0x3FFFF);
+        auto& shape = uploaded_shapes[key];
+        ++shape.first;
+        shape.second = image.gpu_addr;
+    }
     largest_upload = (std::max<u64>)(largest_upload, image.guest_size_bytes);
     if (!UploadInChunks(image)) {
         auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
@@ -2553,6 +2696,30 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
         it->second = slot_image_allocs.insert();
     }
     slot_image_allocs[it->second].images.push_back(image_id);
+    // Custom (EDEN_NX2_DEPTH_TRANSIENT=1): every new depth image joins the transient list, so the
+    // early deletion (RT_EVICT / RT_EVICT_PRESSURE) also reaches depth images the game only reads.
+    // Ocarina's Market pots room kept ~1800 of them alive (3.3 GB, never drawn into), which pushed
+    // the real textures out of video memory.
+    // =1: only depth images the game never draws into are deleted early (safe).
+    // =2: drawn ones too: Market pots room ~24 -> ~31 fps, but light-occlusion depth can be lost
+    //     (huge white sun glare in Kakariko, glowing gates).
+    static const int depth_transient = [] {
+        const char* value = std::getenv("EDEN_NX2_DEPTH_TRANSIENT");
+        return value != nullptr && (value[0] == '1' || value[0] == '2') ? value[0] - '0' : 0;
+    }();
+    if (depth_transient != 0) {
+        Image& new_image = slot_images[image_id];
+        if (VideoCore::Surface::GetFormatType(new_image.info.format) !=
+                VideoCore::Surface::SurfaceType::ColorTexture &&
+            False(new_image.flags & ImageFlagBits::TransientTarget) &&
+            False(new_image.flags & (ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
+                                     ImageFlagBits::SparseTiles)) &&
+            new_image.guest_size_bytes < (64u << 20)) {
+            new_image.flags |= ImageFlagBits::TransientTarget;
+            transient_targets.push_back(
+                {image_id, new_image.allocation_tick, frame_tick, 0, depth_transient == 1});
+        }
+    }
     return image_id;
 }
 
@@ -3043,6 +3210,181 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
 }
 
 template <class P>
+bool TextureCache<P>::TryReuseTransientTarget(const ImageInfo& requested, GPUVAddr gpu_addr) {
+    // Custom (EDEN_NX2_RT_REUSE=<frames>): Ocarina draws ~16 small depth targets and several
+    // full-size post-effect targets a frame, each at a new address in a transient heap. Every one
+    // was a new image (Vulkan image, memory, views, framebuffer) and the old ones died a few frames
+    // later. A target unused for that many frames is moved to the new address instead: same image,
+    // views and framebuffers, nothing created or freed.
+    static const u64 min_idle = [] {
+        const char* value = std::getenv("EDEN_NX2_RT_REUSE");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
+    }();
+    if (min_idle == 0 || transient_targets.empty()) {
+        return false;
+    }
+    ImageInfo info = requested;
+    info.native_tiling = gpu_memory->UsesNativeTiling();
+    if (info.type == ImageType::Linear || info.type == ImageType::e3D || info.is_sparse) {
+        return false;
+    }
+    const size_t size_bytes = CalculateGuestSizeInBytes(info);
+    const std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, size_bytes);
+    if (!cpu_addr || !gpu_memory->IsContinuousRange(gpu_addr, size_bytes)) {
+        return false;
+    }
+    const auto has_pending_download = [&](ImageId id) {
+        for (const auto& download : uncommitted_downloads) {
+            if (!download.is_swizzle && !download.retired_image && download.object_id == id) {
+                return true;
+            }
+        }
+        for (const auto& batch : committed_downloads) {
+            for (const auto& download : batch) {
+                if (!download.is_swizzle && !download.retired_image && download.object_id == id) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    static u64 tries{}, skipped_live{}, skipped_none{};
+    if ((++tries & 0x1FFF) == 0) {
+        LOG_INFO(HW_GPU, "RT reuse: {} new targets, {} reused, {} over a live image, {} without a match",
+                 tries, transient_reuses, skipped_live, skipped_none);
+    }
+    // Dead transient targets still registered under the new one (the heap reuses its addresses)
+    // are deleted first; anything else there leaves the overlap to the normal path.
+    boost::container::small_vector<ImageId, 8> dead_here;
+    bool live_here = false;
+    ForEachImageInRegion(*cpu_addr, size_bytes, [&](ImageId id, ImageBase&) {
+        Image& other = slot_images[id];
+        if (True(other.flags & ImageFlagBits::TransientTarget) &&
+            True(other.flags & ImageFlagBits::Registered) &&
+            False(other.flags & (ImageFlagBits::IsDecoding | ImageFlagBits::Sparse)) &&
+            frame_tick - lru_cache.GetTick(other.lru_index) >= min_idle && !has_pending_download(id)) {
+            dead_here.push_back(id);
+            return false;
+        }
+        live_here = true;
+        return true;
+    });
+    if (live_here) {
+        ++skipped_live;
+        return false;
+    }
+    for (const ImageId id : dead_here) {
+        Image& other = slot_images[id];
+        if (True(other.flags & ImageFlagBits::Tracked)) {
+            UntrackImage(other, id);
+        }
+        UnregisterImage(id);
+        DeleteImage(id, false);
+        ++transient_evictions;
+    }
+    const auto same_shape = [&](const ImageInfo& a) {
+        return a.format == info.format && a.type == info.type &&
+               a.resources.levels == info.resources.levels &&
+               a.resources.layers == info.resources.layers && a.size.width == info.size.width &&
+               a.size.height == info.size.height && a.size.depth == info.size.depth &&
+               a.block.width == info.block.width && a.block.height == info.block.height &&
+               a.block.depth == info.block.depth && a.layer_stride == info.layer_stride &&
+               a.maybe_unaligned_layer_stride == info.maybe_unaligned_layer_stride &&
+               a.num_samples == info.num_samples && a.tile_width_spacing == info.tile_width_spacing &&
+               a.native_tiling == info.native_tiling && a.rescaleable == info.rescaleable &&
+               a.downscaleable == info.downscaleable && !a.forced_flushed && !a.dma_downloaded &&
+               !a.is_sparse;
+    };
+    constexpr auto blocked = ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
+                             ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked |
+                             ImageFlagBits::IsDecoding | ImageFlagBits::Alias |
+                             ImageFlagBits::BadOverlap | ImageFlagBits::Remapped;
+    ImageId found{};
+    for (const TransientTarget& entry : transient_targets) {
+        if (!slot_images.contains(entry.id)) {
+            continue;
+        }
+        Image& candidate = slot_images[entry.id];
+        if (candidate.allocation_tick != entry.allocation_tick ||
+            False(candidate.flags & ImageFlagBits::TransientTarget) ||
+            False(candidate.flags & ImageFlagBits::Registered) || True(candidate.flags & blocked) ||
+            candidate.gpu_addr == gpu_addr || candidate.guest_size_bytes != size_bytes ||
+            !candidate.aliased_images.empty() || !candidate.overlapping_images.empty() ||
+            candidate.HasScaled() || !same_shape(candidate.info)) {
+            continue;
+        }
+        if (frame_tick - lru_cache.GetTick(candidate.lru_index) < min_idle) {
+            continue;
+        }
+        if (has_pending_download(entry.id)) {
+            continue;
+        }
+        found = entry.id;
+        break;
+    }
+    if (!found) {
+        ++skipped_none;
+        return false;
+    }
+    Image& image = slot_images[found];
+    // Retire it at the old address, as DeleteImage would, but keep the image and its views.
+    auto& dirty = maxwell3d->dirty.flags;
+    dirty[Dirty::RenderTargets] = true;
+    dirty[Dirty::ZetaBuffer] = true;
+    for (size_t rt = 0; rt < NUM_RT; ++rt) {
+        dirty[Dirty::ColorBuffer0 + rt] = true;
+    }
+    for (const ImageViewId image_view_id : image.image_view_ids) {
+        std::ranges::replace(render_targets.color_buffer_ids, image_view_id, ImageViewId{});
+        if (render_targets.depth_buffer_id == image_view_id) {
+            render_targets.depth_buffer_id = ImageViewId{};
+        }
+    }
+    RemoveImageViewReferences(image.image_view_ids);
+    if (True(image.flags & ImageFlagBits::Tracked)) {
+        UntrackImage(image, found);
+    }
+    UnregisterImage(found);
+    total_used_memory -= (std::min)(total_used_memory, ImageMemoryBytes(image));
+    const GPUVAddr old_gpu_addr = image.gpu_addr;
+    if (const auto alloc_it = image_allocs_table.find(old_gpu_addr);
+        alloc_it != image_allocs_table.end()) {
+        const ImageAllocId alloc_id = alloc_it->second;
+        auto& alloc_images = slot_image_allocs[alloc_id].images;
+        std::erase(alloc_images, found);
+        if (alloc_images.empty()) {
+            image_allocs_table.erase(alloc_it);
+            slot_image_allocs.erase(alloc_id);
+        }
+    }
+    for (const ImageViewId image_view_id : image.image_view_ids) {
+        auto& view = slot_image_views[image_view_id];
+        view.gpu_addr = gpu_addr + (view.gpu_addr - old_gpu_addr);
+    }
+    image.gpu_addr = gpu_addr;
+    image.cpu_addr = *cpu_addr;
+    image.cpu_addr_end = *cpu_addr + size_bytes;
+    image.flags &= ~ImageFlagBits::GpuModified;
+    image.flags |= ImageFlagBits::CpuModified;
+    image.modification_tick = 0;
+    image.dirty_layers.clear();
+    image.dirty_ranges.clear();
+    RegisterImage(found);
+    const auto [alloc_slot, is_new] = image_allocs_table.try_emplace(gpu_addr);
+    if (is_new) {
+        alloc_slot->second = slot_image_allocs.insert();
+    }
+    slot_image_allocs[alloc_slot->second].images.push_back(found);
+    if ((++transient_reuses & 0xFFF) == 1) {
+        LOG_INFO(HW_GPU, "RT reuse: {} render targets moved to a new address instead of created "
+                         "(last {}x{} format {})",
+                 transient_reuses, info.size.width, info.size.height,
+                 static_cast<u32>(info.format));
+    }
+    return true;
+}
+
+template <class P>
 ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAddr gpu_addr) {
     static constexpr u32 MaxRenderTargetSize = 32768;
     static constexpr s32 MaxRenderTargetLayers = 2048;
@@ -3052,6 +3394,7 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
                   info.size.height, info.resources.layers, gpu_addr);
         return ImageViewId{};
     }
+    TryReuseTransientTarget(info, gpu_addr);
     ImageId image_id{};
     bool delete_state = has_deleted_images;
     do {
@@ -3064,6 +3407,34 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
         return NULL_IMAGE_VIEW_ID;
     }
     Image& image = slot_images[image_id];
+    // Custom (EDEN_NX2_RT_FRESH=1): a render target the GPU never wrote and nothing copied into
+    // starts undefined instead of loading the guest memory under it. Ocarina places its post
+    // effects' targets at a new address every frame: each new one loaded 10-40 MB/frame of stale
+    // memory the next pass overwrites.
+    static const bool rt_fresh = [] {
+        const char* value = std::getenv("EDEN_NX2_RT_FRESH");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (rt_fresh && image.modification_tick == 0 &&
+        True(image.flags & ImageFlagBits::CpuModified) &&
+        False(image.flags & ImageFlagBits::GpuModified) &&
+        False(image.flags & (ImageFlagBits::SparseLayers | ImageFlagBits::SparseTiles |
+                             ImageFlagBits::Unbacked)) &&
+        image.dirty_layers.empty()) {
+        image.flags &= ~ImageFlagBits::CpuModified;
+        if (False(image.flags & ImageFlagBits::Tracked)) {
+            TrackImage(image, image_id);
+        }
+        if (False(image.flags & ImageFlagBits::TransientTarget)) {
+            image.flags |= ImageFlagBits::TransientTarget;
+            transient_targets.push_back({image_id, image.allocation_tick, frame_tick, 0});
+        }
+        static u64 skipped{};
+        if ((++skipped & 0xFFF) == 1) {
+            LOG_INFO(HW_GPU, "RT fresh: {} new render targets started undefined (last {}x{} at {:#x})",
+                     skipped, info.size.width, info.size.height, gpu_addr);
+        }
+    }
     const ImageViewType view_type = RenderTargetImageViewType(info);
     SubresourceBase base;
     if (image.info.type == ImageType::Linear) {

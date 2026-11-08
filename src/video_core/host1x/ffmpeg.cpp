@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <cstring>
 #include <string_view>
 #include <vector>
@@ -287,6 +288,27 @@ DecoderContext::DecoderContext(const Decoder& decoder) : m_decoder{decoder} {
 #if defined(__ANDROID__)
     m_codec_context->flags |= AV_CODEC_FLAG_LOW_DELAY;
     m_codec_context->flags2 |= AV_CODEC_FLAG2_FAST;
+#else
+    // Custom (EDEN_NX2_VDEC_LOW_DELAY=1): return each picture as soon as it is decoded instead of
+    // pipelining several frames (libdav1d max_frame_delay 1). Switch 2 games feed the decoder a
+    // frame or two at a time, so the pipeline mostly waits for input and the video falls behind.
+    static const bool low_delay = [] {
+        const char* value = std::getenv("EDEN_NX2_VDEC_LOW_DELAY");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (low_delay) {
+        m_codec_context->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    }
+    // Custom (EDEN_NX2_VDEC_FRAME_DELAY=N): libdav1d's max_frame_delay, frames decoded in parallel
+    // before the first picture comes out (default auto, ~4 here; 1 = low delay, but then OoT's
+    // opening drifts behind slowly). Ignored by decoders without the option.
+    static const int frame_delay = [] {
+        const char* value = std::getenv("EDEN_NX2_VDEC_FRAME_DELAY");
+        return value != nullptr ? std::atoi(value) : 0;
+    }();
+    if (frame_delay > 0 && m_codec_context->priv_data != nullptr) {
+        av_opt_set_int(m_codec_context->priv_data, "max_frame_delay", frame_delay, 0);
+    }
 #endif
 }
 

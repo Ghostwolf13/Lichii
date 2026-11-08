@@ -4,6 +4,14 @@
 // SPDX-FileCopyrightText: 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <functional>
+#include <vector>
+#include <string>
+#include <mutex>
+#include <map>
+#include <cstdlib>
+#include <algorithm>
+#include <chrono>
 #include "common/logging.h"
 #include "video_core/host1x/syncpoint_manager.h"
 
@@ -19,7 +27,9 @@ SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
         return {};
     }
 
+    const auto lock_begin = std::chrono::steady_clock::now();
     std::scoped_lock lk(guard);
+    g_syncpoint_guard_wait_ns += (std::chrono::steady_clock::now() - lock_begin).count();
     if (syncpoint.load(std::memory_order_relaxed) >= expected_value) {
         action();
         return {};
@@ -84,16 +94,84 @@ void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_var
                                  std::list<RegisteredAction>& action_storage) {
     auto new_value{syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1};
 
+    // Custom (EDEN_NX2_SYNCPT_UNLOCKED_ACTIONS=1): run the actions after releasing the guard, so a
+    // slow one doesn't hold up every other thread that registers or deregisters an action.
+    static const bool unlocked = [] {
+        const char* value = std::getenv("EDEN_NX2_SYNCPT_UNLOCKED_ACTIONS");
+        return value != nullptr && value[0] == '1';
+    }();
+    static const bool timed = std::getenv("EDEN_NX2_IPC_TIME") != nullptr;
+    const auto run = [&](std::function<void()>& action) {
+        if (!timed) {
+            action();
+            return;
+        }
+        const auto begin = std::chrono::steady_clock::now();
+        action();
+        RecordActionTime(action.target_type().name(), std::chrono::steady_clock::now() - begin);
+    };
+    if (unlocked) {
+        std::vector<std::function<void()>> due;
+        {
+            std::scoped_lock lk(guard);
+            auto it = action_storage.begin();
+            while (it != action_storage.end() && it->expected_value <= new_value) {
+                due.push_back(std::move(it->action));
+                it = action_storage.erase(it);
+            }
+            wait_cv.notify_all();
+        }
+        for (auto& action : due) {
+            run(action);
+        }
+        return;
+    }
     std::scoped_lock lk(guard);
     auto it = action_storage.begin();
     while (it != action_storage.end()) {
         if (it->expected_value > new_value) {
             break;
         }
-        it->action();
+        run(it->action);
         it = action_storage.erase(it);
     }
     wait_cv.notify_all();
+}
+
+void SyncpointManager::RecordActionTime(const char* name, std::chrono::steady_clock::duration took) {
+    static std::mutex mutex;
+    static std::map<std::string, std::pair<u64, double>> stats; // count, total ms
+    static double max_ms{};
+    static std::string max_name;
+    static auto window = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(took).count();
+    std::scoped_lock lk{mutex};
+    auto& [count, total] = stats[name];
+    ++count;
+    total += ms;
+    if (ms > max_ms) {
+        max_ms = ms;
+        max_name = name;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds{5}) {
+        return;
+    }
+    window = now;
+    std::vector<std::pair<double, std::string>> lines;
+    for (const auto& [key, value] : stats) {
+        lines.emplace_back(value.second, fmt::format("{:.0f} ms over {}x: {}", value.second,
+                                                     value.first, key.substr(0, 160)));
+    }
+    std::sort(lines.begin(), lines.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::string text;
+    for (size_t i = 0; i < std::min<size_t>(lines.size(), 4); ++i) {
+        text += " || " + lines[i].second;
+    }
+    LOG_INFO(HW_GPU, "syncpoint actions 5s (slowest {:.1f} ms: {}){}", max_ms,
+             max_name.substr(0, 160), text);
+    stats.clear();
+    max_ms = 0;
 }
 
 void SyncpointManager::Wait(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,

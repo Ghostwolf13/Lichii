@@ -26,7 +26,139 @@
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "common/settings.h"
 
+#include <cstdlib>
+#include <mutex>
+#include <unordered_map>
+
 namespace Vulkan {
+
+// Custom (EDEN_NX2_IMAGE_POOL_MIB=<n>): released images with memory of their own are kept, up to
+// n MiB, and handed to the next CreateImage with the same create info instead of being destroyed
+// and created again. Ocarina of Time places its post-processing render targets at a new address
+// every frame, so the texture cache made and destroyed ~15 images a frame (1920x1080 down to
+// 256x256): vmaCreateImage/vmaDestroyImage were ~12% of the GPU back thread. Images reach the
+// pool only once the texture cache has let them go (past the GPU's last use of them); a reused
+// image starts in an undefined layout like a new one, and its old contents are never read.
+namespace {
+struct RecycledImage {
+    VkImage image;
+    VmaAllocation allocation;
+    u64 bytes;
+    u64 serial;
+};
+
+struct ImagePool {
+    std::mutex mutex;
+    VmaAllocator allocator{};
+    u32 owners{};
+    u64 limit{};
+    u64 bytes{};
+    u64 serial{};
+    u64 hits{}, misses{}, kept{}, evicted{};
+    std::unordered_map<u64, std::vector<RecycledImage>> entries;
+
+    void EvictOldest() {
+        auto oldest = entries.end();
+        for (auto it = entries.begin(); it != entries.end(); ++it) {
+            if (!it->second.empty() &&
+                (oldest == entries.end() || it->second.front().serial < oldest->second.front().serial)) {
+                oldest = it;
+            }
+        }
+        if (oldest == entries.end()) {
+            return;
+        }
+        const RecycledImage victim = oldest->second.front();
+        oldest->second.erase(oldest->second.begin());
+        bytes -= victim.bytes;
+        ++evicted;
+        vmaDestroyImage(allocator, victim.image, victim.allocation);
+    }
+
+    void Flush() {
+        for (auto& [key, list] : entries) {
+            for (const RecycledImage& entry : list) {
+                vmaDestroyImage(allocator, entry.image, entry.allocation);
+            }
+        }
+        entries.clear();
+        bytes = 0;
+    }
+};
+
+ImagePool& GetImagePool() {
+    static ImagePool pool;
+    return pool;
+}
+
+u64 ImagePoolLimit() {
+    static const u64 limit = [] {
+        const char* value = std::getenv("EDEN_NX2_IMAGE_POOL_MIB");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) << 20 : u64{0};
+    }();
+    return limit;
+}
+
+/// 0 when the image can't be recycled (an unknown pNext structure).
+u64 ImageRecycleKey(const VkImageCreateInfo& ci, bool dedicated) {
+    u64 hash = 0xcbf29ce484222325ULL;
+    const auto mix = [&hash](u64 value) {
+        hash ^= value;
+        hash *= 0x100000001b3ULL;
+    };
+    for (const void* next = ci.pNext; next != nullptr;) {
+        const auto* base = static_cast<const VkBaseInStructure*>(next);
+        if (base->sType != VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO) {
+            return 0;
+        }
+        const auto* list = static_cast<const VkImageFormatListCreateInfo*>(next);
+        mix(0xF0F0);
+        for (u32 i = 0; i < list->viewFormatCount; ++i) {
+            mix(static_cast<u64>(list->pViewFormats[i]));
+        }
+        next = base->pNext;
+    }
+    mix(ci.flags);
+    mix(ci.imageType);
+    mix(ci.format);
+    mix(ci.extent.width);
+    mix(ci.extent.height);
+    mix(ci.extent.depth);
+    mix(ci.mipLevels);
+    mix(ci.arrayLayers);
+    mix(ci.samples);
+    mix(ci.tiling);
+    mix(ci.usage);
+    mix(ci.sharingMode);
+    mix(ci.initialLayout);
+    mix(dedicated ? 1 : 0);
+    return hash == 0 ? 1 : hash;
+}
+} // namespace
+
+namespace vk {
+bool RecycleImage(VmaAllocator allocator, u64 key, VkImage image, VmaAllocation allocation) noexcept {
+    ImagePool& pool = GetImagePool();
+    std::scoped_lock lk{pool.mutex};
+    if (pool.owners == 0 || pool.allocator != allocator || pool.limit == 0) {
+        return false;
+    }
+    VmaAllocationInfo info{};
+    vmaGetAllocationInfo(allocator, allocation, &info);
+    const u64 bytes = info.size;
+    if (bytes > pool.limit / 4) {
+        return false;
+    }
+    while (pool.bytes + bytes > pool.limit && pool.bytes != 0) {
+        pool.EvictOldest();
+    }
+    pool.entries[key].push_back({image, allocation, bytes, ++pool.serial});
+    pool.bytes += bytes;
+    ++pool.kept;
+    return true;
+}
+} // namespace vk
+
 namespace {
 
 // Helpers translating MemoryUsage to flags/usage
@@ -202,9 +334,28 @@ MemoryAllocator::MemoryAllocator(const Device &device_)
             }
         });
     }
+    if (const u64 limit = ImagePoolLimit(); limit != 0) {
+        ImagePool& pool = GetImagePool();
+        std::scoped_lock lk{pool.mutex};
+        if (pool.owners == 0 || pool.allocator == allocator) {
+            pool.allocator = allocator;
+            pool.limit = limit;
+            ++pool.owners;
+            image_pool_owner = true;
+            LOG_INFO(Render_Vulkan, "Image recycling pool: up to {} MiB", limit >> 20);
+        }
+    }
 }
 
-MemoryAllocator::~MemoryAllocator() = default;
+MemoryAllocator::~MemoryAllocator() {
+    if (image_pool_owner) {
+        ImagePool& pool = GetImagePool();
+        std::scoped_lock lk{pool.mutex};
+        if (--pool.owners == 0) {
+            pool.Flush();
+        }
+    }
+}
 
 vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicated) const
 {
@@ -223,6 +374,28 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
             .pUserData = nullptr,
             .priority = 0.f,
     };
+
+    const u64 recycle_key = image_pool_owner ? ImageRecycleKey(ci, dedicated) : 0;
+    if (recycle_key != 0) {
+        ImagePool& pool = GetImagePool();
+        std::scoped_lock lk{pool.mutex};
+        const auto it = pool.entries.find(recycle_key);
+        if (it != pool.entries.end() && !it->second.empty()) {
+            const RecycledImage entry = it->second.back();
+            it->second.pop_back();
+            pool.bytes -= entry.bytes;
+            if ((++pool.hits & 0x3FFF) == 0) {
+                LOG_INFO(Render_Vulkan,
+                         "Image recycling pool: {} reused, {} new, {} kept, {} evicted, {} MiB held",
+                         pool.hits, pool.misses, pool.kept, pool.evicted, pool.bytes >> 20);
+            }
+            vk::Image image(entry.image, ci.usage, *device.GetLogical(), allocator, entry.allocation,
+                            device.GetDispatchLoader());
+            image.SetRecycleKey(recycle_key);
+            return image;
+        }
+        ++pool.misses;
+    }
 
     VkImage handle{};
     VmaAllocation allocation{};
@@ -300,8 +473,12 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
         );
     }
 
-    return vk::Image(handle, ci.usage, *device.GetLogical(), allocator, allocation,
-                        device.GetDispatchLoader());
+    vk::Image image(handle, ci.usage, *device.GetLogical(), allocator, allocation,
+                    device.GetDispatchLoader());
+    if (recycle_key != 0 && allocation != nullptr) {
+        image.SetRecycleKey(recycle_key);
+    }
+    return image;
 }
 
 vk::Image MemoryAllocator::CreateUnbackedImage(const VkImageCreateInfo &ci, bool aliased) const {
