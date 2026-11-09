@@ -592,8 +592,15 @@ void TextureCache<P>::TickFrame() {
     // way the collector handles images it doesn't download.
     if (const u64 rt_evict = RtEvictPressureFrames();
         rt_evict != 0 && total_used_memory > expected_memory) {
+        // At most this many deletions a frame, so a long queue doesn't turn into one long frame
+        // when pressure starts; the Market needs about 10 a frame.
+        static constexpr u32 MaxEvictionsPerFrame = 64;
+        u32 evicted = 0;
         for (size_t budget = transient_targets.size(); budget != 0 && !transient_targets.empty();
              --budget) {
+            if (evicted >= MaxEvictionsPerFrame || total_used_memory <= expected_memory) {
+                break;
+            }
             TransientTarget entry = transient_targets.front();
             if (frame_tick - entry.check_tick < rt_evict) {
                 break;
@@ -626,6 +633,7 @@ void TextureCache<P>::TickFrame() {
             UnregisterImage(entry.id);
             DeleteImage(entry.id, false);
             ++transient_evictions;
+            ++evicted;
         }
     } else if (transient_targets.size() > 8192) {
         // Not evicting now: keep the waiting list from growing without end.
@@ -3094,6 +3102,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     Image& new_image = slot_images[new_image_id];
 
     new_image.allocation_tick = frame_tick;
+    last_created_image = new_image_id;
     {
         // Which shapes are being created (periodic log): format, type, levels, layers, size.
         const u64 key = (u64{static_cast<u32>(new_info.format)} << 56) |
@@ -3524,6 +3533,7 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
     }
     ImageId image_id{};
     bool delete_state = has_deleted_images;
+    last_created_image = ImageId{};
     do {
         has_deleted_images = false;
         image_id = FindOrInsertImage(info, gpu_addr);
@@ -3534,13 +3544,14 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
         return NULL_IMAGE_VIEW_ID;
     }
     Image& image = slot_images[image_id];
-    // EDEN_NX2_RT_EVICT_PRESSURE (Switch 2 titles): a render target the GPU never wrote and
-    // nothing copied into starts undefined instead of loading the guest memory under it, and is
-    // remembered so TickFrame can delete it early once it is dead. Ocarina of Time places its post
-    // effects' targets at a new address every frame: each new one loaded 10-40 MB of stale memory
-    // the next pass overwrites.
+    // EDEN_NX2_RT_EVICT_PRESSURE (Switch 2 titles): a render target this call just created, that
+    // the GPU never wrote and nothing copied into, starts undefined instead of loading the guest
+    // memory under it, and is remembered so TickFrame can delete it early once it is dead. Ocarina
+    // of Time places its post effects' targets at a new address every frame: each new one loaded
+    // 10-40 MB of stale memory the next pass overwrites. An image that existed before keeps its
+    // pending upload: the CPU may have written it since, and a draw may cover only part of it.
     if (RtEvictPressureFrames() != 0 && Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
-        image.modification_tick == 0 && True(image.flags & ImageFlagBits::CpuModified) &&
+        image_id == last_created_image && image.modification_tick == 0 && True(image.flags & ImageFlagBits::CpuModified) &&
         False(image.flags & ImageFlagBits::GpuModified) &&
         False(image.flags & (ImageFlagBits::SparseLayers | ImageFlagBits::SparseTiles |
                              ImageFlagBits::Unbacked)) &&

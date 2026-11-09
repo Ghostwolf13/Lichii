@@ -7,6 +7,7 @@
 #pragma once
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <deque>
 #include <limits>
@@ -197,12 +198,26 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     std::deque<TransientTarget> transient_targets;
     u64 transient_evictions{};
     u64 logged_transient_evictions{};
+    /// Image made by the latest JoinImages call; FindRenderTargetView uses it to tell a target it
+    /// just created from one that already existed (and may hold CPU writes not uploaded yet).
+    ImageId last_created_image{};
     /// EDEN_NX2_RT_EVICT_PRESSURE=<frames> (default 8, 0 = off): how long a fresh render target
-    /// may go unused before it is deleted while the cache is over its expected size.
+    /// may go unused before it is deleted while the cache is over its expected size. A value that
+    /// isn't a plain number of frames (empty, negative, other text, out of range) keeps the default.
     [[nodiscard]] static u64 RtEvictPressureFrames() {
         static const u64 frames = [] {
+            constexpr u64 default_frames = 8;
             const char* value = std::getenv("EDEN_NX2_RT_EVICT_PRESSURE");
-            return value != nullptr ? std::strtoull(value, nullptr, 10) : u64{8};
+            if (value == nullptr || *value < '0' || *value > '9') {
+                return default_frames;
+            }
+            char* end = nullptr;
+            errno = 0;
+            const unsigned long long parsed = std::strtoull(value, &end, 10);
+            if (errno != 0 || *end != '\0') {
+                return default_frames;
+            }
+            return static_cast<u64>(parsed);
         }();
         return frames;
     }
