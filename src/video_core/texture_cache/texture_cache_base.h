@@ -187,6 +187,22 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     u64 scale_epoch{};
     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
     bool debug_stats{}; ///< Collect what only the debug statistics lines use
+    /// Render targets their lookup created, to check for early deletion (EvictDeadRenderTargets),
+    /// with their allocation tick and how often they were found still in use.
+    struct TransientTarget {
+        ImageId id;
+        u64 allocation_tick;
+        u64 check_tick;
+        u32 survived;
+    };
+    std::deque<TransientTarget> transient_targets;
+    u64 transient_evictions{};
+    u64 logged_transient_evictions{};
+    /// Image made by the latest JoinImages call; FindRenderTargetView uses it to tell a target it
+    /// just created from one that already existed.
+    ImageId last_created_image{};
+    /// Deletes dead render targets early while the cache is over its expected size.
+    void EvictDeadRenderTargets();
     /// EDEN_NX2_MEM_TRACE: when the last memory trace lines were logged.
     std::chrono::steady_clock::time_point mem_trace_time{};
 

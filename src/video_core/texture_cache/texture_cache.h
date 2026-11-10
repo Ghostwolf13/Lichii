@@ -363,6 +363,79 @@ void TextureCache<P>::LogThresholds() const {
 }
 
 template <class P>
+void TextureCache<P>::EvictDeadRenderTargets() {
+    // While the cache is over its expected size, render targets their lookup created and that went
+    // unused for DeadTargetFrames are deleted now, before the age-based collector reaches them.
+    // In Ocarina of Time's Market the crowds make a new target every couple of frames; the dead
+    // ones piled up, the cache went over the card's budget, the driver moved video memory into
+    // system RAM and on an 8 GB card the device was lost after ~1-4 min. The collector can't keep
+    // up there: it waits 10-50 frames and downloads each GPU-written image first. These are
+    // marked stale instead, the way the collector handles an image it doesn't download.
+    static constexpr u64 DeadTargetFrames = 8;
+    // At most this many deletions a frame, so a long queue doesn't turn into one long frame when
+    // pressure starts; the Market needs about 10 a frame.
+    static constexpr u32 MaxEvictionsPerFrame = 64;
+    // How often a target found still in use is checked again before it counts as a lasting one.
+    static constexpr u32 MaxChecks = 4;
+    // Waiting list size kept while the cache is under its expected size.
+    static constexpr size_t MaxWaiting = 8192;
+    if (total_used_memory <= expected_memory) {
+        if (transient_targets.size() > MaxWaiting) {
+            transient_targets.erase(transient_targets.begin(),
+                                    transient_targets.begin() +
+                                        static_cast<std::ptrdiff_t>(transient_targets.size() - MaxWaiting));
+        }
+        return;
+    }
+    u32 evicted = 0;
+    for (size_t budget = transient_targets.size(); budget != 0 && !transient_targets.empty();
+         --budget) {
+        if (evicted >= MaxEvictionsPerFrame || total_used_memory <= expected_memory) {
+            break;
+        }
+        TransientTarget entry = transient_targets.front();
+        if (frame_tick - entry.check_tick < DeadTargetFrames) {
+            break;
+        }
+        transient_targets.pop_front();
+        if (!slot_images.contains(entry.id)) {
+            continue;
+        }
+        Image& image = slot_images[entry.id];
+        if (image.allocation_tick != entry.allocation_tick ||
+            False(image.flags & ImageFlagBits::TransientTarget) ||
+            False(image.flags & ImageFlagBits::Registered)) {
+            continue;
+        }
+        const u64 last_use = lru_cache.GetTick(image.lru_index);
+        if (frame_tick - last_use < DeadTargetFrames ||
+            True(image.flags & ImageFlagBits::IsDecoding)) {
+            // Still in use: check again later; one used for long is a lasting target.
+            if (++entry.survived < MaxChecks) {
+                entry.check_tick = frame_tick;
+                transient_targets.push_back(entry);
+            } else {
+                image.flags &= ~ImageFlagBits::TransientTarget;
+            }
+            continue;
+        }
+        MarkStale(image); // before UntrackImage (see MarkStale)
+        if (True(image.flags & ImageFlagBits::Tracked)) {
+            UntrackImage(image, entry.id);
+        }
+        UnregisterImage(entry.id);
+        DeleteImage(entry.id, false);
+        ++transient_evictions;
+        ++evicted;
+    }
+    if (frame_tick % 600 == 0 && transient_evictions != logged_transient_evictions) {
+        LOG_INFO(HW_GPU, "Dead render targets deleted early: {} so far, {} waiting",
+                 transient_evictions, transient_targets.size());
+        logged_transient_evictions = transient_evictions;
+    }
+}
+
+template <class P>
 void TextureCache<P>::TickFrame() {
     // Upload buffers grown for one huge image (title 1's 341 MiB terrain layer pools) are freed
     // rather than kept for the rest of the session.
@@ -602,6 +675,7 @@ void TextureCache<P>::TickFrame() {
         gc_deletes = gc_costly_deletes = gc_download_deletes = async_decodes_queued = 0;
         images_created = images_deleted = 0;
     }
+    EvictDeadRenderTargets();
     // An image that could not be made at all: the driver is out of memory whatever the counts
     // say, so collect as at the critical threshold.
     bool out_of_memory = false;
@@ -3142,6 +3216,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     Image& new_image = slot_images[new_image_id];
 
     new_image.allocation_tick = frame_tick;
+    last_created_image = new_image_id;
     {
         // Which shapes are being created (periodic log): format, type, levels, layers, size.
         const u64 key = (u64{static_cast<u32>(new_info.format)} << 56) |
@@ -3591,6 +3666,7 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
     }
     ImageId image_id{};
     bool delete_state = has_deleted_images;
+    last_created_image = ImageId{};
     do {
         has_deleted_images = false;
         image_id = FindOrInsertImage(info, gpu_addr);
@@ -3601,6 +3677,15 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
         return NULL_IMAGE_VIEW_ID;
     }
     Image& image = slot_images[image_id];
+    // A render target this lookup just created, on a Switch 2 title, is a candidate for early
+    // deletion once it goes unused (EvictDeadRenderTargets). Its upload is unchanged.
+    if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) && image_id == last_created_image &&
+        image.modification_tick == 0 && False(image.flags & ImageFlagBits::TransientTarget) &&
+        False(image.flags & (ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
+                             ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked))) {
+        image.flags |= ImageFlagBits::TransientTarget;
+        transient_targets.push_back({image_id, image.allocation_tick, frame_tick, 0});
+    }
     const ImageViewType view_type = RenderTargetImageViewType(info);
     SubresourceBase base;
     if (image.info.type == ImageType::Linear) {
