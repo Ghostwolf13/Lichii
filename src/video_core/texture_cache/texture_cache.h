@@ -290,6 +290,7 @@ void TextureCache<P>::MarkStale(const ImageBase& image) {
 
 template <class P>
 void TextureCache<P>::ClearStale(DAddr addr, size_t size) {
+    evicted_pages.Clear(addr, size, [](DAddr, u64) {});
     stale_pages.Clear(addr, size, [this](DAddr run_addr, u64 run_size) {
         device_memory.UpdatePagesCachedCount(run_addr, run_size, -1);
     });
@@ -370,7 +371,12 @@ void TextureCache<P>::EvictDeadRenderTargets() {
     // ones piled up, the cache went over the card's budget, the driver moved video memory into
     // system RAM and on an 8 GB card the device was lost after ~1-4 min. The collector can't keep
     // up there: it waits 10-50 frames and downloads each GPU-written image first. These are
-    // marked stale instead, the way the collector handles an image it doesn't download.
+    // marked stale instead, the way the collector handles an image it doesn't download, with two
+    // exceptions so no data the game reads again is lost:
+    // - targets under MinEvictBytes (text and label boxes sized to their contents) are left to
+    //   the collector: they barely relieve memory and were most of what the game read back;
+    // - a shape the game read back after an early deletion (FillImageViews) is written back to
+    //   guest memory before deletion, a few a frame, or left to the collector if it can't be.
     static constexpr u64 DeadTargetFrames = 8;
     // At most this many deletions a frame, so a long queue doesn't turn into one long frame when
     // pressure starts; the Market needs about 10 a frame.
@@ -388,6 +394,10 @@ void TextureCache<P>::EvictDeadRenderTargets() {
         return;
     }
     u32 evicted = 0;
+    // Shapes the game read back after an early deletion are written back to guest memory first,
+    // at most this many a frame; the rest wait for a later frame.
+    static constexpr u32 MaxSavesPerFrame = 4;
+    u32 saved = 0;
     for (size_t budget = transient_targets.size(); budget != 0 && !transient_targets.empty();
          --budget) {
         if (evicted >= MaxEvictionsPerFrame || total_used_memory <= expected_memory) {
@@ -419,7 +429,50 @@ void TextureCache<P>::EvictDeadRenderTargets() {
             }
             continue;
         }
-        MarkStale(image); // before UntrackImage (see MarkStale)
+        if (image.guest_size_bytes < MinEvictBytes) {
+            // Small targets (text and label boxes, sized to their contents) barely relieve memory
+            // and are the ones read back most often: leave them to the collector.
+            image.flags &= ~ImageFlagBits::TransientTarget;
+            ++evict_small_kept;
+            continue;
+        }
+        if (readback_shapes.contains(RtShapeKey(image))) {
+            if (!IsDownloadable(image) || True(image.flags & ImageFlagBits::BadOverlap)) {
+                // Can't be written back safely: leave it to the collector.
+                image.flags &= ~ImageFlagBits::TransientTarget;
+                ++evict_spared;
+                continue;
+            }
+            if (saved >= MaxSavesPerFrame) {
+                entry.check_tick = frame_tick;
+                transient_targets.push_back(entry);
+                continue;
+            }
+            auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
+            const auto copies = FullDownloadCopies(image.info);
+            image.DownloadMemory(map, copies);
+            runtime.Finish();
+            SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span,
+                         swizzle_data_buffer);
+            ClearStaleImage(image);
+            ++saved;
+            ++evict_saved;
+        } else {
+            MarkStale(image); // before UntrackImage (see MarkStale)
+            evicted_pages.Mark(image.cpu_addr, image.guest_size_bytes, [](DAddr, u64) {});
+            const u64 sequence = ++eviction_sequence;
+            recent_evictions[image.cpu_addr] = {image.cpu_addr + image.guest_size_bytes,
+                                                RtShapeKey(image), sequence};
+            recent_eviction_order.emplace_back(image.cpu_addr, sequence);
+            if (recent_eviction_order.size() > MaxRecentEvictions) {
+                const auto [old_addr, old_sequence] = recent_eviction_order.front();
+                recent_eviction_order.pop_front();
+                if (const auto it = recent_evictions.find(old_addr);
+                    it != recent_evictions.end() && it->second.sequence == old_sequence) {
+                    recent_evictions.erase(it);
+                }
+            }
+        }
         if (True(image.flags & ImageFlagBits::Tracked)) {
             UntrackImage(image, entry.id);
         }
@@ -431,6 +484,12 @@ void TextureCache<P>::EvictDeadRenderTargets() {
     if (frame_tick % 600 == 0 && transient_evictions != logged_transient_evictions) {
         LOG_INFO(HW_GPU, "Dead render targets deleted early: {} so far, {} waiting",
                  transient_evictions, transient_targets.size());
+        LOG_INFO(HW_GPU, "Dead render targets: {} small ones and {} read-back shapes not "
+                         "downloadable left to the collector, {} written back before deletion; "
+                         "{} of {} images made over deleted pages were sampled before any draw, "
+                         "{} shapes known",
+                 evict_small_kept, evict_spared, evict_saved, evict_read_back, evict_born,
+                 readback_shapes.size());
         logged_transient_evictions = transient_evictions;
     }
 }
@@ -775,6 +834,37 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
         }
         for (ImageViewInOut& view : views) {
             view.id = VisitImageView(view.index, compute);
+            if (view.id != NULL_IMAGE_VIEW_ID) {
+                const ImageId probe_id = slot_image_views[view.id].image_id;
+                if (probe_id != NULL_IMAGE_ID) {
+                    Image& probe = slot_images[probe_id];
+                    if (True(probe.flags & ImageFlagBits::EvictBorn)) {
+                        probe.flags &= ~ImageFlagBits::EvictBorn;
+                        if (False(probe.flags & ImageFlagBits::GpuModified)) {
+                            // Sampled before the GPU drew into it: the game read back what an
+                            // early deletion threw away.
+                            const u64 key = RtShapeKey(probe);
+                            ++evict_read_back;
+                            // From now on, targets of the deleted one's shape are written back
+                            // before an early deletion (EvictDeadRenderTargets).
+                            auto it = recent_evictions.upper_bound(probe.cpu_addr);
+                            if (it != recent_evictions.begin() &&
+                                (--it)->second.end > probe.cpu_addr) {
+                                const u64 deleted = it->second.shape;
+                                if (readback_shapes.insert(deleted).second) {
+                                    LOG_INFO(HW_GPU,
+                                             "Dead render targets: format {} {}x{} was read back "
+                                             "(as format {} {}x{}), now written back before "
+                                             "deletion",
+                                             deleted >> 40, (deleted >> 20) & 0xFFFFF,
+                                             deleted & 0xFFFFF, key >> 40, (key >> 20) & 0xFFFFF,
+                                             key & 0xFFFFF);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if (blacklist) {
                 if (view.blacklist && view.id != NULL_IMAGE_VIEW_ID) {
                     const ImageViewBase& image_view = slot_image_views[view.id];
@@ -2218,6 +2308,10 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         TrackImage(image, image_id);
     }
 
+    if (evicted_pages.IsAll(image.cpu_addr, image.guest_size_bytes)) {
+        image.flags |= ImageFlagBits::EvictBorn;
+        ++evict_born;
+    }
     // Made where a dropped GPU-written image left stale bytes (MarkStale): nothing to upload.
     // Pages the buffer cache wrote on the GPU may hold data written back since: upload those.
     if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) && image.dirty_layers.empty() &&

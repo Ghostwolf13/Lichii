@@ -64,6 +64,9 @@ enum class ImageFlagBits : u32 {
     /// A render target its lookup created (Switch 2 titles); deleted early once it goes unused
     /// while the cache is over its expected size (TextureCache::EvictDeadRenderTargets).
     TransientTarget = 1 << 24,
+    /// Made over pages an early-deleted render target left; cleared at its first sampling, which
+    /// tells whether the game read those pages back (TextureCache::FillImageViews).
+    EvictBorn = 1 << 25,
 };
 DECLARE_ENUM_FLAG_OPERATORS(ImageFlagBits)
 

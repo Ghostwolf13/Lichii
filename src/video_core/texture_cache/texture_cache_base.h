@@ -17,6 +17,7 @@
 #include <type_traits>
 // TODO: find out which don't require stable iters
 #include <unordered_map>
+#include <unordered_set>
 #include "video_core/page_filter.h"
 #include "common/container/unordered_map.h"
 #include "common/container/unordered_set.h"
@@ -670,6 +671,32 @@ private:
     /// Clears every device range [gpu_addr, gpu_addr + size) maps to.
     void ClearStaleGpu(GPUVAddr gpu_addr, size_t size);
     StalePages stale_pages;
+    /// Pages early-deleted render targets left (EvictDeadRenderTargets); a CPU write clears them.
+    StalePages evicted_pages;
+    /// Render target shapes (format, width, height) the game read back after an early deletion:
+    /// written back before one is deleted early, or left to the collector.
+    std::unordered_set<u64> readback_shapes;
+    /// Targets smaller than this aren't deleted early: they barely relieve memory.
+    static constexpr u64 MinEvictBytes = u64{1} << 20;
+    /// The latest early deletions, to find the shape a read-back image was made over.
+    static constexpr size_t MaxRecentEvictions = 16384;
+    struct RecentEviction {
+        DAddr end;
+        u64 shape;
+        u64 sequence;
+    };
+    std::map<DAddr, RecentEviction> recent_evictions;
+    std::deque<std::pair<DAddr, u64>> recent_eviction_order;
+    u64 eviction_sequence{};
+    u64 evict_born{};       ///< Images made over early-deleted pages
+    u64 evict_read_back{};  ///< ...of which sampled before any draw
+    u64 evict_saved{};      ///< Read-back shapes written back before deletion
+    u64 evict_spared{};     ///< Read-back shapes left to the collector (not downloadable)
+    u64 evict_small_kept{}; ///< Small targets left to the collector
+    [[nodiscard]] static u64 RtShapeKey(const ImageBase& image) {
+        return (u64{static_cast<u32>(image.info.format)} << 40) |
+               (u64{image.info.size.width & 0xFFFFF} << 20) | (image.info.size.height & 0xFFFFF);
+    }
     u64 tc_stale_skips{};        ///< Uploads skipped (last 600 frames)
     u64 tc_stale_skip_bytes{};
     u64 tc_stale_gpu_written{};  ///< Stale but buffer-written pages: uploaded after all
