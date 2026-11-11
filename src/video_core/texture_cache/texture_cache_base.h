@@ -665,6 +665,8 @@ private:
     /// tracked, so CPU writes, unmaps and write-backs clear them. An image made entirely on marked
     /// pages starts without an upload: the upload would only copy stale bytes the GPU overwrites.
     /// Switch 2 titles only: the buffer cache feeds Nx2MayBeGpuWritten for them alone.
+    /// Whether dropping this image without a download loses data only the GPU has (MarkStale).
+    [[nodiscard]] static bool LosesGpuData(const ImageBase& image);
     void MarkStale(const ImageBase& image);
     void ClearStale(DAddr addr, size_t size);
     void ClearStaleImage(const ImageBase& image);

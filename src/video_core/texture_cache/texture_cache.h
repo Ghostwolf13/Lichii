@@ -274,11 +274,16 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
 }
 
 template <class P>
+bool TextureCache<P>::LosesGpuData(const ImageBase& image) {
+    return Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+           True(image.flags & ImageFlagBits::GpuModified) &&
+           False(image.flags & (ImageFlagBits::CpuModified | ImageFlagBits::Sparse |
+                                ImageFlagBits::Unbacked));
+}
+
+template <class P>
 void TextureCache<P>::MarkStale(const ImageBase& image) {
-    if (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) ||
-        False(image.flags & ImageFlagBits::GpuModified) ||
-        True(image.flags & (ImageFlagBits::CpuModified | ImageFlagBits::Sparse |
-                            ImageFlagBits::Unbacked))) {
+    if (!LosesGpuData(image)) {
         return;
     }
     // Tracked from here on so CPU writes reach WriteMemory. Marking before the image's own
@@ -436,6 +441,7 @@ void TextureCache<P>::EvictDeadRenderTargets() {
             ++evict_small_kept;
             continue;
         }
+        bool saved_this = false;
         if (readback_shapes.contains(RtShapeKey(image))) {
             if (!IsDownloadable(image) || True(image.flags & ImageFlagBits::BadOverlap)) {
                 // Can't be written back safely: leave it to the collector.
@@ -457,8 +463,12 @@ void TextureCache<P>::EvictDeadRenderTargets() {
             ClearStaleImage(image);
             ++saved;
             ++evict_saved;
+            saved_this = true;
         } else {
             MarkStale(image); // before UntrackImage (see MarkStale)
+        }
+        if (!saved_this && LosesGpuData(image)) {
+            // Only a target whose GPU data is really lost can teach a read-back shape.
             evicted_pages.Mark(image.cpu_addr, image.guest_size_bytes, [](DAddr, u64) {});
             const u64 sequence = ++eviction_sequence;
             recent_evictions[image.cpu_addr] = {image.cpu_addr + image.guest_size_bytes,
@@ -2308,7 +2318,13 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         TrackImage(image, image_id);
     }
 
-    if (evicted_pages.IsAll(image.cpu_addr, image.guest_size_bytes)) {
+    // Whole pages inside it too: Mark leaves a deleted target's partial edge pages unmarked.
+    const u64 evicted_first = Common::AlignUp(image.cpu_addr, StalePages::PAGE_SIZE);
+    const u64 evicted_end =
+        Common::AlignDown(image.cpu_addr + image.guest_size_bytes, StalePages::PAGE_SIZE);
+    if (evicted_pages.IsAll(image.cpu_addr, image.guest_size_bytes) ||
+        (evicted_end > evicted_first &&
+         evicted_pages.IsAll(evicted_first, evicted_end - evicted_first))) {
         image.flags |= ImageFlagBits::EvictBorn;
         ++evict_born;
     }
