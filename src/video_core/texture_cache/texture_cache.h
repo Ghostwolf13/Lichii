@@ -388,14 +388,8 @@ void TextureCache<P>::EvictDeadRenderTargets() {
     static constexpr u32 MaxEvictionsPerFrame = 64;
     // How often a target found still in use is checked again before it counts as a lasting one.
     static constexpr u32 MaxChecks = 4;
-    // Waiting list size kept while the cache is under its expected size.
-    static constexpr size_t MaxWaiting = 8192;
+    // (FindRenderTargetView keeps the queue at MaxTransientTargets.)
     if (total_used_memory <= expected_memory) {
-        if (transient_targets.size() > MaxWaiting) {
-            transient_targets.erase(transient_targets.begin(),
-                                    transient_targets.begin() +
-                                        static_cast<std::ptrdiff_t>(transient_targets.size() - MaxWaiting));
-        }
         return;
     }
     u32 evicted = 0;
@@ -3793,6 +3787,18 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
         image.modification_tick == 0 && False(image.flags & ImageFlagBits::TransientTarget) &&
         False(image.flags & (ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
                              ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked))) {
+        // A hard limit, also while over budget: the oldest candidate leaves the queue and stays
+        // like any other image (its flag is dropped, so it is never deleted early).
+        while (transient_targets.size() >= MaxTransientTargets) {
+            const TransientTarget oldest = transient_targets.front();
+            transient_targets.pop_front();
+            if (slot_images.contains(oldest.id)) {
+                Image& old_image = slot_images[oldest.id];
+                if (old_image.allocation_tick == oldest.allocation_tick) {
+                    old_image.flags &= ~ImageFlagBits::TransientTarget;
+                }
+            }
+        }
         image.flags |= ImageFlagBits::TransientTarget;
         transient_targets.push_back({image_id, image.allocation_tick, frame_tick, 0});
     }

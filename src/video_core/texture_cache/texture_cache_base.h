@@ -197,6 +197,8 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
         u32 survived;
     };
     std::deque<TransientTarget> transient_targets;
+    /// Most candidates kept waiting for early deletion, over budget or not.
+    static constexpr size_t MaxTransientTargets = 8192;
     u64 transient_evictions{};
     u64 logged_transient_evictions{};
     /// Image made by the latest JoinImages call; FindRenderTargetView uses it to tell a target it
