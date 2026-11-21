@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include "common/announce_multiplayer_room.h"
@@ -44,6 +45,7 @@ struct ProxyPacket {
     Protocol protocol;
     bool broadcast;
     std::vector<u8> data;
+    u64 enet_generation = 0; // Local queue scope; not serialized.
 };
 
 /// Represents a chat message.
@@ -132,6 +134,14 @@ public:
      */
     const MemberList& GetMemberInformation() const;
 
+    MemberList GetMemberInformationSnapshot() const;
+
+    struct ENetIdentity {
+        IPv4Address ip;
+        u64 generation;
+    };
+    std::optional<ENetIdentity> GetENetIdentity() const;
+
     /**
      * Returns the nickname of the RoomMember.
      */
@@ -169,7 +179,7 @@ public:
      * Sends a Proxy packet to the room.
      * @param packet The WiFi packet to send.
      */
-    void SendProxyPacket(const ProxyPacket& packet);
+    bool SendProxyPacket(const ProxyPacket& packet);
 
     /**
      * Sends an LDN packet to the room.

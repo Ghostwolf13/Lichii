@@ -26,6 +26,10 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/swap.h"
+#include "core/file_sys/common_funcs.h"
+#include "core/file_sys/content_archive.h"
+#include "core/file_sys/program_metadata.h"
+#include "core/file_sys/control_metadata.h"
 #include "core/file_sys/vfs/vfs_offset.h"
 
 namespace FileSys {
@@ -142,6 +146,7 @@ static_assert(sizeof(TlvHeader) == TlvHeaderSize);
 
 enum MetaType : u16 {
     MetaNpdm = 0x0001,
+    MetaNacp = 0x0002,
     MetaIcon = 0x0003,
     MetaDisplayVersion = 0x0004,
     MetaTitleName = 0x0005,
@@ -166,6 +171,12 @@ constexpr std::size_t DecoderCharge = 256 * 1024;
 /// Partly decoded spilled members that keep their decoder, and with it a window of up to
 /// 128 MiB; another one restarts from its first frame when read past its prefix again.
 constexpr std::size_t MaxSpillDecoders = 2;
+
+bool HasSwitch2ResourceTable(const VirtualDir& dir) {
+    return std::ranges::any_of(dir->GetFiles(), [](const VirtualFile& file) {
+        return file->GetName().find(".Nin_Ounce") != std::string::npos;
+    }) || std::ranges::any_of(dir->GetSubdirectories(), HasSwitch2ResourceTable);
+}
 
 } // namespace
 
@@ -786,6 +797,11 @@ bool NupContainer::ParseMeta(PackageInfo& package) {
         case MetaNpdm:
             package.npdm.assign(payload, payload + header.size);
             break;
+        case MetaNacp:
+            if (header.size == sizeof(RawNACP)) {
+                package.nacp.assign(payload, payload + header.size);
+            }
+            break;
         case MetaIcon:
             package.icon.assign(payload, payload + header.size);
             break;
@@ -869,6 +885,103 @@ std::optional<std::size_t> NupContainer::FindBestUpdatePackage() const {
         }
     }
     return best;
+}
+
+std::optional<NupContainer::ProgramSelection> NupContainer::SelectProgram() {
+    if (status != Loader::ResultStatus::Success) {
+        return std::nullopt;
+    }
+    const auto base = FindBasePackage();
+    const auto update = FindBestUpdatePackage();
+    auto base_exefs = base ? GetExeFSDir(*base) : nullptr;
+    auto update_exefs = update ? GetExeFSDir(*update) : nullptr;
+    const auto select_base = [&]() -> std::optional<ProgramSelection> {
+        if (!base_exefs || !IsDirectoryExeFS(base_exefs)) {
+            return std::nullopt;
+        }
+        return ProgramSelection{*base, std::move(base_exefs), packages[*base].title_id};
+    };
+    if (!update_exefs) {
+        return select_base();
+    }
+
+    const auto update_id = packages[*update].title_id;
+    if (!base_exefs && (update_id >> 56) == 0x01) {
+        if (auto embedded = GetPackageSubdirectory(*update, "program1/exefs");
+            embedded && IsDirectoryExeFS(embedded)) {
+            ProgramMetadata metadata;
+            const auto expected_id =
+                0x0400000000000000ULL |
+                (GetBaseTitleIDWithProgramIndex(update_id, 1) & 0x00FFFFFFFFFFFFFFULL);
+            if (metadata.Load(embedded->GetFile("main.npdm")) == Loader::ResultStatus::Success &&
+                metadata.IsSwitch2() && metadata.GetTitleID() == expected_id) {
+                return ProgramSelection{*update, std::move(embedded), expected_id, expected_id};
+            }
+        }
+    }
+
+    if (!IsDirectoryExeFS(update_exefs)) {
+        return std::nullopt;
+    }
+
+    auto program_id = base_exefs ? packages[*base].title_id : update_id;
+    if (base) {
+        ProgramMetadata base_metadata;
+        ProgramMetadata update_metadata;
+        const auto base_npdm = base_exefs ? base_exefs->GetFile("main.npdm") : nullptr;
+        const bool have_base_metadata =
+            base_npdm && base_metadata.Load(base_npdm) == Loader::ResultStatus::Success;
+        const auto base_id =
+            have_base_metadata ? base_metadata.GetTitleID() : packages[*base].title_id;
+        if (update_metadata.Load(update_exefs->GetFile("main.npdm")) ==
+            Loader::ResultStatus::Success) {
+            const auto executable_id = update_metadata.GetTitleID();
+            if (have_base_metadata && base_metadata.IsSwitch2() && !update_metadata.IsSwitch2() &&
+                (executable_id >> 56) == 0x01 && executable_id == GetBaseTitleID(executable_id) &&
+                GetSwitch1ApplicationID(base_id) == executable_id + 1) {
+                return select_base();
+            }
+            if (update_metadata.IsSwitch2()) {
+                const bool matching_edition =
+                    (!have_base_metadata || !base_metadata.IsSwitch2()) &&
+                    (base_id >> 56) == 0x01 && base_id == GetBaseTitleID(base_id) &&
+                    (executable_id >> 56) == 0x04 &&
+                    GetSwitch1ApplicationID(executable_id) == base_id + 1;
+                // A base packed without an ExeFS or NPDM has title ID 0 and claims no program.
+                const bool base_claims_no_program = !base_exefs && base_id == 0;
+                if (!base_claims_no_program && executable_id != base_id && !matching_edition) {
+                    return std::nullopt;
+                }
+                program_id = executable_id;
+            }
+        }
+    }
+    return ProgramSelection{*update, std::move(update_exefs), program_id};
+}
+
+std::optional<std::size_t> NupContainer::FindUpgradePack(u64 program_id) {
+    const u64 own_base = GetBaseTitleID(program_id);
+    const u64 switch1_base = GetSwitch1ApplicationID(own_base);
+    if (switch1_base == own_base) {
+        return std::nullopt;
+    }
+
+    const u64 aoc_base = GetAOCBaseTitleID(switch1_base);
+    std::optional<std::size_t> pack;
+    for (std::size_t i = 0; i < packages.size(); ++i) {
+        const auto& package = packages[i];
+        if (package.kind != PackageKind::Addon || package.title_id < aoc_base ||
+            package.title_id > aoc_base + AOC_TITLE_ID_MASK ||
+            (pack && package.version <= packages[*pack].version)) {
+            continue;
+        }
+        const auto romfs = GetRomFSDir(i);
+        if (romfs && (romfs->GetFileRelative("System/AoCUpgradeVersion.txt") ||
+                      HasSwitch2ResourceTable(romfs))) {
+            pack = i;
+        }
+    }
+    return pack;
 }
 
 VirtualFile NupContainer::OpenFile(std::size_t file_index) {
@@ -1053,6 +1166,32 @@ VirtualDir NupContainer::GetPackageDir(std::size_t package_index) {
         return nullptr;
     }
     return BuildPackageDir(packages[package_index].root_dir, false);
+}
+
+VirtualDir NupContainer::GetPackageSubdirectory(std::size_t package_index, std::string_view path) {
+    if (status != Loader::ResultStatus::Success || package_index >= packages.size()) {
+        return nullptr;
+    }
+    u32 index = packages[package_index].root_dir;
+    while (!path.empty()) {
+        const auto separator = path.find('/');
+        const auto name = path.substr(0, separator);
+        const auto& directory = dirs[index];
+        const auto child_dirs =
+            std::span{children}.subspan(directory.first_child, directory.child_count);
+        const auto child = std::ranges::find_if(child_dirs, [this, name](u32 entry) {
+            return entry < dirs.size() && dirs[entry].name == name;
+        });
+        if (child == child_dirs.end()) {
+            return nullptr;
+        }
+        index = *child;
+        if (separator == std::string_view::npos) {
+            return BuildPackageDir(index, false);
+        }
+        path.remove_prefix(separator + 1);
+    }
+    return nullptr;
 }
 
 VirtualDir NupContainer::MergeShadowDirs(const VirtualDir& base, const VirtualDir& overlay) {

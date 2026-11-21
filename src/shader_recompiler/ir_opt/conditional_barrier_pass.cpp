@@ -23,6 +23,7 @@ bool IsDivergentSource(const IR::Inst& inst) {
     case IR::Opcode::GetAttributeU32:
     case IR::Opcode::GetAttributeIndexed:
     case IR::Opcode::IsbeRead:
+    case IR::Opcode::IsbeReadOutput:
     case IR::Opcode::LoadLocal:
     case IR::Opcode::LaneId:
     case IR::Opcode::SubgroupBallot:

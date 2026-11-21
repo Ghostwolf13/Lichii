@@ -16,6 +16,9 @@
 #include "common/assert.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
+#ifdef HAS_NCE
+#include "common/settings.h"
+#endif
 #include "common/thread.h"
 #include "common/thread_worker.h"
 #include "core/arm/arm_interface.h"
@@ -145,15 +148,25 @@ struct KernelCore::Impl {
             // finalize can't unmap the next game's memory, and clear the arena.
             const u32 references = application_process->GetReferenceCount();
             application_process->GetPageTable().GetImpl().fastmem_arena = nullptr;
+#ifdef HAS_HYPERVISOR
+            application_process->ReleaseHypervisor();
+#endif
             application_process->Close(system.Kernel());
             application_process = nullptr;
             if (references > 1) {
                 LOG_WARNING(Kernel, "Application process still had {} references at shutdown",
                             references);
             }
-            auto& arena = system.DeviceMemory().buffer;
-            arena.Unmap(0, arena.VirtualSize(), false);
+            system.DeviceMemory().buffer.ResetVirtualMappings();
+#ifdef HAS_NCE
+        } else if (system.DeviceMemory().buffer.IsDirectMapped()) {
+            system.DeviceMemory().buffer.ResetVirtualMappings();
+#endif
         }
+
+#ifdef HAS_NCE
+        Settings::SetNceEnabled(false);
+#endif
 
         next_object_id = 0;
         next_kernel_process_id = KProcess::InitialProcessIdMin;

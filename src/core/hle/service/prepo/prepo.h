@@ -5,12 +5,19 @@
 
 #pragma once
 
+#include <memory>
+
 namespace Core {
 class System;
 }
 
-namespace Service::PlayReport {
+namespace Service {
+class ServiceFrameworkBase;
 
+namespace PlayReport {
+
+std::shared_ptr<ServiceFrameworkBase> CreateService(const char* name, Core::System& system);
 void LoopProcess(Core::System& system);
 
-} // namespace Service::PlayReport
+} // namespace PlayReport
+} // namespace Service

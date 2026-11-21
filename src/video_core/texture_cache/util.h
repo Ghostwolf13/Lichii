@@ -19,6 +19,10 @@
 #include "video_core/texture_cache/types.h"
 #include "video_core/textures/texture.h"
 
+namespace Settings {
+struct ResolutionScalingInfo;
+}
+
 namespace Tegra::Texture {
 class UnswizzleWorker;
 }
@@ -89,6 +93,7 @@ struct UnswizzlePlan {
     boost::container::small_vector<UnswizzleRowRun, 16> runs;
     size_t total_host_bytes{0};
     u32 bpp_log2{0};
+    bool native_tiling{false};
     bool layout_valid{true};
 };
 
@@ -101,6 +106,10 @@ struct UnswizzlePlan {
 /// Executes a precalculated unswizzle plan directly into destination memory (e.g. mapped staging span).
 void ExecuteUnswizzlePlan(Tegra::MemoryManager& gpu_memory, const UnswizzlePlan& plan,
                          std::span<u8> output);
+
+/// Reads one byte of each 4 KiB page of a guest range about to be read in full, on the texture
+/// workers and this thread at once (Windows only, ranges of 1 MiB or more).
+void PrefaultGuestMemory(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, size_t size);
 
 [[nodiscard]] boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(
     Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
@@ -160,6 +169,16 @@ void SwizzleImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const Ima
 [[nodiscard]] bool IsBlockLinearSizeCompatible(const ImageInfo& new_info,
                                                const ImageInfo& overlap_info, u32 new_level,
                                                u32 overlap_level, bool strict_size) noexcept;
+
+/// Whether an image scaled by the resolution setting is at most max_extent texels wide and tall
+/// on the host (MSAA images have their sample grid in info.size).
+[[nodiscard]] bool ScaledImageFits(const ImageInfo& info,
+                                   const Settings::ResolutionScalingInfo& resolution,
+                                   u32 max_extent) noexcept;
+
+/// Whether a block-linear 2D image is wider than tall by padding only: made as wide as it is
+/// tall, it takes the same guest memory with the same layout.
+[[nodiscard]] bool IsPaddedSquare(const ImageInfo& info) noexcept;
 
 [[nodiscard]] bool IsPitchLinearSameSize(const ImageInfo& lhs, const ImageInfo& rhs,
                                          bool strict_size) noexcept;

@@ -44,6 +44,15 @@ constexpr size_t PrebuildLimit(size_t kept, size_t boot_built) {
     return kept - std::min(kept, boot_built);
 }
 
+/// Whether a boot load starts the background prebuild before waiting for its boot builds, so the
+/// two run together. With a precache it starts after it, as its jobs would queue ahead of the
+/// precache's. Where reading the driver pipeline cache during a build crashes (Intel's Windows
+/// driver), it starts after the load's driver cache saves, which then run with no build in flight:
+/// otherwise those builds reach the file only at a clean close.
+constexpr bool PrebuildStartsWithBootBuilds(bool precache, bool cache_read_races_builds) {
+    return !precache && !cache_read_races_builds;
+}
+
 /// Picks which unused pipelines to destroy so that at most `kept` stay built.
 /// @param last_uses Frame each candidate was last used (0 for a prebuilt one no draw has used).
 ///                  Candidates are built pipelines old enough to evict and not the current one.

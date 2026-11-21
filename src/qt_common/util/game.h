@@ -87,6 +87,9 @@ std::filesystem::path CustomArtworkPath(u64 program_id);
 /// The custom artwork image file bytes for a program, or empty when none is set.
 std::vector<u8> ReadCustomArtwork(u64 program_id);
 
+std::vector<u8> ReadHomeMenuArtwork(u64 program_id);
+void ClearHomeMenuArtworkCache();
+
 /// Stores an image as the program's custom artwork (PNG, at most 1024 pixels per side).
 [[nodiscard]] bool SaveCustomArtwork(u64 program_id, const QImage& image);
 

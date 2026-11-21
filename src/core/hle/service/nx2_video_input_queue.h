@@ -20,10 +20,8 @@ public:
         bool end;
     };
 
-    static constexpr size_t ReadyWatermark = 8;
-    /// The decoder refuses packets (nn::codec 3603, busy) from this many on. Well above the
-    /// watermark: a client may hold a ready signal when the event stops.
-    static constexpr size_t RefuseAt = ReadyWatermark * 3;
+    /// The decoder refuses packets (nn::codec 3603, busy) from this many on.
+    static constexpr size_t RefuseAt = 24;
 
     void Push(Input input) {
         inputs.push_back(std::move(input));
@@ -68,8 +66,9 @@ public:
         return inputs.size();
     }
 
-    bool BelowReadyWatermark() const {
-        return inputs.size() < ReadyWatermark;
+    // A producer waiting on readiness may hold the images needed to drain any further.
+    bool HasRoom() const {
+        return !Full();
     }
 
     /// Whether SubmitInput refuses packets other than end of stream: RefuseAt or more queued.

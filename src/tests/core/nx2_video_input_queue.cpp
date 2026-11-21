@@ -7,7 +7,7 @@
 
 #include "core/hle/service/nx2_video_input_queue.h"
 
-TEST_CASE("NX2 video retains packets submitted beyond the readiness watermark", "[nx2_video_input]") {
+TEST_CASE("NX2 video retains a full input burst in order", "[nx2_video_input]") {
     Service::Nx2VideoInputQueue queue;
     constexpr u64 packets = 24;
     for (u64 index = 0; index < packets; ++index) {
@@ -15,30 +15,31 @@ TEST_CASE("NX2 video retains packets submitted beyond the readiness watermark", 
         queue.Push({{static_cast<u8>(index), 0x82, 0x49, 0x83}, index * 16667,
                     index == packets - 1});
         REQUIRE(queue.Size() == index + 1);
-        REQUIRE(queue.BelowReadyWatermark() == (index + 1 < queue.ReadyWatermark));
+        REQUIRE(queue.HasRoom() == (index + 1 < queue.RefuseAt));
     }
     for (u64 index = 0; index < packets; ++index) {
         const auto input = queue.Pop();
         REQUIRE(input.data == std::vector<u8>{static_cast<u8>(index), 0x82, 0x49, 0x83});
         REQUIRE(input.pts == index * 16667);
         REQUIRE(input.end == (index == packets - 1));
-        REQUIRE(queue.BelowReadyWatermark() == (packets - index - 1 < queue.ReadyWatermark));
+        REQUIRE(queue.HasRoom());
     }
     REQUIRE(queue.Empty());
 }
 
-TEST_CASE("NX2 video refuses packets only well past the readiness watermark", "[nx2_video_input]") {
+TEST_CASE("NX2 video submission readiness matches input capacity", "[nx2_video_input]") {
     Service::Nx2VideoInputQueue queue;
-    STATIC_REQUIRE(queue.RefuseAt > queue.ReadyWatermark);
     for (u64 index = 0; index < queue.RefuseAt; ++index) {
         CAPTURE(index);
         REQUIRE_FALSE(queue.Full());
+        REQUIRE(queue.HasRoom());
         queue.Push({{static_cast<u8>(index)}, index * 16667, false});
     }
     REQUIRE(queue.Full());
+    REQUIRE_FALSE(queue.HasRoom());
     queue.Pop();
     REQUIRE_FALSE(queue.Full());
-    REQUIRE_FALSE(queue.BelowReadyWatermark());
+    REQUIRE(queue.HasRoom());
 }
 
 TEST_CASE("NX2 video queues preserve independent interleaved sessions", "[nx2_video_input]") {
@@ -61,7 +62,7 @@ TEST_CASE("NX2 video queues preserve independent interleaved sessions", "[nx2_vi
         queue.Push({{0x11}, 42, true});
         queue.Clear();
         REQUIRE(queue.Empty());
-        REQUIRE(queue.BelowReadyWatermark());
+        REQUIRE(queue.HasRoom());
     }
 }
 
@@ -120,6 +121,28 @@ TEST_CASE("NX2 video takes a resent refused packet once", "[nx2_video_input]") {
     REQUIRE(queue.Submit({{0xEF}, (refused + 1) * 16667, false}));
     auto expected = PtsRange(refused + 2);
     expected.erase(expected.begin(), expected.begin() + 2);
+    REQUIRE(DrainPts(queue) == expected);
+}
+
+TEST_CASE("NX2 video submission becomes ready as soon as a refused packet fits",
+          "[nx2_video_input]") {
+    auto queue = FullQueue();
+    const Service::Nx2VideoInputQueue::Input packet{{0xAB}, queue.RefuseAt * 16667, false};
+    for (int retry = 0; retry < 3; ++retry) {
+        REQUIRE_FALSE(queue.Submit(packet));
+    }
+    REQUIRE(queue.Size() == queue.RefuseAt);
+    REQUIRE_FALSE(queue.HasRoom());
+
+    // Output images may all be acquired before the worker can drain the input burst.
+    REQUIRE(queue.Pop().pts == 0);
+    REQUIRE(queue.HasRoom());
+    REQUIRE(queue.Submit(packet));
+    REQUIRE(queue.Size() == queue.RefuseAt);
+    REQUIRE_FALSE(queue.HasRoom());
+
+    auto expected = PtsRange(queue.RefuseAt + 1);
+    expected.erase(expected.begin());
     REQUIRE(DrainPts(queue) == expected);
 }
 

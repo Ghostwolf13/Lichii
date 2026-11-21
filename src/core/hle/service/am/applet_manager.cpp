@@ -7,6 +7,7 @@
 #include "common/uuid.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/hle/kernel/k_process.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/am/applet_data_broker.h"
 #include "core/hle/service/am/applet_manager.h"
@@ -272,6 +273,13 @@ void AppletManager::OperationModeChanged() {
     m_window_system->OnOperationModeChanged();
 }
 
+void AppletManager::PressHomeButton() {
+    std::scoped_lock lk{m_lock};
+    if (m_window_system) {
+        m_window_system->OnHomeButtonPressed(ButtonPressDuration::ShortPressing);
+    }
+}
+
 void AppletManager::SetWindowSystem(WindowSystem* window_system) {
     std::unique_lock lk{m_lock};
 
@@ -283,7 +291,13 @@ void AppletManager::SetWindowSystem(WindowSystem* window_system) {
 
     m_cv.wait(lk, [&] { return m_pending_process != nullptr; });
 
-    if (Settings::values.enable_overlay && m_window_system->GetOverlayDisplayApplet() == nullptr) {
+    const auto& params = m_pending_parameters;
+    const auto* process = m_pending_process->GetHandle();
+    const bool native_home =
+        process != nullptr &&
+        params.UsesNativeHomeBootstrap(process->GetProgramId(), process->IsSwitch2());
+    if (!native_home && Settings::values.enable_overlay &&
+        m_window_system->GetOverlayDisplayApplet() == nullptr) {
         if (auto overlay_process = CreateProcess(m_system, static_cast<u64>(AppletProgramId::OverlayDisplay), 0, 0)) {
             auto overlay_applet = std::make_shared<Applet>(m_system, std::move(overlay_process), false);
             overlay_applet->program_id = static_cast<u64>(AppletProgramId::OverlayDisplay);
@@ -299,7 +313,6 @@ void AppletManager::SetWindowSystem(WindowSystem* window_system) {
         }
     }
 
-    const auto& params = m_pending_parameters;
     auto applet = std::make_shared<Applet>(m_system, std::move(m_pending_process),
                                            params.applet_id == AppletId::Application);
 
@@ -309,13 +322,13 @@ void AppletManager::SetWindowSystem(WindowSystem* window_system) {
     applet->previous_program_index = params.previous_program_index;
 
     // Push UserChannel data from previous application
-    if (params.launch_type == LaunchType::ApplicationInitiated) {
+    if (!native_home && params.launch_type == LaunchType::ApplicationInitiated) {
         applet->user_channel_launch_parameter.swap(m_system.GetUserChannel());
     }
 
     // TODO: Read whether we need a preselected user from NACP?
     // TODO: This can be done quite easily from loader
-    {
+    if (!native_home) {
         LaunchParameterAccountPreselectedUser lp{};
 
         lp.magic = LaunchParameterAccountPreselectedUserMagic;
@@ -335,7 +348,9 @@ void AppletManager::SetWindowSystem(WindowSystem* window_system) {
     // Starting from frontend, some applets require input data.
     switch (applet->applet_id) {
     case AppletId::QLaunch:
-        PushInShowQlaunch(m_system, InitializeFakeCallerApplet(m_system, applet));
+        if (!native_home) {
+            PushInShowQlaunch(m_system, InitializeFakeCallerApplet(m_system, applet));
+        }
         break;
     case AppletId::Cabinet:
         PushInShowCabinetData(m_system, InitializeFakeCallerApplet(m_system, applet));

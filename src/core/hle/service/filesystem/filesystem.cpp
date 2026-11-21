@@ -26,6 +26,7 @@
 #include "core/hle/service/filesystem/fsp/fsp_ldr.h"
 #include "core/hle/service/filesystem/fsp/fsp_pr.h"
 #include "core/hle/service/filesystem/fsp/fsp_srv.h"
+#include "core/hle/service/filesystem/fsp/fsp_system_archive.h"
 #include "core/hle/service/filesystem/romfs_controller.h"
 #include "core/hle/service/filesystem/save_data_controller.h"
 #include "core/hle/service/server_manager.h"
@@ -797,14 +798,30 @@ void FileSystemController::Reset() {
     registrations.clear();
 }
 
-void LoopProcess(Core::System& system) {
+std::shared_ptr<SessionRequestHandler> CreateFileSystemProxy(
+    Core::System& system, std::shared_ptr<const SystemDataView> isolated_system_data,
+    u64 isolated_process_id) {
+    if (isolated_system_data || isolated_process_id != 0) {
+        return CreateReadOnlySystemArchiveFsp(system, std::move(isolated_system_data),
+                                              isolated_process_id);
+    }
+    return std::make_shared<FSP_SRV>(system);
+}
+
+void LoopProcess(Core::System& system, std::shared_ptr<const SystemDataView> isolated_system_data,
+                 u64 isolated_process_id) {
     auto server_manager = std::make_unique<ServerManager>(system);
 
-    const auto FileSystemProxyFactory = [&] { return std::make_shared<FSP_SRV>(system); };
-
-    server_manager->RegisterNamedService("fsp-ldr", std::make_shared<FSP_LDR>(system), 61);
-    server_manager->RegisterNamedService("fsp-pr", std::make_shared<FSP_PR>(system), 61);
-    server_manager->RegisterNamedService("fsp-srv", std::move(FileSystemProxyFactory), 61);
+    if (!isolated_system_data && isolated_process_id == 0) {
+        server_manager->RegisterNamedService("fsp-ldr", std::make_shared<FSP_LDR>(system), 61);
+        server_manager->RegisterNamedService("fsp-pr", std::make_shared<FSP_PR>(system), 61);
+    }
+    server_manager->RegisterNamedService(
+        "fsp-srv",
+        [&system, data = std::move(isolated_system_data), isolated_process_id] {
+            return CreateFileSystemProxy(system, data, isolated_process_id);
+        },
+        61);
     ServerManager::RunServer(std::move(server_manager));
 }
 

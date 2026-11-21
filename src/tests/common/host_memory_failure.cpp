@@ -5,6 +5,8 @@
 #include <catch2/catch_test_macros.hpp>
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(HAS_NCE)
+#include <unistd.h>
 #endif
 
 #include "common/host_memory.h"
@@ -41,6 +43,9 @@ TEST_CASE("Host memory allocation failure permits a successful retry", "[host_me
         Common::HostMemory memory{0x10000, 0x400000};
         REQUIRE(memory.BackingBasePointer() != nullptr);
         CHECK(memory.VirtualBasePointer() == nullptr);
+#ifdef HAS_NCE
+        CHECK_FALSE(memory.EnableDirectMappedAddress());
+#endif
         memory.BackingBasePointer()[0] = 42;
         memory.BackingBasePointer()[0xffff] = 99;
         CHECK(memory.BackingBasePointer()[0] == 42);
@@ -49,6 +54,38 @@ TEST_CASE("Host memory allocation failure permits a successful retry", "[host_me
     CHECK(allocations.FastmemAttempts() == 2 * FastmemAttemptsPerAllocation);
     CHECK(allocations.FallbackAttempts() == 2);
 }
+
+#ifdef HAS_NCE
+TEST_CASE("Native and JIT fastmem reuse the same arena without sharing address mode",
+          "[host_memory_failure]") {
+    if (sysconf(_SC_PAGESIZE) != 0x1000) {
+        SKIP("Identity mapping requires 4 KiB host pages");
+    }
+
+    constexpr size_t virtual_size = 1ULL << 38;
+    constexpr size_t page_size = 0x1000;
+    Common::HostMemory memory{0x10000, virtual_size};
+    if (!memory.EnableDirectMappedAddress()) {
+        SKIP("No executable shared reservation within the 39-bit host window");
+    }
+
+    const auto base = reinterpret_cast<size_t>(memory.VirtualBasePointer());
+    constexpr size_t offset = virtual_size - page_size;
+    constexpr auto perms = Common::MemoryPermission::ReadWrite;
+    CHECK(memory.VirtualSize() == virtual_size);
+    REQUIRE(base <= (1ULL << 39) - virtual_size);
+    memory.Map(base + offset, page_size, page_size, perms, false);
+    memory.VirtualBasePointer()[offset] = 17;
+    CHECK(memory.BackingBasePointer()[page_size] == 17);
+
+    memory.ResetVirtualMappings();
+    REQUIRE_FALSE(memory.IsDirectMapped());
+    memory.Map(offset, 2 * page_size, page_size, perms, false);
+    memory.VirtualBasePointer()[offset] = 23;
+    CHECK(memory.BackingBasePointer()[2 * page_size] == 23);
+    CHECK(memory.BackingBasePointer()[page_size] == 17);
+}
+#endif
 
 #ifdef _WIN32
 TEST_CASE("Fallback backing memory is released on Windows", "[host_memory_failure]") {

@@ -77,6 +77,7 @@ public:
     };
 };
 
+std::shared_ptr<SessionRequestHandler> CreateScratchSystemAccountService(Core::System& system);
 void LoopProcess(Core::System& system);
 
 } // namespace Service::Account

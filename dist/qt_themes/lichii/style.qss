@@ -852,6 +852,11 @@ QDialog#WhatsNewDialog QLabel#WhatsNewText {
     color: #9b9da4;
 }
 
+QDialog#WhatsNewDialog QLabel#WhatsNewMetadata,
+QDialog#WhatsNewDialog QToolButton#WhatsNewArchive {
+    color: #f45a85;
+}
+
 QDialog#WhatsNewDialog QLabel#WhatsNewBadge {
     background-color: rgba(240, 56, 107, 0.16);
     border-radius: 8px;
@@ -861,9 +866,29 @@ QDialog#WhatsNewDialog QWidget#WhatsNewItem {
     border-bottom: 1px solid #212226;
 }
 
+QDialog#WhatsNewDialog QWidget#WhatsNewItem[lead="true"] {
+    background-color: #202125;
+    border: none;
+    border-radius: 10px;
+}
+
 QDialog#WhatsNewDialog QWidget#WhatsNewFooter {
     background-color: #141518;
     border-top: 1px solid #2a2b30;
+}
+
+QDialog#WhatsNewDialog QPushButton#WhatsNewDone {
+    font-size: 19px;
+    font-weight: 700;
+    min-height: 42px;
+}
+
+QDialog#WhatsNewDialog QToolButton:focus {
+    border-color: #f45a85;
+}
+
+QDialog#WhatsNewDialog QToolButton:disabled {
+    color: #55575d;
 }
 
 /* Status bar: setting chips on the left, stats on the right ------------- */
@@ -895,7 +920,7 @@ QPushButton#DockingStatusBarButton {
     border-radius: 5px;
     background-color: #202125;
     color: #c4c5ca;
-    font-size: 11px;
+    font-size: 8pt;
 }
 
 /* One color per chip category; the :!checked rule below greys out chips that are off. */

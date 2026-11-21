@@ -23,6 +23,14 @@ namespace Network {
 
 struct ProxyPacket;
 
+/// IPPROTO_IPV6 options of an INET6 socket, each an int
+enum class Ipv6Option {
+    V6Only,
+    UnicastHops,
+    MulticastHops,
+    MulticastLoop,
+};
+
 class SocketBase {
 public:
 #ifndef _WIN32
@@ -85,6 +93,8 @@ public:
 
     virtual Errno SetReuseAddr(bool enable) = 0;
 
+    virtual Errno SetReusePort(bool enable) = 0;
+
     virtual Errno SetKeepAlive(bool enable) = 0;
 
     virtual Errno SetBroadcast(bool enable) = 0;
@@ -101,9 +111,15 @@ public:
 
     virtual Errno SetNonBlock(bool enable) = 0;
 
+    virtual Errno SetIpv6Option(Ipv6Option option, s32 value) = 0;
+
+    virtual std::pair<s32, Errno> GetIpv6Option(Ipv6Option option) = 0;
+
     virtual std::pair<Errno, Errno> GetPendingError() = 0;
 
     virtual std::pair<bool, Errno> GetReuseAddr() = 0;
+
+    virtual std::pair<bool, Errno> GetReusePort() = 0;
 
     virtual std::pair<bool, Errno> GetNoDelay() = 0;
 
@@ -170,6 +186,8 @@ public:
 
     Errno SetReuseAddr(bool enable) override;
 
+    Errno SetReusePort(bool enable) override;
+
     Errno SetKeepAlive(bool enable) override;
 
     Errno SetBroadcast(bool enable) override;
@@ -186,12 +204,18 @@ public:
 
     Errno SetNonBlock(bool enable) override;
 
+    Errno SetIpv6Option(Ipv6Option option, s32 value) override;
+
+    std::pair<s32, Errno> GetIpv6Option(Ipv6Option option) override;
+
     template <typename T>
     Errno SetSockOpt(SOCKET fd, int level, int option, T value);
 
     std::pair<Errno, Errno> GetPendingError() override;
 
     std::pair<bool, Errno> GetReuseAddr() override;
+
+    std::pair<bool, Errno> GetReusePort() override;
 
     std::pair<bool, Errno> GetNoDelay() override;
 
@@ -237,12 +261,22 @@ private:
     /// Bumped each time the host socket starts or stops being nonblocking only for calls given
     /// FLAG_MSG_DONTWAIT, the socket's mode being blocking; odd while it is.
     std::atomic<u64> dont_wait_epoch{0};
+
+    // Winsock has no SO_REUSEPORT. Its SO_REUSEADDR lets sockets share a port as the guest's
+    // SO_REUSEPORT does, so the host option is set while the guest has either option set.
+
+    /// Guards reuse_addr, reuse_port and the host's SO_REUSEADDR.
+    std::mutex reuse_mutex;
+    bool reuse_addr = false;
+    bool reuse_port = false;
 #endif
 
     /// The mode SetNonBlock gave the socket.
     std::atomic_bool is_non_blocking{false};
     /// The type Initialize gave the socket (Unspecified for an accepted one).
     Type socket_type = Type::Unspecified;
+    /// The domain Initialize gave the socket, or the listening socket's for an accepted one.
+    Domain socket_domain = Domain::INET;
 };
 
 std::pair<s32, Errno> Poll(std::vector<PollFD>& poll_fds, s32 timeout);

@@ -494,8 +494,10 @@ TEST_CASE("Global atomic add preserves native candidate selection and atomic old
             return inst.GetOpcode() == IR::Opcode::GlobalAtomicIAdd32;
         }) == 1);
         const auto code = Backend::SPIRV::EmitSPIRV(fixture.profile, fixture.program);
+        // Both routings pick between the two pointers the address comes from (natively not the
+        // output buffer, which no path of the address reaches)
         const auto atomics = Instructions(code, 234);
-        REQUIRE(atomics.size() == (native ? 3U : 2U));
+        REQUIRE(atomics.size() == 2U);
         std::map<u32, u32> constants;
         std::map<u32, u32> pointer_bases;
         std::map<u32, u32> bindings;
@@ -516,7 +518,7 @@ TEST_CASE("Global atomic add preserves native candidate selection and atomic old
             CHECK(ReturnsValue(code, op[1]));
             atomic_bindings.insert(bindings.at(pointer_bases.at(op[2])));
         }
-        CHECK(atomic_bindings == (native ? std::set<u32>{2, 3, 4} : std::set<u32>{3, 4}));
+        CHECK(atomic_bindings == (native ? std::set<u32>{2, 3} : std::set<u32>{3, 4}));
     }
 }
 
@@ -559,7 +561,7 @@ TEST_CASE("Global unsigned atomic max routes buffers and returns the old value",
             }
             const auto code = Backend::SPIRV::EmitSPIRV(fixture.profile, fixture.program);
             const auto atomics = Instructions(code, 239);
-            REQUIRE(atomics.size() == (native ? 3U : 2U));
+            REQUIRE(atomics.size() == 2U);
             CHECK(Instructions(code, 234).empty());
             for (const auto& atomic : atomics) {
                 REQUIRE(atomic.size() == 6);
@@ -576,7 +578,7 @@ TEST_CASE("Global atomic routing works without descriptor aliases",
         fixture.profile.support_descriptor_aliasing = false;
         const auto code = Backend::SPIRV::EmitSPIRV(fixture.profile, fixture.program);
         const auto atomics = Instructions(code, 234);
-        REQUIRE(atomics.size() == (native ? 3U : 2U));
+        REQUIRE(atomics.size() == 2U);
         for (const auto& op : atomics) {
             CHECK(ReturnsValue(code, op[1]));
         }

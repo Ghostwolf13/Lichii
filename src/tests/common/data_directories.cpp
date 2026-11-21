@@ -16,3 +16,32 @@ TEST_CASE("Lichii keeps its data apart from Eden's", "[fs]") {
     CHECK(GetLegacyPath(LegacyEdenDir).filename() == "eden");
     CHECK(GetLegacyPath(LegacyEdenDir).parent_path() == data.parent_path());
 }
+
+#ifndef _WIN32
+#include <cstdlib>
+#include <string>
+
+TEST_CASE("XDG directories ignore empty and relative values", "[fs]") {
+    const char* const saved = std::getenv("XDG_DATA_HOME");
+    const std::string saved_value = saved ? saved : "";
+    const auto restore = [&] {
+        if (saved) {
+            setenv("XDG_DATA_HOME", saved_value.c_str(), 1);
+        } else {
+            unsetenv("XDG_DATA_HOME");
+        }
+    };
+
+    unsetenv("XDG_DATA_HOME");
+    const auto fallback = GetDataDirectory("XDG_DATA_HOME");
+    CHECK(fallback.is_absolute());
+
+    setenv("XDG_DATA_HOME", "", 1);
+    CHECK(GetDataDirectory("XDG_DATA_HOME") == fallback);
+    setenv("XDG_DATA_HOME", "relative/dir", 1);
+    CHECK(GetDataDirectory("XDG_DATA_HOME") == fallback);
+    setenv("XDG_DATA_HOME", "/tmp/xdg-data", 1);
+    CHECK(GetDataDirectory("XDG_DATA_HOME") == "/tmp/xdg-data");
+    restore();
+}
+#endif

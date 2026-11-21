@@ -304,6 +304,10 @@ public:
     std::size_t WriteBufferC(const void* buffer, std::size_t size,
                              std::size_t buffer_index = 0) const;
 
+    /// Helper function to copy the guest's current contents of buffer B or C into out
+    void ReadWriteBufferContents(std::span<u8> out, bool buffer_b,
+                                 std::size_t buffer_index = 0) const;
+
     /* Helper function to write a buffer using the appropriate buffer descriptor
      *
      * @tparam T an arbitrary container that satisfies the

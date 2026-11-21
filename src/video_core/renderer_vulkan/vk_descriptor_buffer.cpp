@@ -13,8 +13,8 @@
 namespace Vulkan {
 
 DescriptorBufferRing::DescriptorBufferRing(const Device& device_,
-                                           MemoryAllocator& memory_allocator)
-    : device{device_} {
+                                           MemoryAllocator& memory_allocator_)
+    : device{device_}, memory_allocator{memory_allocator_} {
     if (!device.IsExtDescriptorBufferSupported() || !device.IsBufferDeviceAddressSupported()) {
         return;
     }
@@ -27,16 +27,35 @@ DescriptorBufferRing::DescriptorBufferRing(const Device& device_,
                                              props.resourceDescriptorBufferAddressSpaceSize,
                                              props.descriptorBufferAddressSpaceSize})};
     const VkDeviceSize frame_size{device.IsTiler() ? TILER_FRAME_SIZE : DESKTOP_FRAME_SIZE};
-    const VkDeviceSize chunk_size{
-        Common::AlignDown((std::min)(frame_size, max_bound), alignment)};
+    chunk_size = Common::AlignDown((std::min)(frame_size, max_bound), alignment);
     if (chunk_size <= alignment) {
         LOG_DEBUG(Render_Vulkan, "Descriptor buffer binding limit of {} is unusable, disabling",
                   max_bound);
         return;
     }
     chunk_capacity = chunk_size - alignment;
-    chunks_per_frame = static_cast<size_t>(frame_size / chunk_size);
+    const size_t chunks_per_frame{static_cast<size_t>(frame_size / chunk_size)};
+    max_chunks_per_frame = chunks_per_frame * MAX_FRAME_GROWTH;
 
+    const size_t total_chunks{max_chunks_per_frame * FRAMES_IN_FLIGHT};
+    chunks.resize(total_chunks);
+    chunk_addresses.resize(total_chunks);
+    chunk_hosts.resize(total_chunks);
+    for (size_t frame = 0; frame < FRAMES_IN_FLIGHT; ++frame) {
+        for (size_t chunk = 0; chunk < chunks_per_frame; ++chunk) {
+            if (!CreateChunk(frame * max_chunks_per_frame + chunk)) {
+                chunks.clear();
+                return;
+            }
+        }
+    }
+    frame_chunk_counts.fill(chunks_per_frame);
+    valid = true;
+}
+
+DescriptorBufferRing::~DescriptorBufferRing() = default;
+
+bool DescriptorBufferRing::CreateChunk(size_t index) {
     const VkBufferCreateInfo buffer_ci{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,
@@ -49,34 +68,25 @@ DescriptorBufferRing::DescriptorBufferRing(const Device& device_,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
     };
-    const size_t total_chunks{chunks_per_frame * FRAMES_IN_FLIGHT};
-    chunks.reserve(total_chunks);
-    chunk_addresses.reserve(total_chunks);
-    chunk_hosts.reserve(total_chunks);
-    for (size_t index = 0; index < total_chunks; ++index) {
-        vk::Buffer buffer{memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::Upload)};
-        if (!buffer.IsHostVisible()) {
-            LOG_DEBUG(Render_Vulkan, "Descriptor buffer is not host visible, disabling");
-            chunks.clear();
-            return;
-        }
-        if (!buffer.IsHostCoherent()) {
-            LOG_DEBUG(Render_Vulkan, "Descriptor buffer is not host coherent, disabling");
-            chunks.clear();
-            return;
-        }
-        if (device.HasDebuggingToolAttached()) {
-            buffer.SetObjectNameEXT("Descriptor buffer");
-        }
-        const VkDeviceAddress raw_address{device.GetLogical().GetBufferDeviceAddress(*buffer)};
-        const VkDeviceAddress address{Common::AlignUp(raw_address, alignment)};
-        chunk_addresses.push_back(address);
-        chunk_hosts.push_back(buffer.Mapped().data() + (address - raw_address));
-        chunks.push_back(std::move(buffer));
+    vk::Buffer buffer{memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::Upload)};
+    if (!buffer.IsHostVisible()) {
+        LOG_DEBUG(Render_Vulkan, "Descriptor buffer is not host visible");
+        return false;
     }
+    if (!buffer.IsHostCoherent()) {
+        LOG_DEBUG(Render_Vulkan, "Descriptor buffer is not host coherent");
+        return false;
+    }
+    if (device.NamesObjects()) {
+        buffer.SetObjectNameEXT("Descriptor buffer");
+    }
+    const VkDeviceAddress raw_address{device.GetLogical().GetBufferDeviceAddress(*buffer)};
+    const VkDeviceAddress address{Common::AlignUp(raw_address, alignment)};
+    chunk_addresses[index] = address;
+    chunk_hosts[index] = buffer.Mapped().data() + (address - raw_address);
+    chunks[index] = std::move(buffer);
+    return true;
 }
-
-DescriptorBufferRing::~DescriptorBufferRing() = default;
 
 void DescriptorBufferRing::TickFrame() {
     if (++frame_index >= FRAMES_IN_FLIGHT) {
@@ -88,13 +98,17 @@ void DescriptorBufferRing::TickFrame() {
     frame_reused = true;
 }
 
+bool DescriptorBufferRing::NeedsSubmit(const Scheduler& scheduler) const noexcept {
+    return valid && frame_ticks[(frame_index + 1) % FRAMES_IN_FLIGHT] >= scheduler.CurrentTick();
+}
+
 void DescriptorBufferRing::TouchFrame(Scheduler& scheduler) {
     frame_ticks[frame_index] = scheduler.CurrentTick();
 }
 
 DescriptorBufferRing::Allocation DescriptorBufferRing::Allocate(Scheduler& scheduler,
                                                                 VkDeviceSize size) {
-    ASSERT(!chunks.empty());
+    ASSERT(valid);
     if (!CanAllocate(size)) {
         LOG_DEBUG(Render_Vulkan, "Descriptor set of {} bytes exceeds chunk capacity {}", size,
                   chunk_capacity);
@@ -106,17 +120,45 @@ DescriptorBufferRing::Allocation DescriptorBufferRing::Allocate(Scheduler& sched
         scheduler.Wait(frame_ticks[frame_index]);
     }
     if (cursor + needed > chunk_capacity) {
-        if (chunk_cursor + 1 < chunks_per_frame) {
+        // A full frame takes another chunk rather than submitting: this runs while a draw or
+        // dispatch is set up, and a submit here leaves its earlier bindings in the submitted
+        // command buffer and frees the buffers stamped for it before it reads them.
+        const size_t count{frame_chunk_counts[frame_index]};
+        const auto grow = [&] {
+            if (count == max_chunks_per_frame) {
+                return false;
+            }
+            try {
+                return CreateChunk(frame_index * max_chunks_per_frame + count);
+            } catch (const vk::Exception&) {
+                return false;
+            }
+        };
+        if (chunk_cursor + 1 < count) {
             ++chunk_cursor;
+        } else if (grow()) {
+            ++frame_chunk_counts[frame_index];
+            ++chunk_cursor;
+            LOG_DEBUG(Render_Vulkan, "Descriptor buffer frame {} grew to {} chunks", frame_index,
+                      count + 1);
         } else {
-            LOG_DEBUG(Render_Vulkan, "Descriptor buffer frame exhausted, stalling on the GPU");
-            scheduler.Finish();
+            // Moves on to the next frame's chunks early. Their tick is waited for only once it
+            // was submitted, and the allocation fails (the draw is skipped) when it was not.
+            const size_t next{(frame_index + 1) % FRAMES_IN_FLIGHT};
+            if (frame_ticks[next] >= scheduler.CurrentTick()) {
+                LOG_DEBUG(Render_Vulkan, "Descriptor buffer exhausted within one command buffer");
+                return Allocation{};
+            }
+            LOG_DEBUG(Render_Vulkan, "Descriptor buffer frame exhausted, moving to the next");
+            scheduler.Wait(frame_ticks[next]);
+            frame_index = next;
+            frame_reused = false;
             chunk_cursor = 0;
             ++generation;
         }
         cursor = 0;
     }
-    const size_t chunk{frame_index * chunks_per_frame + chunk_cursor};
+    const size_t chunk{frame_index * max_chunks_per_frame + chunk_cursor};
     const VkDeviceSize offset{cursor};
     cursor += needed;
     frame_ticks[frame_index] = scheduler.CurrentTick();

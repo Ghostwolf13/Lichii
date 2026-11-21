@@ -33,10 +33,11 @@ establishes a routing difference, not which network instruction or input is wron
 
 ## Same-scene verification
 
-The candidate enables this narrow workaround by default.
+The temporal path described in [Game-DLSS replacement](native-dlss-replacement.md) is the
+default. This spatial workaround runs only for frames without matching motion vectors and
+depth, or with `EDEN_NX2_DLSS_REPLACEMENT=spatial`. On its own, it made the image soft and
+its edges crawl from frame to frame (all-in-one-5 report, RX 6650 XT).
 `EDEN_NX2_DLSS_REPLACEMENT=native` restores the native path for a fresh process.
-Explicit `fsr` or `dlss` values select the validated temporal path described in
-[Game-DLSS replacement](native-dlss-replacement.md), rather than the spatial workaround.
 The setting is process-local and does not modify saved configuration.
 
 Look for `Fire Emblem DLSS replacement: applied` in the log with no replacement override.

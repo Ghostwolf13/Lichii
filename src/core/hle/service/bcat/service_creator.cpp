@@ -4,7 +4,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "core/core.h"
+#include "core/file_sys/vfs/vfs_vector.h"
+#include "core/hle/service/bcat/backend/nextendo.h"
 #include "core/hle/service/bcat/bcat_service.h"
+#include "core/hle/service/bcat/delivery_cache_progress_service.h"
 #include "core/hle/service/bcat/delivery_cache_storage_service.h"
 #include "core/hle/service/bcat/service_creator.h"
 #include "core/hle/service/cmif_serialization.h"
@@ -18,13 +21,14 @@ std::unique_ptr<BcatBackend> CreateBackendFromSettings([[maybe_unused]] Core::Sy
 }
 
 IServiceCreator::IServiceCreator(Core::System& system_, const char* name_)
-    : ServiceFramework{system_, name_}, fsc{system.GetFileSystemController()} {
+    : ServiceFramework{system_, name_}, fsc{system.GetFileSystemController()},
+      legacy_progress{system_, "Legacy"} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, D<&IServiceCreator::CreateBcatService>, "CreateBcatService"},
         {1, D<&IServiceCreator::CreateDeliveryCacheStorageService>, "CreateDeliveryCacheStorageService"},
         {2, D<&IServiceCreator::CreateDeliveryCacheStorageServiceWithApplicationId>, "CreateDeliveryCacheStorageServiceWithApplicationId"},
-        {3, nullptr, "CreateDeliveryCacheProgressService"},
+        {3, D<&IServiceCreator::CreateDeliveryCacheProgressService>, "CreateDeliveryCacheProgressService"},
         {4, nullptr, "CreateDeliveryCacheProgressServiceWithApplicationId"},
     };
     // clang-format on
@@ -36,6 +40,16 @@ IServiceCreator::IServiceCreator(Core::System& system_, const char* name_)
 }
 
 IServiceCreator::~IServiceCreator() = default;
+
+FileSys::VirtualDir IServiceCreator::OpenCache(u64 title_id) {
+    Nextendo::RecoverInterrupted(Nextendo::CacheDirectory(title_id));
+    if (auto root = fsc.GetBCATDirectory(title_id)) {
+        return root;
+    }
+    LOG_ERROR(Service_BCAT, "Cannot open the delivery cache of {:016X}, serving an empty one",
+              title_id);
+    return std::make_shared<FileSys::VectorVfsDirectory>();
+}
 
 Result IServiceCreator::CreateBcatService(ClientProcessId process_id,
                                           OutInterface<IBcatService> out_interface) {
@@ -50,16 +64,25 @@ Result IServiceCreator::CreateDeliveryCacheStorageService(
     LOG_INFO(Service_BCAT, "called, process_id={}", process_id.pid);
 
     const auto title_id = system.ResolveCallerProgramId(*process_id);
-    *out_interface =
-        std::make_shared<IDeliveryCacheStorageService>(system, fsc.GetBCATDirectory(title_id));
+    *out_interface = std::make_shared<IDeliveryCacheStorageService>(system, OpenCache(title_id));
     R_SUCCEED();
 }
 
 Result IServiceCreator::CreateDeliveryCacheStorageServiceWithApplicationId(
     u64 application_id, OutInterface<IDeliveryCacheStorageService> out_interface) {
     LOG_DEBUG(Service_BCAT, "called, application_id={:016X}", application_id);
-    *out_interface = std::make_shared<IDeliveryCacheStorageService>(
-        system, fsc.GetBCATDirectory(application_id));
+    *out_interface =
+        std::make_shared<IDeliveryCacheStorageService>(system, OpenCache(application_id));
+    R_SUCCEED();
+}
+
+Result IServiceCreator::CreateDeliveryCacheProgressService(
+    ClientProcessId process_id, OutInterface<IDeliveryCacheProgressService> out_interface) {
+    LOG_INFO(Service_BCAT, "called, process_id={}", process_id.pid);
+
+    legacy_progress.FinishDownload(system.Kernel(), ResultSuccess);
+    *out_interface = std::make_shared<IDeliveryCacheProgressService>(
+        system, legacy_progress.GetEvent(), legacy_progress.GetImpl());
     R_SUCCEED();
 }
 

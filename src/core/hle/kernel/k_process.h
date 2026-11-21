@@ -120,6 +120,7 @@ private:
 
     std::atomic<s64> m_cpu_time{};
     std::atomic_bool m_mkw_dynamic_fps_patch_applied{};
+    std::atomic_bool m_frame_rate_unlocked{};
     std::atomic<u64> m_mkw_frame_mode_address{};
     std::atomic<u64> m_frame_interval_address{};
     std::atomic<u64> m_frame_interval_source_address{};
@@ -175,7 +176,7 @@ public:
                       KMemoryManager::Pool pool, bool immortal);
     Result Initialize(KernelCore& kernel, const Svc::CreateProcessParameter& params, std::span<const u32> user_caps,
                       KResourceLimit* res_limit, KMemoryManager::Pool pool,
-                      KProcessAddress aslr_space_start);
+                      KProcessAddress aslr_space_start, u64 switch2_program_id = 0);
     void Exit(KernelCore& kernel);
 
     const char* GetName() const {
@@ -192,6 +193,16 @@ public:
 
     void SetMkwDynamicFpsPatchApplied(bool applied) {
         m_mkw_dynamic_fps_patch_applied.store(applied, std::memory_order_relaxed);
+    }
+
+    /// A built-in patch lets the game run faster than its console frame rate
+    /// (PatchManager::PatchNSO): the host's display may start its frames (nx2:vi2).
+    bool IsFrameRateUnlocked() const {
+        return m_frame_rate_unlocked.load(std::memory_order_relaxed);
+    }
+
+    void SetFrameRateUnlocked(bool unlocked) {
+        m_frame_rate_unlocked.store(unlocked, std::memory_order_relaxed);
     }
 
     /// Mario Kart World's frame mode word that the 60 FPS mode switches (loader/nso.cpp), or 0.
@@ -288,6 +299,11 @@ public:
     bool IsSwitch2() const {
         return m_is_switch2;
     }
+#ifdef HAS_NCE
+    bool UsesNativeExecution() const {
+        return m_page_table.GetBasePageTable().UsesNativeExecution();
+    }
+#endif
 
     bool IsDefaultApplicationSystemResource() const {
         return m_is_default_application_system_resource;
@@ -561,6 +577,10 @@ public:
     void LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress base_addr);
 
     void InitializeInterfaces(KernelCore& kernel);
+
+#ifdef HAS_HYPERVISOR
+    void ReleaseHypervisor();
+#endif
 
     Core::Memory::Memory& GetMemory() {
         return m_memory;

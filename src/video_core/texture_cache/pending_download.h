@@ -7,6 +7,7 @@
 #include <unordered_set>
 #include <cstddef>
 #include <utility>
+#include "common/common_types.h"
 #include "common/slot_vector.h"
 
 namespace VideoCommon {
@@ -17,6 +18,8 @@ struct PendingImageDownload {
     size_t async_buffer_id;
     Common::SlotId object_id;
     std::shared_ptr<Image> retired_image{};
+    /// The image's modification tick when its contents were staged (asynchronous downloads).
+    u64 tick{};
 
     Image& GetImage(Common::SlotVector<Image>& images) const {
         return retired_image ? *retired_image : images[object_id];

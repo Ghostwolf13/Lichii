@@ -12,6 +12,11 @@
 #include "common/thread.h"
 #endif
 
+#ifdef HAS_NCE
+#include "common/logging.h"
+#include "common/settings.h"
+#endif
+
 #include "core/device_memory.h"
 #include "hle/kernel/board/nintendo/nx/k_system_control.h"
 
@@ -32,6 +37,31 @@ DeviceMemory::DeviceMemory()
 }
 
 DeviceMemory::~DeviceMemory() = default;
+
+#ifdef HAS_NCE
+u64 DeviceMemory::PrepareNativeExecution(bool has_39bit_address_space) {
+    const bool requested = Settings::values.cpu_backend.GetValue() == Settings::CpuBackend::Nce;
+#ifndef __ANDROID__
+    if (requested && (!Settings::values.use_multi_core.GetValue() ||
+                      Settings::values.cpu_clock.GetValue() != Settings::CpuClock::Normal ||
+                      Settings::values.sync_core_speed.GetValue() ||
+                      Settings::values.use_gdbstub.GetValue())) {
+        Settings::SetNceEnabled(false);
+        LOG_WARNING(Core, "NCE requires multicore, the normal CPU clock, independent speed "
+                          "control, and no debugger; falling back to Dynarmic");
+        return 0;
+    }
+#endif
+    const bool enabled = requested && has_39bit_address_space && Settings::IsFastmemEnabled() &&
+                         buffer.EnableDirectMappedAddress();
+    Settings::SetNceEnabled(enabled);
+    if (requested && !enabled) {
+        LOG_WARNING(Core, "NCE requires a 64-bit program and a shared 4 KiB fastmem arena inside "
+                          "the 39-bit address space; falling back to Dynarmic");
+    }
+    return enabled ? reinterpret_cast<u64>(buffer.VirtualBasePointer()) : 0;
+}
+#endif
 
 #ifdef _WIN32
 // Windows can't punch holes in the guest memory section, so pages holding only zeros (games clear

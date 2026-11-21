@@ -17,15 +17,31 @@
 #include <fmt/format.h>
 #include <openssl/evp.h>
 
+#include "common/cpu_features.h"
+#include "common/scope_exit.h"
+#include "core/core.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/nup_writer.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
+#include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/file_sys/vfs/vfs_vector.h"
+#include "core/frontend/emu_window.h"
+#include "core/frontend/graphics_context.h"
+#include "core/hle/kernel/k_system_control.h"
+#include "core/hle/service/acc/profile_manager.h"
+#include "core/hle/service/am/applet_manager.h"
+#include "core/hle/service/filesystem/filesystem.h"
+#include "core/hle/service/glue/glue_manager.h"
+#include "core/hle/service/ns/game_list_applications.h"
+#include "core/loader/deconstructed_rom_directory.h"
 #include "core/loader/nup.h"
+#include "tests/common/host_memory_test_access.h"
+#include "tests/core/system_test_context.h"
 
 namespace {
 
@@ -68,6 +84,30 @@ std::string Npdm(u64 program_id) {
     for (int i = 0; i < 8; ++i) {
         npdm[0x90 + i] = static_cast<char>(program_id >> (8 * i));
     }
+    return npdm;
+}
+
+std::string EditionNpdm(u64 program_id, bool switch2) {
+    const size_t shift = switch2 ? 0x100 : 0;
+    std::string npdm(0x480 + shift, '\0');
+    const auto put = [&](size_t offset, u64 value, size_t size = sizeof(u32)) {
+        for (size_t i = 0; i < size; ++i) {
+            npdm[offset + i] = static_cast<char>(value >> (8 * i));
+        }
+    };
+    npdm.replace(0, 4, "META");
+    put(0x70, 0x400 + shift);
+    put(0x74, 0x40);
+    put(0x78, 0x100);
+    put(0x7C, 0x240 + shift);
+    npdm.replace(0x300 + shift, 4, "ACID");
+    put(0x320 + shift, 0x240 + shift);
+    put(0x324 + shift, 0x2C);
+    npdm.replace(0x400 + shift, 4, "ACI0");
+    put(0x410 + shift, program_id, sizeof(program_id));
+    put(0x420 + shift, 0x40);
+    put(0x424 + shift, 0x1C);
+    put(0x430 + shift, 0x60);
     return npdm;
 }
 
@@ -150,6 +190,100 @@ std::map<std::string, std::string> PackedTree(const FileSys::VirtualDir& dir) {
 
 constexpr u64 TitleId = 0x0400ABCD00010000ULL;
 
+TEST_CASE("A NUP without its program metadata has no forwarder ID", "[nup][home_menu]") {
+    TempDir tmp;
+    const auto root = tmp.path / "Game";
+    Put(root / "base/exefs/main", "main");
+    Put(root / "base/exefs/main.npdm", Npdm(TitleId));
+    Put(root / "base/romfs/base.bin", "base");
+    const auto archive = tmp.path / "Game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+    auto bytes = ReadAll(archive);
+    const auto toc = Le(bytes, 8, 8);
+    const auto name = bytes.find("main.npdm", toc);
+    REQUIRE(name != std::string::npos);
+    bytes[name] = 'x';
+    const auto hash = Sha256(std::string_view{bytes}.substr(toc, Le(bytes, 0x10, 8)));
+    std::copy(hash.begin(), hash.end(), bytes.begin() + 0x18);
+
+    Loader::AppLoader_NUP loader{std::make_shared<FileSys::VectorVfsFile>(
+        std::vector<u8>(bytes.begin(), bytes.end()), "Game.nup")};
+    u64 id{};
+    CHECK(loader.ReadProgramId(id) != Loader::ResultStatus::Success);
+}
+
+TEST_CASE("HOME forwarders neither pin NUP files nor borrow another program's metadata",
+          "[nup][home_menu]") {
+    TempDir tmp;
+    const auto root = tmp.path / "Game";
+    Put(root / "base/exefs/main", "main");
+    Put(root / "base/exefs/main.npdm", Npdm(TitleId));
+    Put(root / "base/romfs/base.bin", "base");
+    const auto archive = tmp.path / "Game.nup";
+    FileSys::Nup::PackOptions options;
+    options.metadata.title_name = "Before";
+    options.metadata.icon = {0xFF, 0xD8, 0xFF, 0xD9};
+    REQUIRE(FileSys::Nup::PackDump(root, archive, options) == FileSys::Nup::PackResult::Success);
+
+    ScopedSystemTestContext environment;
+    std::vector<u8> artwork{1, 2, 3};
+    std::vector<u64> artwork_requests;
+    FileSys::ManualContentProvider provider{[&](u64 id) {
+        artwork_requests.push_back(id);
+        return artwork;
+    }};
+    Core::System system;
+    auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+    system.SetFilesystem(vfs);
+    system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+    system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual, &provider);
+    const auto path = Common::FS::PathToUTF8String(archive);
+    std::weak_ptr<FileSys::VfsFile> scanned_file;
+    {
+        const auto file = vfs->OpenFile(path, FileSys::OpenMode::Read);
+        scanned_file = file;
+        Loader::AppLoader_NUP loader{file};
+        u64 id{};
+        REQUIRE(loader.ReadProgramId(id) == Loader::ResultStatus::Success);
+        REQUIRE(id == TitleId);
+        provider.ReplaceApplicationPaths({{TitleId, path}, {TitleId + 1, path}});
+    }
+    CHECK(scanned_file.expired());
+
+    CHECK_FALSE(Service::NS::OpenGameListApplication(system, path, TitleId + 1));
+    const auto mismatched = Service::NS::GetApplicationControlMetadata(system, TitleId + 1);
+    CHECK(mismatched.first == nullptr);
+    CHECK(mismatched.second == nullptr);
+    CHECK(artwork_requests.empty());
+
+    FileSys::Nup::MetadataEdit edit;
+    edit.title_name = "After";
+    REQUIRE(FileSys::Nup::EditNupMetadata(archive, edit) == FileSys::Nup::EditResult::Success);
+    CHECK(Service::NS::OpenGameListApplication(system, path, TitleId));
+    const auto title_only = Service::NS::GetApplicationControlMetadata(system, TitleId, false);
+    REQUIRE(title_only.first != nullptr);
+    CHECK(title_only.first->GetApplicationName() == "After");
+    CHECK(title_only.second == nullptr);
+    CHECK(artwork_requests.empty());
+    const auto metadata = Service::NS::GetApplicationControlMetadata(system, TitleId);
+    REQUIRE(metadata.first != nullptr);
+    CHECK(metadata.first->GetApplicationName() == "After");
+    REQUIRE(metadata.second != nullptr);
+    CHECK(metadata.second->ReadAllBytes() == artwork);
+    CHECK(artwork_requests == std::vector<u64>{TitleId});
+
+    artwork = {4, 5};
+    const auto refreshed = Service::NS::GetApplicationControlMetadata(system, TitleId);
+    REQUIRE(refreshed.second != nullptr);
+    CHECK(refreshed.second->ReadAllBytes() == artwork);
+
+    artwork.clear();
+    const auto fallback = Service::NS::GetApplicationControlMetadata(system, TitleId);
+    REQUIRE(fallback.second != nullptr);
+    CHECK(fallback.second->ReadAllBytes() == options.metadata.icon);
+}
+
 TEST_CASE("NUP add-ons are readable through the manual content provider", "[nup][nup-content]") {
     TempDir tmp;
     const auto root = tmp.path / "dump";
@@ -216,6 +350,158 @@ TEST_CASE("NUP add-ons are readable through the manual content provider", "[nup]
     CHECK(provider.ListEntriesFilter({}, {}, {}).empty());
 }
 
+TEST_CASE("NUP loader registers a Switch 2 Edition's add-ons kept under the Switch 1 ID",
+          "[nup][nup-content]") {
+    // As Kirby and the Forgotten Land - Nintendo Switch 2 Edition: program 04004D300C5AE001,
+    // add-on 01004D300C5AF001.
+    constexpr u64 ProgramId = TitleId + 1;
+    constexpr u64 Switch1Application = 0x0100ABCD00010000ULL;
+    constexpr u64 AddOnId = Switch1Application + 0x1001;
+    TempDir tmp;
+    const auto root = tmp.path / "dump";
+    Put(root / "base/exefs/main", "main");
+    Put(root / "base/exefs/main.npdm", Npdm(ProgramId));
+    Put(root / "base/romfs/base.bin", "base");
+    Put(root / "dlc/0100ABCD00011001/0/romfs/addon.bin", "switch 1 addon");
+    Put(root / "dlc/0100ABCD00021001/0/romfs/foreign.bin", "foreign addon");
+    const auto archive = tmp.path / "game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+    FileSys::RealVfsFilesystem vfs;
+    Loader::AppLoader_NUP loader{vfs.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    u64 program_id{};
+    REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
+    REQUIRE(program_id == ProgramId);
+    FileSys::ManualContentProvider provider;
+    loader.RegisterContent(provider);
+
+    const auto entries =
+        provider.ListEntriesFilter(FileSys::TitleType::AOC, FileSys::ContentRecordType::Data, {});
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].title_id == AddOnId);
+    const auto nca = provider.GetEntry(AddOnId, FileSys::ContentRecordType::Data);
+    REQUIRE(nca != nullptr);
+    REQUIRE(nca->GetStatus() == Loader::ResultStatus::Success);
+    const auto romfs = FileSys::ExtractRomFS(nca->GetRomFS());
+    REQUIRE(romfs != nullptr);
+    CHECK(Read(romfs->GetFile("addon.bin")) == "switch 1 addon");
+
+    // As aoc lists them and hands out the add-on base the program mounts them by.
+    std::vector<u64> add_ons{AddOnId};
+    CHECK(FileSys::GetAddOnApplicationID(ProgramId, add_ons) == Switch1Application);
+    CHECK(FileSys::GetAOCBaseTitleID(FileSys::GetAddOnApplicationID(ProgramId, add_ons)) +
+              FileSys::GetAOCID(AddOnId) ==
+          AddOnId);
+    CHECK(FileSys::GetAddOnApplicationID(Switch1Application, add_ons) == Switch1Application);
+    add_ons.push_back(TitleId + 0x1002);
+    CHECK(FileSys::GetAddOnApplicationID(ProgramId, add_ons) == TitleId);
+    CHECK(FileSys::GetAddOnApplicationID(ProgramId, {}) == TitleId);
+}
+
+TEST_CASE("NUP only layers an enabled upgrade pack onto the selected Edition program",
+          "[nup][nup-content][nup-upgrade]") {
+    constexpr u64 ProgramId = TitleId + 1;
+    constexpr u64 LegacyId = 0x0100ABCD00010000ULL;
+    TempDir tmp;
+    const auto root = tmp.path / "dump";
+    Put(root / "base/exefs/main", "base main");
+    Put(root / "base/exefs/main.npdm", EditionNpdm(ProgramId, true));
+    Put(root / "base/romfs/title.bin", "base title");
+    Put(root / "base/romfs/base_only.bin", "base only");
+    Put(root / "updates/65536/exefs/main", "update main");
+    Put(root / "updates/65536/exefs/main.npdm", EditionNpdm(ProgramId, true));
+    Put(root / "updates/65536/romfs/title.bin", "update title");
+    Put(root / "updates/65536/romfs/update_only.bin", "update only");
+    const auto pack = root / "dlc/0100ABCD00011001/0/romfs";
+    Put(pack / "title.bin", "pack title");
+    Put(pack / "pack_only.bin", "pack only");
+    Put(root / "dlc/0400ABCD00011001/0/romfs/System/AoCUpgradeVersion.txt", "120");
+    Put(root / "dlc/0400ABCD00011001/0/romfs/own_aoc.bin", "ordinary add-on");
+    Put(root / "dlc/0100ABCD00021001/0/romfs/System/AoCUpgradeVersion.txt", "120");
+    Put(root / "dlc/0100ABCD00021001/0/romfs/foreign.bin", "foreign add-on");
+
+    const auto previous_disabled = Settings::values.disabled_addons;
+    SCOPE_EXIT { Settings::values.disabled_addons = previous_disabled; };
+    Settings::values.disabled_addons.erase(ProgramId);
+    Settings::values.disabled_addons.erase(TitleId);
+    bool enabled = false;
+    bool apply_mod = false;
+
+    SECTION("marked upgrade pack under a user mod") {
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        enabled = true;
+        apply_mod = true;
+    }
+    SECTION("nested Switch 2 resource table identifies the pack") {
+        Put(pack / "System/Product.120.Nin_Ounce_NVN2.byml", "table");
+        enabled = true;
+    }
+    SECTION("overlapping filenames and an unrelated version file are not an upgrade marker") {
+        Put(pack / "Other/AoCUpgradeVersion.txt", "120");
+    }
+    SECTION("the selected program's DLC setting disables the pack") {
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Settings::values.disabled_addons[ProgramId] = {"DLC"};
+    }
+    SECTION("the application's DLC setting disables the pack") {
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Settings::values.disabled_addons[TitleId] = {"DLC"};
+    }
+    SECTION("a legacy update does not disable the pack for the retained native base") {
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Put(root / "updates/65536/exefs/main.npdm", EditionNpdm(LegacyId, false));
+        enabled = true;
+    }
+    SECTION("legacy ExeFS does not activate the pack") {
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Put(root / "base/exefs/main.npdm", EditionNpdm(ProgramId, false));
+        Put(root / "updates/65536/exefs/main.npdm", EditionNpdm(LegacyId, false));
+    }
+    SECTION("an Edition title ID alone does not make the selected ExeFS Switch 2") {
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Put(root / "updates/65536/exefs/main.npdm", EditionNpdm(ProgramId, false));
+    }
+
+    const auto archive = tmp.path / "game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+    const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+    Loader::AppLoader_NUP loader{vfs->OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    FileSys::VirtualFile image;
+    REQUIRE(loader.ReadRomFS(image) == Loader::ResultStatus::Success);
+    const auto extracted = FileSys::ExtractRomFS(image);
+    REQUIRE(extracted);
+    const auto tree = PackedTree(extracted);
+    CHECK(tree.at("base_only.bin") == "base only");
+    CHECK(tree.at("update_only.bin") == "update only");
+    CHECK(tree.at("title.bin") == (enabled ? "pack title" : "update title"));
+    CHECK(tree.contains("pack_only.bin") == enabled);
+    CHECK_FALSE(tree.contains("own_aoc.bin"));
+    CHECK_FALSE(tree.contains("foreign.bin"));
+
+    if (apply_mod) {
+        using Common::FS::EdenPath;
+        const auto old_load = Common::FS::GetEdenPath(EdenPath::LoadDir);
+        SCOPE_EXIT { Tests::RestoreEdenPath(EdenPath::LoadDir, old_load); };
+        const auto load_root = tmp.path / "load";
+        Put(load_root / fmt::format("{:016X}", ProgramId) / "Synthetic/romfs/title.bin", "mod");
+        Common::FS::SetEdenPath(EdenPath::LoadDir, load_root);
+        ScopedSystemTestContext context;
+        Core::System system;
+        system.SetFilesystem(vfs);
+        system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+        auto& controller = system.GetFileSystemController();
+        controller.CreateFactories(*vfs);
+        const FileSys::RomFSFactory factory{loader, system.GetContentProvider(), controller};
+        const auto mounted_romfs = FileSys::ExtractRomFS(factory.OpenCurrentProcess(ProgramId));
+        REQUIRE(mounted_romfs);
+        const auto mounted = PackedTree(mounted_romfs);
+        CHECK(mounted.at("title.bin") == "mod");
+        CHECK(mounted.at("pack_only.bin") == "pack only");
+        CHECK(mounted.at("update_only.bin") == "update only");
+        CHECK(mounted.at("base_only.bin") == "base only");
+    }
+}
+
 void MakeDump(const fs::path& root) {
     Put(root / "Base/ExeFS/main", "base main");
     Put(root / "Base/ExeFS/main.npdm", Npdm(TitleId));
@@ -250,6 +536,25 @@ void SetLe(std::string& buf, size_t at, u64 value, size_t bytes) {
     for (size_t i = 0; i < bytes; ++i) {
         buf[at + i] = static_cast<char>(value >> (8 * i));
     }
+}
+
+std::string BootNpdm(u64 program_id, bool switch2) {
+    const u32 shift = switch2 ? 0x100 : 0;
+    std::string npdm(0x480 + shift, '\0');
+    npdm.replace(0, 4, "META");
+    SetLe(npdm, 0x70, 0x400 + shift, 4);
+    SetLe(npdm, 0x74, 0x40, 4);
+    SetLe(npdm, 0x78, 0x100, 4);
+    SetLe(npdm, 0x7C, 0x240 + shift, 4);
+    npdm.replace(0x300 + shift, 4, "ACID");
+    SetLe(npdm, 0x320 + shift, 0x240 + shift, 4);
+    SetLe(npdm, 0x324 + shift, 0x2C, 4);
+    npdm.replace(0x400 + shift, 4, "ACI0");
+    SetLe(npdm, 0x410 + shift, program_id, 8);
+    SetLe(npdm, 0x420 + shift, 0x40, 4);
+    SetLe(npdm, 0x424 + shift, 0x1C, 4);
+    SetLe(npdm, 0x430 + shift, 0x60, 4);
+    return npdm;
 }
 
 std::string LoaderTlv(u16 type, std::string_view value) {
@@ -515,6 +820,9 @@ TEST_CASE("NUP marks updates standalone when the dump has no base", "[nup]") {
     REQUIRE(nup.GetPackages()[0].standalone_update);
     REQUIRE(nup.GetPackages()[0].title_id == TitleId);
     REQUIRE(Read(nup.GetRomFSDir(0)->GetFile("file")) == "rom");
+
+    const Loader::AppLoader_NUP loader{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    CHECK(loader.ReadContainerUpdateVersion() == "1.0.0");
 }
 
 TEST_CASE("NUP packs a bare exefs/romfs dump as one base", "[nup]") {
@@ -537,6 +845,9 @@ TEST_CASE("NUP packs a bare exefs/romfs dump as one base", "[nup]") {
     REQUIRE(Read(nup.GetRomFSDir(0)->GetFile("file")) == "rom");
     const auto files = RawFiles(ReadAll(archive));
     REQUIRE(std::ranges::count(files, std::string{"notes.txt"}, &RawFile::name) == 1);
+
+    const Loader::AppLoader_NUP loader{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    CHECK_FALSE(loader.ReadContainerUpdateVersion());
 }
 
 TEST_CASE("NUP low storage resumes and deletes the packed sources", "[nup]") {
@@ -887,6 +1198,171 @@ TEST_CASE("NUP edit propagates display version to the newest update", "[nup]") {
             FileSys::Nup::EditResult::NoChange);
 }
 
+TEST_CASE("NUP preserves authored Edition control data separately from display metadata",
+          "[nup][nup-control-identity]") {
+    TempDir tmp;
+    const auto root = tmp.path / "Game";
+    constexpr u64 NativeProgram = TitleId + 1;
+    constexpr u64 SaveOwner = 0x0100ABCD00010000ULL;
+    constexpr u32 Languages =
+        u32(FileSys::SupportedLanguage::AmericanEnglish) | u32(FileSys::SupportedLanguage::Japanese);
+    Put(root / "base/exefs/main", "main");
+    Put(root / "base/exefs/main.npdm", Npdm(NativeProgram));
+    Put(root / "base/romfs/base.bin", "base");
+    FileSys::NACP source;
+    source.raw.save_data_owner_id = SaveOwner;
+    source.raw.dlc_base_title_id = SaveOwner + 0x1000;
+    source.raw.apparent_platform = FileSys::ApparentPlatform::Ounce;
+    source.raw.supported_languages = static_cast<FileSys::SupportedLanguage>(Languages);
+    source.raw.initial_program_index = 1;
+    source.raw.version_string = {'1', '.', '0', '.', '0'};
+    const auto bytes = source.GetRawBytes();
+    Put(root / "base/control.nacp",
+        {reinterpret_cast<const char*>(bytes.data()), bytes.size()});
+
+    const auto archive = tmp.path / "Game.nup";
+    FileSys::Nup::PackOptions options;
+    options.metadata.title_name = "Synthetic Edition";
+    options.metadata.publisher = "Synthetic publisher override";
+    options.metadata.display_version = "9.8.7";
+    std::string error;
+    const auto packed = FileSys::Nup::PackDump(root, archive, options, {}, nullptr, &error);
+    INFO(error);
+    REQUIRE(packed == FileSys::Nup::PackResult::Success);
+    FileSys::RealVfsFilesystem vfs;
+    Loader::AppLoader_NUP loader{vfs.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    FileSys::NACP control;
+    REQUIRE(loader.ReadControlData(control) == Loader::ResultStatus::Success);
+    CHECK(control.GetRawBytes() == bytes);
+    CHECK(control.GetTitleId() == SaveOwner);
+    CHECK(control.GetDLCBaseTitleId() == SaveOwner + 0x1000);
+    CHECK(control.raw.apparent_platform == FileSys::ApparentPlatform::Ounce);
+    CHECK(control.GetSupportedLanguages() == Languages);
+    u64 program_id{};
+    REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
+    CHECK(program_id == NativeProgram);
+
+    Service::Glue::ARPManager arp;
+    REQUIRE(arp.Register(program_id, {.title_id = program_id}, control.GetRawBytes()).IsSuccess());
+    CHECK(arp.GetSupportedLanguages(program_id) == Languages);
+    CHECK_FALSE(arp.GetSupportedLanguages(SaveOwner));
+    CHECK_FALSE(arp.GetSupportedLanguages(TitleId));
+
+    std::string title, version, developer;
+    REQUIRE(loader.ReadTitle(title) == Loader::ResultStatus::Success);
+    CHECK(title == "Synthetic Edition");
+    REQUIRE(loader.ReadDisplayVersion(version) == Loader::ResultStatus::Success);
+    CHECK(version == "9.8.7");
+    REQUIRE(loader.ReadDeveloper(developer) == Loader::ResultStatus::Success);
+    CHECK(developer == "Synthetic publisher override");
+}
+
+TEST_CASE("NUP ignores a legacy short control TLV and keeps the title",
+          "[nup][nup-control-identity]") {
+    TempDir tmp;
+    const auto metadata = LoaderTlv(2, "legacy icon") + LoaderTlv(5, "Legacy title");
+    auto file = LoaderMetadataFixture(tmp.path, {metadata});
+    NupContainer parsed{file};
+    REQUIRE(parsed.GetStatus() == Loader::ResultStatus::Success);
+    CHECK(parsed.GetPackages().front().nacp.empty());
+    Loader::AppLoader_NUP loader{file};
+    std::string title;
+    REQUIRE(loader.ReadTitle(title) == Loader::ResultStatus::Success);
+    CHECK(title == "Legacy title");
+}
+
+TEST_CASE("A booted NUP update's control takes precedence over legacy base control",
+          "[nup][nup-control-identity]") {
+    TempDir tmp;
+    FileSys::NACP source;
+    source.raw.save_data_owner_id = 0x0100ABCD00010000ULL;
+    const auto legacy = source.GetRawBytes();
+    source.raw.apparent_platform = FileSys::ApparentPlatform::Ounce;
+    source.raw.initial_program_index = 1;
+    source.raw.supported_languages = FileSys::SupportedLanguage::Japanese;
+    const auto edition = source.GetRawBytes();
+    const auto base = LoaderTlv(2, {reinterpret_cast<const char*>(legacy.data()), legacy.size()});
+    const auto update =
+        LoaderTlv(2, {reinterpret_cast<const char*>(edition.data()), edition.size()});
+    Loader::AppLoader_NUP loader{LoaderMetadataFixture(tmp.path, {base, update})};
+    FileSys::NACP control;
+    REQUIRE(loader.ReadControlData(control) == Loader::ResultStatus::Success);
+    CHECK(control.GetRawBytes() == edition);
+}
+
+TEST_CASE("PackDump preserves control metadata owned by an update",
+          "[nup][nup-control-identity][nup-update-control]") {
+    TempDir tmp;
+    const auto root = tmp.path / "Game";
+    const auto update = root / "updates/65536";
+    Put(root / "base/exefs/main", "base main");
+    Put(root / "base/exefs/main.npdm", Npdm(TitleId));
+    Put(root / "base/romfs/shared.bin", "base");
+    Put(update / "romfs/shared.bin", "update");
+
+    FileSys::NACP source;
+    source.raw.save_data_owner_id = TitleId;
+    source.raw.supported_languages = FileSys::SupportedLanguage::AmericanEnglish;
+    const auto base = source.GetRawBytes();
+    Put(root / "base/control.nacp", {reinterpret_cast<const char*>(base.data()), base.size()});
+
+    source.raw.save_data_owner_id = TitleId + 1;
+    source.raw.supported_languages = FileSys::SupportedLanguage::Japanese;
+    const auto patched = source.GetRawBytes();
+    const std::string_view patched_bytes{reinterpret_cast<const char*>(patched.data()),
+                                         patched.size()};
+    const std::vector<u8>* expected = &patched;
+    SECTION("Executable update has its own control") {
+        Put(update / "exefs/main", "update main");
+        Put(update / "exefs/main.npdm", Npdm(TitleId));
+        Put(update / "exefs/control.nacp", patched_bytes);
+    }
+    SECTION("RomFS-only update has its own control") {
+        Put(update / "control.nacp", patched_bytes);
+    }
+    SECTION("An ancestor's control does not belong to the update") {
+        Put(update / "exefs/main", "update main");
+        Put(update / "exefs/main.npdm", Npdm(TitleId));
+        Put(root / "updates/control.nacp", patched_bytes);
+        expected = &base;
+    }
+
+    const auto archive = tmp.path / "Game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+    FileSys::RealVfsFilesystem vfs;
+    const auto file = vfs.OpenFile(archive.string(), FileSys::OpenMode::Read);
+    Loader::AppLoader_NUP loader{file};
+    FileSys::NACP control;
+    REQUIRE(loader.ReadControlData(control) == Loader::ResultStatus::Success);
+    CHECK(control.GetRawBytes() == *expected);
+
+    NupContainer parsed{file};
+    REQUIRE(parsed.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(parsed.GetPackages().size() == 2);
+    CHECK(parsed.GetPackages()[0].nacp == base);
+    if (expected == &base) {
+        CHECK(parsed.GetPackages()[1].nacp.empty());
+    } else {
+        CHECK(parsed.GetPackages()[1].nacp == patched);
+    }
+}
+
+TEST_CASE("A malformed compressed control title leaves the NUP identity readable",
+          "[nup][nup-control-identity]") {
+    TempDir tmp;
+    FileSys::NACP source;
+    source.raw.save_data_owner_id = 0x0100ABCD00010000ULL;
+    source.raw.titles_data_format = FileSys::TitleDataFormat::Compressed;
+    source.raw.language_entries.compressed_data.buffer_size = 0xFFFF;
+    const auto bytes = source.GetRawBytes();
+    const auto metadata = LoaderTlv(2, {reinterpret_cast<const char*>(bytes.data()), bytes.size()});
+    Loader::AppLoader_NUP loader{LoaderMetadataFixture(tmp.path, {metadata})};
+    FileSys::NACP control;
+    REQUIRE(loader.ReadControlData(control) == Loader::ResultStatus::Success);
+    CHECK(control.GetRawBytes() == bytes);
+    CHECK(control.GetApplicationName().empty());
+}
+
 TEST_CASE("NUP loader exposes title and publisher through control data", "[nup]") {
     TempDir t;
     const auto root = t.path / "Game";
@@ -1098,6 +1574,7 @@ TEST_CASE("NUP loader selects base metadata field by field with an empty base Ex
         REQUIRE(entry.GetDeveloperName() == expected_publisher);
     }
     REQUIRE(control.GetVersionString() == "1.2.3");
+    CHECK(loader.ReadContainerUpdateVersion() == "1.2.3");
     REQUIRE(control.raw.save_data_owner_id == TitleId);
     u64 program_id{};
     REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
@@ -1168,4 +1645,437 @@ TEST_CASE("NUP loader leaves standalone update metadata unchanged", "[nup][loade
     u64 program_id{};
     REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
     REQUIRE(program_id == TitleId);
+}
+
+TEST_CASE("NUP boot and platform probe use the same program's ExeFS", "[nup][boot-inputs]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    constexpr u64 edition_program = TitleId + 1;
+    const u64 legacy_program = FileSys::GetSwitch1ApplicationID(TitleId);
+    bool have_base = true;
+    bool base_switch2 = true;
+    bool update_switch2 = false;
+    bool foreign_update = false;
+    u64 native_update_id = edition_program;
+    std::optional<u64> embedded_id;
+    bool embedded_switch2 = true;
+    bool have_embedded_romfs = true;
+    bool have_marked_pack = false;
+    char expected_build = 'B';
+
+    SECTION("legacy update program 0 does not replace native program 1") {}
+    SECTION("native update for program 1 supersedes its base") {
+        update_switch2 = true;
+        expected_build = 'U';
+    }
+    SECTION("a matching native program 1 update determines the legacy base's executable ID") {
+        base_switch2 = false;
+        update_switch2 = true;
+        expected_build = 'U';
+    }
+    SECTION("a legacy base does not claim a foreign native update") {
+        base_switch2 = false;
+        update_switch2 = true;
+        foreign_update = true;
+        native_update_id = edition_program + 0x2000;
+    }
+    SECTION("a native base does not claim a foreign native update") {
+        update_switch2 = true;
+        foreign_update = true;
+        native_update_id = edition_program + 0x2000;
+    }
+    SECTION("a native update for a different program index cannot replace the base") {
+        update_switch2 = true;
+        foreign_update = true;
+        native_update_id = edition_program + 1;
+    }
+    SECTION("legacy update supersedes its legacy base") {
+        base_switch2 = false;
+        expected_build = 'U';
+    }
+    SECTION("a legacy update without a native ExeFS stays Switch 1") {
+        have_base = false;
+        expected_build = 'U';
+    }
+    SECTION("a legacy standalone update uses its exact native sibling") {
+        have_base = false;
+        embedded_id = edition_program;
+        expected_build = 'E';
+    }
+    SECTION("an embedded native program can share the standalone update's RomFS") {
+        have_base = false;
+        embedded_id = edition_program;
+        have_embedded_romfs = false;
+        expected_build = 'E';
+    }
+    SECTION("the native sibling's RomFS wins over the upgrade pack") {
+        have_base = false;
+        embedded_id = edition_program;
+        have_marked_pack = true;
+        expected_build = 'E';
+    }
+    SECTION("an unrelated embedded native program is ignored") {
+        have_base = false;
+        embedded_id = edition_program + 0x2000;
+        expected_build = 'U';
+    }
+    SECTION("an embedded program without native metadata is ignored") {
+        have_base = false;
+        embedded_id = edition_program;
+        embedded_switch2 = false;
+        expected_build = 'U';
+    }
+
+    const auto write_exefs = [](const fs::path& path, u64 program_id, bool switch2, char build) {
+        std::string main(0x100, '\0');
+        main.replace(0, 4, "NSO0");
+        main[0x40] = build;
+        Put(path / "main", main);
+        Put(path / "main.npdm", BootNpdm(program_id, switch2));
+    };
+    if (have_base) {
+        write_exefs(root / "base/exefs", base_switch2 ? edition_program : legacy_program,
+                    base_switch2, 'B');
+        Put(root / "base/romfs/base.bin", "base");
+    }
+    const auto update_program_id = update_switch2 ? native_update_id : legacy_program;
+    write_exefs(root / "updates/65536/exefs", update_program_id, update_switch2, 'U');
+    if (embedded_id) {
+        write_exefs(root / "updates/65536/program1/exefs", *embedded_id, embedded_switch2, 'E');
+        if (have_embedded_romfs) {
+            Put(root / "updates/65536/program1/romfs/update.bin", "edition");
+        }
+    }
+    Put(root / "updates/65536/romfs/update.bin", "update");
+    Put(root / "updates/65536/romfs/shared.bin", "shared");
+    if (have_marked_pack) {
+        const auto pack = root / "dlc/0100ABCD00011001/0/romfs";
+        Put(pack / "System/AoCUpgradeVersion.txt", "120");
+        Put(pack / "update.bin", "pack");
+        Put(pack / "shared.bin", "pack");
+    }
+    const auto archive = t.path / "Game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+    FileSys::RealVfsFilesystem vfs;
+    const auto file = vfs.OpenFile(archive.string(), FileSys::OpenMode::Read);
+    const auto switch2_id = Core::FindSwitch2Program(file, 0, 0);
+    Loader::AppLoader_NUP loader{file};
+    u64 program_id{};
+    if (foreign_update) {
+        CHECK_FALSE(switch2_id);
+        CHECK(loader.ReadProgramId(program_id) == Loader::ResultStatus::ErrorNotInitialized);
+        return;
+    }
+    if ((have_base && base_switch2) || update_switch2 || expected_build == 'E') {
+        CHECK(switch2_id == edition_program);
+    } else {
+        CHECK_FALSE(switch2_id);
+    }
+
+    Core::System system{Service::Account::ProfileStorage::Scratch};
+    system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
+    system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+    std::array<u8, 0x20> build_id{};
+    REQUIRE(loader.ReadMainBuildId(system, build_id) == Loader::ResultStatus::Success);
+    CHECK(build_id.front() == expected_build);
+    REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
+    CHECK(program_id == (switch2_id ? edition_program : legacy_program));
+    if (have_base && !base_switch2 && update_switch2) {
+        FileSys::NACP control;
+        REQUIRE(loader.ReadControlData(control) == Loader::ResultStatus::Success);
+        CHECK(control.raw.save_data_owner_id == legacy_program);
+    }
+    FileSys::VirtualFile romfs;
+    REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::Success);
+    const auto tree = FileSys::ExtractRomFS(romfs);
+    REQUIRE(tree != nullptr);
+    REQUIRE(tree->GetFile("update.bin") != nullptr);
+    const auto expected_data = expected_build == 'E' && have_embedded_romfs ? "edition" : "update";
+    CHECK(Read(tree->GetFile("update.bin")) == expected_data);
+    REQUIRE(tree->GetFile("shared.bin") != nullptr);
+    CHECK(Read(tree->GetFile("shared.bin")) == (have_marked_pack ? "pack" : "shared"));
+    if (switch2_id) {
+        FileSys::RomFSFactory factory{loader, system.GetContentProvider(),
+                                      system.GetFileSystemController()};
+        constexpr auto type = FileSys::ContentRecordType::Program;
+        const auto own_romfs = factory.OpenPatchedRomFSWithProgramIndex(edition_program, 1, type);
+        REQUIRE(own_romfs != nullptr);
+        const auto own_tree = FileSys::ExtractRomFS(own_romfs);
+        REQUIRE(own_tree != nullptr);
+        REQUIRE(own_tree->GetFile("update.bin") != nullptr);
+        CHECK(Read(own_tree->GetFile("update.bin")) == expected_data);
+        CHECK_FALSE(factory.OpenPatchedRomFSWithProgramIndex(edition_program, 2, type));
+    }
+}
+
+TEST_CASE("A native update boots over a base packed without an executable", "[nup][boot-inputs]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    fs::create_directories(root / "base/exefs");
+    Put(root / "base/romfs/base.bin", "base");
+    std::string main(0x100, '\0');
+    main.replace(0, 4, "NSO0");
+    main[0x40] = 'U';
+    Put(root / "updates/131073/exefs/main", main);
+    Put(root / "updates/131073/exefs/main.npdm", BootNpdm(TitleId, true));
+    Put(root / "updates/131073/romfs/update.bin", "update");
+    const auto archive = t.path / "Game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+
+    FileSys::RealVfsFilesystem vfs;
+    const auto file = vfs.OpenFile(archive.string(), FileSys::OpenMode::Read);
+    NupContainer nup{file};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(nup.FindBasePackage() == std::size_t{0});
+    REQUIRE(nup.GetExeFSDir(0) == nullptr);
+    REQUIRE(nup.GetPackages()[0].title_id == 0);
+
+    CHECK(Core::FindSwitch2Program(file, 0, 0) == TitleId);
+    Loader::AppLoader_NUP loader{file};
+    u64 program_id{};
+    REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
+    CHECK(program_id == TitleId);
+    CHECK(loader.ReadContainerUpdateVersion() == "2.0.1");
+
+    Core::System system{Service::Account::ProfileStorage::Scratch};
+    system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
+    system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+    std::array<u8, 0x20> build_id{};
+    REQUIRE(loader.ReadMainBuildId(system, build_id) == Loader::ResultStatus::Success);
+    CHECK(build_id.front() == 'U');
+
+    FileSys::VirtualFile romfs;
+    REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::Success);
+    const auto tree = FileSys::ExtractRomFS(romfs);
+    REQUIRE(tree != nullptr);
+    REQUIRE(tree->GetFile("base.bin") != nullptr);
+    CHECK(Read(tree->GetFile("base.bin")) == "base");
+    REQUIRE(tree->GetFile("update.bin") != nullptr);
+    CHECK(Read(tree->GetFile("update.bin")) == "update");
+}
+
+TEST_CASE("The own-index fallback does not mount mods without a RomFS", "[boot-inputs]") {
+    TempDir t;
+    constexpr u64 program_id = TitleId + 1;
+    const auto exefs = t.path / "Game/exefs";
+    Put(exefs / "main", "main");
+    Put(exefs / "main.npdm", BootNpdm(program_id, true));
+
+    using Common::FS::EdenPath;
+    const auto old_load = Common::FS::GetEdenPath(EdenPath::LoadDir);
+    SCOPE_EXIT { Tests::RestoreEdenPath(EdenPath::LoadDir, old_load); };
+    const auto load_root = t.path / "load";
+    Put(load_root / fmt::format("{:016X}", program_id) / "Synthetic/romfs/mod.bin", "mod");
+    Common::FS::SetEdenPath(EdenPath::LoadDir, load_root);
+    ScopedSystemTestContext context;
+    const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+    Core::System system;
+    system.SetFilesystem(vfs);
+    system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+    auto& controller = system.GetFileSystemController();
+    controller.CreateFactories(*vfs);
+
+    Loader::AppLoader_DeconstructedRomDirectory loader{
+        Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(exefs / "main"))};
+    FileSys::VirtualFile romfs;
+    REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::ErrorNoRomFS);
+    const FileSys::RomFSFactory factory{loader, system.GetContentProvider(), controller};
+    constexpr auto type = FileSys::ContentRecordType::Program;
+    REQUIRE(factory.OpenCurrentProcess(program_id) != nullptr);
+    CHECK_FALSE(factory.OpenPatchedRomFSWithProgramIndex(program_id, 1, type));
+}
+
+TEST_CASE("Loose Edition folders read program, matching update and base data", "[boot-inputs]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    const auto version = root / "updates/65536";
+    auto edition = version / "program1";
+    constexpr u64 edition_program = TitleId + 1;
+    const u64 legacy_program = FileSys::GetSwitch1ApplicationID(TitleId);
+    bool boot_edition = true;
+    bool native_npdm = true;
+    bool have_base = true;
+    bool root_main = false;
+    bool base_romfs_image = false;
+    bool have_base_data = true;
+    bool have_foreign_base = false;
+    std::optional<std::string> base_npdm = BootNpdm(legacy_program, false);
+    auto base = root / "base";
+    auto base_romfs = fs::path{};
+    u64 program_id = edition_program;
+
+    SECTION("direct program1") {}
+    SECTION("wrapped program1") {
+        edition = version / "program/program1";
+    }
+    SECTION("a non-native program1 cannot replace the legacy base") {
+        boot_edition = false;
+        native_npdm = false;
+    }
+    SECTION("a foreign program1 cannot replace the legacy base") {
+        program_id += 0x2000;
+        boot_edition = false;
+    }
+    SECTION("a standalone native program does not require a base") {
+        have_base = false;
+    }
+    SECTION("a matching native program keeps the root base RomFS") {
+        base = root;
+    }
+    SECTION("a foreign program1 cannot replace the root ExeFS") {
+        base = root;
+        program_id += 0x2000;
+        boot_edition = false;
+    }
+    SECTION("a matching native program supersedes a bare root main") {
+        base = root;
+        root_main = true;
+    }
+    SECTION("a bare root main can use shared RomFS from the base package") {
+        base = root;
+        root_main = true;
+        base_romfs = root / "base/romfs";
+    }
+    SECTION("a root executable prefers its own RomFS over a foreign base's directory") {
+        base = root;
+        root_main = true;
+        have_foreign_base = true;
+    }
+    SECTION("a root executable without data does not borrow a foreign base's RomFS") {
+        base = root;
+        root_main = true;
+        have_foreign_base = true;
+        have_base_data = false;
+    }
+    SECTION("a matching native program layers over a file-backed base RomFS") {
+        base = root;
+        root_main = true;
+        base_romfs_image = true;
+    }
+    SECTION("a native root main cannot be replaced by another program index") {
+        base = root;
+        root_main = true;
+        base_npdm = BootNpdm(TitleId + 2, true);
+        boot_edition = false;
+    }
+    SECTION("a bare root main with no NPDM cannot be matched to an Edition") {
+        base = root;
+        root_main = true;
+        base_npdm.reset();
+        boot_edition = false;
+    }
+    SECTION("a bare root main with an empty NPDM cannot be matched to an Edition") {
+        base = root;
+        root_main = true;
+        base_npdm = "";
+        boot_edition = false;
+    }
+
+    const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+    const auto base_exefs = root_main ? base : base / "exefs";
+    if (have_base) {
+        Put(base_exefs / "main", "legacy");
+        if (base_npdm) {
+            Put(base_exefs / "main.npdm", *base_npdm);
+        }
+        if (base_romfs_image) {
+            const auto data = t.path / "base-image";
+            Put(data / "base.bin", "base data");
+            Put(data / "shared.bin", "base override");
+            const auto image = FileSys::CreateRomFS(
+                vfs->OpenDirectory(Common::FS::PathToUTF8String(data), FileSys::OpenMode::Read));
+            REQUIRE(image != nullptr);
+            Put(base_exefs / "data.romfs", Read(image));
+        } else if (have_base_data) {
+            Put((base_romfs.empty() ? base / "romfs" : base_romfs) / "base.bin", "base data");
+        }
+    }
+    if (have_foreign_base) {
+        Put(root / "base/exefs/main", "foreign");
+        Put(root / "base/exefs/main.npdm", BootNpdm(legacy_program + 0x2000, false));
+        Put(root / "base/romfs/base.bin", "foreign data");
+    }
+    Put(version / "romfs/update.bin", "update data");
+    Put(version / "romfs/shared.bin", "legacy data");
+    Put(edition / "exefs/main", "edition");
+    Put(edition / "exefs/main.npdm", BootNpdm(program_id, native_npdm));
+    Put(edition / "romfs/shared.bin", "edition data");
+
+    const auto native = Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(root));
+    REQUIRE(native != nullptr);
+    CHECK(Read(native) == (boot_edition ? "edition" : "legacy"));
+    if (have_base) {
+        const auto explicit_legacy =
+            Core::GetGameFileFromPath(vfs, Common::FS::PathToUTF8String(base_exefs / "main"));
+        REQUIRE(explicit_legacy != nullptr);
+        CHECK(Read(explicit_legacy) == "legacy");
+    }
+    if (root_main && !boot_edition) {
+        const auto explicit_edition = Core::GetGameFileFromPath(
+            vfs, Common::FS::PathToUTF8String(edition / "exefs/main"));
+        REQUIRE(explicit_edition != nullptr);
+        Loader::AppLoader_DeconstructedRomDirectory loader{explicit_edition};
+        FileSys::VirtualFile romfs;
+        REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::Success);
+        const auto tree = FileSys::ExtractRomFS(romfs);
+        REQUIRE(tree != nullptr);
+        REQUIRE(tree->GetFile("update.bin") != nullptr);
+        CHECK(Read(tree->GetFile("update.bin")) == "update data");
+        CHECK_FALSE(tree->GetFile("base.bin"));
+        return;
+    }
+
+    Loader::AppLoader_DeconstructedRomDirectory loader{native};
+    FileSys::VirtualFile romfs;
+    REQUIRE(loader.ReadRomFS(romfs) == Loader::ResultStatus::Success);
+    const auto tree = FileSys::ExtractRomFS(romfs);
+    REQUIRE(tree != nullptr);
+    const auto base_member = tree->GetFile("base.bin");
+    CHECK(static_cast<bool>(base_member) == (have_base && have_base_data));
+    if (base_member) {
+        CHECK(Read(base_member) == "base data");
+    }
+    if (boot_edition) {
+        REQUIRE(tree->GetFile("update.bin") != nullptr);
+        CHECK(Read(tree->GetFile("update.bin")) == "update data");
+        REQUIRE(tree->GetFile("shared.bin") != nullptr);
+        CHECK(Read(tree->GetFile("shared.bin")) == "edition data");
+    } else {
+        CHECK_FALSE(tree->GetFile("update.bin"));
+        CHECK_FALSE(tree->GetFile("shared.bin"));
+    }
+}
+
+TEST_CASE("A fresh System resolves its boot file before kernel allocation", "[boot-inputs]") {
+    struct TestWindow final : Core::Frontend::EmuWindow {
+        std::unique_ptr<Core::Frontend::GraphicsContext> CreateSharedContext() const override {
+            FAIL("Allocation failure must not initialize the renderer");
+            return {};
+        }
+        bool IsShown() const override {
+            return false;
+        }
+    } window;
+    const bool previous_switch2 = Settings::CurrentProgramIsSwitch2();
+    const auto previous_frequency = Common::g_wall_clock.GetGuestCNTFRQ();
+    const auto previous_global = Settings::values.memory_layout_mode.UsingGlobal();
+    SCOPE_EXIT {
+        Settings::SetCurrentProgramIsSwitch2(previous_switch2);
+        Common::g_wall_clock.SetGuestCNTFRQ(previous_frequency);
+        Settings::values.memory_layout_mode.SetGlobal(previous_global);
+        Kernel::KSystemControl::SetApplicationProgramId(0);
+    };
+    Settings::values.memory_layout_mode.SetGlobal(false);
+    ScopedSystemTestContext context;
+    TempDir t;
+    Put(t.path / "main", "main");
+    Put(t.path / "main.npdm", BootNpdm(TitleId + 1, true));
+    Common::HostMemoryTestAccess allocations;
+    Core::System system;
+    Service::AM::FrontendAppletParameters params{};
+    params.launch_type = Service::AM::LaunchType::ApplicationInitiated;
+    CHECK(system.Load(window, Common::FS::PathToUTF8String(t.path / "main"), params) ==
+          Core::SystemResultStatus::ErrorMemoryAllocation);
+    CHECK(Settings::CurrentProgramIsSwitch2());
 }

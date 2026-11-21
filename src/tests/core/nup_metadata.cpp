@@ -28,6 +28,9 @@
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/nup_writer.h"
 #include "core/file_sys/vfs/vfs_real.h"
+#include "core/hle/service/glue/glue_manager.h"
+#include "core/hle/service/ns/ns_results.h"
+#include "core/hle/service/ns/read_only_application_control_data_interface.h"
 #include "core/loader/nup.h"
 
 namespace {
@@ -844,4 +847,44 @@ TEST_CASE("NUP metadata fails safely for invalid paths and incomplete archives",
     bytes[Toc + 40] ^= 1;
     Write(archive, bytes);
     RejectUnchanged(archive, {.title_name = "new title"});
+}
+
+TEST_CASE("ARP language fallback accepts supported languages missing from the locale priorities",
+          "[nup][application-language]") {
+    using namespace Service::NS;
+    struct RestoreLanguage {
+        Settings::Language value = Settings::values.language_index.GetValue();
+        ~RestoreLanguage() {
+            Settings::values.language_index.SetValue(value);
+        }
+    } restore_language;
+
+    constexpr u64 ProgramId = 0x0400ABCD00010001;
+    constexpr u32 Mask = GetSupportedLanguageFlag(ApplicationLanguage::Portuguese) |
+                         GetSupportedLanguageFlag(ApplicationLanguage::BrazilianPortuguese);
+    FileSys::NACP control;
+    control.raw.supported_languages = static_cast<FileSys::SupportedLanguage>(Mask);
+    Service::Glue::ARPManager arp;
+    REQUIRE(arp.Register(ProgramId, {.title_id = ProgramId}, control.GetRawBytes()).IsSuccess());
+    const auto supported = arp.GetSupportedLanguages(ProgramId);
+    REQUIRE(supported == Mask);
+
+    for (const auto locale : {Settings::Language::Polish, Settings::Language::Thai}) {
+        CAPTURE(static_cast<int>(locale));
+        Settings::values.language_index.SetValue(locale);
+        ApplicationLanguage desired{};
+        CHECK(ResolveApplicationDesiredLanguage(&desired, *supported, false) ==
+              ResultApplicationLanguageNotFound);
+        REQUIRE(ResolveApplicationDesiredLanguage(&desired, *supported, true).IsSuccess());
+        CHECK(desired == ApplicationLanguage::Portuguese);
+
+        const u32 overlap = *supported | GetSupportedLanguageFlag(ApplicationLanguage::Japanese);
+        REQUIRE(ResolveApplicationDesiredLanguage(&desired, overlap, true).IsSuccess());
+        CHECK(desired == ApplicationLanguage::Japanese);
+
+        REQUIRE(ResolveApplicationDesiredLanguage(&desired, 0, true).IsSuccess());
+        const auto unmasked = desired;
+        REQUIRE(ResolveApplicationDesiredLanguage(&desired, 1U << 31, true).IsSuccess());
+        CHECK(desired == unmasked);
+    }
 }

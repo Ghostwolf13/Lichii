@@ -3,6 +3,12 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#ifdef HAS_HYPERVISOR
+#include <future>
+#endif
+
+#include "core/cpu_manager.h"
+
 #include "common/dkb_cpu_trace.h"
 #include "common/fiber.h"
 #include "common/scope_exit.h"
@@ -10,7 +16,6 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
-#include "core/cpu_manager.h"
 #include "core/hle/kernel/k_interrupt_manager.h"
 #include "core/hle/kernel/k_scheduler.h"
 #include "core/hle/kernel/k_thread.h"
@@ -18,18 +23,45 @@
 #include "core/hle/kernel/physical_core.h"
 #include "video_core/gpu.h"
 
+#ifdef HAS_HYPERVISOR
+#include "core/arm/hypervisor/arm_hypervisor.h"
+#include "core/hle/kernel/k_process.h"
+#endif
+
 namespace Core {
 
 CpuManager::CpuManager(System& system_) : system{system_} {}
 CpuManager::~CpuManager() = default;
 
-void CpuManager::Initialize() {
+bool CpuManager::Initialize([[maybe_unused]] Kernel::KProcess* process) {
     num_cores = is_multicore ? Core::Hardware::NUM_CPU_CORES : 1;
     gpu_barrier.emplace(num_cores + 1);
+#ifdef HAS_HYPERVISOR
+    if (process && process->GetMemory().GetHypervisor()) {
+        std::array<std::future<bool>, Core::Hardware::NUM_CPU_CORES> ready;
+        for (std::size_t core = 0; core < num_cores; ++core) {
+            auto* interface = static_cast<ArmHypervisor*>(process->GetArmInterface(core));
+            std::promise<bool> initialized;
+            ready[core] = initialized.get_future();
+            core_data[core].host_thread = std::jthread(
+                [this, core, interface, initialized = std::move(initialized)](
+                    std::stop_token token) mutable {
+                    initialized.set_value(interface->EnsureVcpu());
+                    RunThread(token, core);
+                });
+        }
+        bool initialized = true;
+        for (std::size_t core = 0; core < num_cores; ++core) {
+            initialized &= ready[core].get();
+        }
+        return initialized;
+    }
+#endif
     for (std::size_t core = 0; core < num_cores; core++)
         core_data[core].host_thread = std::jthread([this, core](std::stop_token token) {
             RunThread(token, core);
         });
+    return true;
 }
 
 void CpuManager::Shutdown() {

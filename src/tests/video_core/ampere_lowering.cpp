@@ -84,6 +84,103 @@ TEST_CASE("Ampere TLD.SCR.LZ takes its handle from a uniform register", "[video_
     REQUIRE(((tld >> 31) & 0xf) == 7);
 }
 
+TEST_CASE("Ampere TLD.B.LL takes the handle, then the level, after the coordinates",
+          "[video_core][ampere]") {
+    // Cyberpunk 2077 (#1084): TLD.B.LL 2D, x, y in Ra, Ra+1 and the handle, level in Rb, Rb+1.
+    // The graphics form splits its third component to a second destination.
+    struct Form { Instruction insn; u32 dest, second_dest, mask, source_a, source_b; };
+    const std::array forms{
+        Form{{{0x0c047367, 0x38000004, 0x019e03ff, 0x004f4200}}, 4, 255, 3, 12, 4},
+        Form{{{0x04007367, 0x38000008, 0x059e0702, 0x104fc200}}, 0, 2, 7, 4, 8},
+    };
+    for (const Form& form : forms) {
+        const auto lowered = LowerToMaxwell(std::array{form.insn, EXIT});
+        INFO(lowered.error);
+        REQUIRE(static_cast<bool>(lowered));
+        std::array<u32, 256> regs{};
+        for (u32 i = 0; i < regs.size(); ++i) regs[i] = 0x1000 + i;
+        bool fetched = false;
+        for (const u64 word : lowered.instructions) {
+            if ((word >> 48) == 0x5c98) {
+                regs[word & 255] = regs[(word >> 20) & 255];
+            } else if ((word >> 56) == 0xdd) {
+                REQUIRE_FALSE(fetched);
+                fetched = true;
+                CHECK(((word >> 28) & 7) == 2);
+                CHECK(((word >> 31) & 15) == form.mask);
+                CHECK(((word >> 55) & 1) == 1);
+                const u32 coord = (word >> 8) & 255, meta = (word >> 20) & 255;
+                CHECK(regs[coord] == 0x1000 + form.source_a);
+                CHECK(regs[coord + 1] == 0x1000 + form.source_a + 1);
+                CHECK(regs[meta] == 0x1000 + form.source_b);
+                CHECK(regs[meta + 1] == 0x1000 + form.source_b + 1);
+                for (u32 i = 0; i < 4; ++i) regs[(word & 255) + i] = 0xfeed0000 + i;
+            }
+        }
+        REQUIRE(fetched);
+        CHECK(regs[form.dest] == 0xfeed0000);
+        CHECK(regs[form.dest + 1] == 0xfeed0001);
+        if (form.second_dest != 255) CHECK(regs[form.second_dest] == 0xfeed0002);
+    }
+}
+
+TEST_CASE("Ampere TLD.B keeps its value and result spans below the uniform registers",
+          "[video_core][ampere]") {
+    // UMOV UR0, 0x0 makes R216 and up hold uniform registers. Each TLD.B.LL 2D below has its
+    // base registers under R216, but a span reaches R216: Rb = R215 (level in R216), Ra = R215
+    // (y in R216), Rd = R215 with two results, and a second destination R215 with two results.
+    constexpr Instruction uniform_move{{0x00007c02, 0, 0x08000f00, 0}};
+    const std::array crossing{
+        Instruction{{0x0c047367, 0x380000d7, 0x019e03ff, 0x004f4200}},
+        Instruction{{0xd7047367, 0x38000004, 0x019e03ff, 0x004f4200}},
+        Instruction{{0x0cd77367, 0x38000004, 0x019e03ff, 0x004f4200}},
+        Instruction{{0x04007367, 0x38000008, 0x059e0fd7, 0x104fc200}},
+    };
+    for (const Instruction& insn : crossing) {
+        CHECK_FALSE(LowerToMaxwell(std::array{uniform_move, insn, EXIT}));
+        // Without uniform registers R216 is an ordinary register.
+        const auto plain = LowerToMaxwell(std::array{insn, EXIT});
+        INFO(plain.error);
+        CHECK(static_cast<bool>(plain));
+    }
+    // Rb = R214 keeps the level in R215.
+    const auto kept = LowerToMaxwell(std::array{uniform_move,
+        Instruction{{0x0c047367, 0x380000d6, 0x019e03ff, 0x004f4200}}, EXIT});
+    INFO(kept.error);
+    CHECK(static_cast<bool>(kept));
+}
+
+TEST_CASE("Ampere TXQ takes its handle from a uniform register", "[video_core][ampere]") {
+    // Cyberpunk 2077 (#1084): a dimension query, mask 0x7, of the handle in UR6 at the level
+    // in R3, the third component going to R3 -> Maxwell TXQ.B with the handle, then the level.
+    const std::array code{Instruction{{0x03047f6f, 0x00000600, 0x08000703, 0x000f4200}}, EXIT};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    CHECK(lowered.required_texture_buffer == ~0U);
+    std::array<u32, 256> regs{};
+    for (u32 i = 0; i < regs.size(); ++i) regs[i] = 0x1000 + i;
+    bool queried = false;
+    for (const u64 word : lowered.instructions) {
+        if ((word >> 48) == 0x5c98) {
+            regs[word & 255] = regs[(word >> 20) & 255];
+        } else if ((word >> 52) == 0xdf5) {
+            REQUIRE_FALSE(queried);
+            queried = true;
+            CHECK(((word >> 22) & 7) == 1);
+            CHECK(((word >> 31) & 15) == 7);
+            const u32 source = (word >> 8) & 255;
+            CHECK(regs[source] == regs[222]); // UR6
+            CHECK(regs[source + 1] == 0x1003);
+            for (u32 i = 0; i < 3; ++i) regs[(word & 255) + i] = 0xfeed0000 + i;
+        }
+    }
+    REQUIRE(queried);
+    CHECK(regs[4] == 0xfeed0000);
+    CHECK(regs[5] == 0xfeed0001);
+    CHECK(regs[3] == 0xfeed0002);
+}
+
 TEST_CASE("Ampere I2F converts signed 16-bit sources", "[video_core][ampere]") {
     // I2F.S16 R8, R8
     const std::array<Instruction, 2> code{{
@@ -126,6 +223,23 @@ TEST_CASE("Ampere SUST.P keeps its channel mask", "[video_core][ampere]") {
     REQUIRE(((FindMaxwell(lowered, 0xeb2, 52) >> 20) & 0xf) == 1);
 }
 
+TEST_CASE("Ampere LDG.E.STRONG.GPU with a uniform base loads coherently", "[video_core][ampere]") {
+    // Cyberpunk 2077: LDG.E.STRONG.GPU R7, [R7.U32+UR4]: R250:R251 = UR4:UR5 + R7, then LDG.CG.
+    const std::array<Instruction, 2> code{{
+        {{0x07077981, 0x00000004, 0x081ee900, 0x002f2800}},
+        EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    const u64 load = FindMaxwell(lowered, 0xeed, 52);
+    REQUIRE(load != 0);
+    CHECK((load & 0xff) == 7);
+    CHECK(((load >> 8) & 0xff) == 250);
+    CHECK(((load >> 46) & 3) == 1);
+    CHECK(((load >> 48) & 7) == 4);
+}
+
 TEST_CASE("Ampere SHF.R.U64 immediate shifts keep their amount", "[video_core][ampere]") {
     // SHF.R.U64 R14, R14, n, R17 (Ocarina vertex shader 1a55fa57a335b963). The Maxwell
     // translator reads the immediate from bits 20-38, so no max-shift bits may be set there.
@@ -141,6 +255,36 @@ TEST_CASE("Ampere SHF.R.U64 immediate shifts keep their amount", "[video_core][a
         CHECK(((shf >> 20) & 0x7ffff) == shift);
         CHECK(((shf >> 39) & 0xff) == 17);
     }
+}
+
+TEST_CASE("Ampere USHF.L.U64.HI funnels two uniform words", "[video_core][ampere]") {
+    // Cyberpunk 2077: USHF.L.U64.HI UR5, UR4, 0x8, UR5 -> SHF.L R221, R220, 0x8, R221.
+    const std::array<Instruction, 2> code{{
+        {{0x04057899, 0x00000008, 0x08010205, 0x000fc800}},
+        EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    CHECK(lowered.instructions.front() == 0x36f86e800087dcddULL);
+}
+
+TEST_CASE("Ampere REDUX.AND starts from and fills inactive lanes with all ones",
+          "[video_core][ampere]") {
+    // Cyberpunk 2077: REDUX UR7, R0 (mode 0, AND).
+    const std::array<Instruction, 2> code{{
+        {{0x000773c4, 0, 0, 0x000ee200}},
+        EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    CHECK(std::any_of(lowered.instructions.begin(), lowered.instructions.end(), [](u64 word) {
+        return (word >> 52) == 0x010 && (word & 0xff) == 223 && ((word >> 20) & 0xffffffffULL) == ~0U;
+    }));
+    // Inactive lanes OR in the inverted lane mask, then R223 &= R251 once per lane.
+    CHECK(CountMaxwell(lowered, 0x5c4703000fc7fbfbULL, 0) == 32);
+    CHECK(CountMaxwell(lowered, 0x5c4700000fb7dfdfULL, 0) == 32);
 }
 
 TEST_CASE("Ampere SHFL with a register lane keeps its mode", "[video_core][ampere]") {
@@ -411,6 +555,89 @@ TEST_CASE("Ampere Ocarina sign extends, uniform shifts and carries, LEA.HI and S
         EXIT,
     }};
     CHECK_FALSE(LowerToMaxwell(straddle));
+}
+
+TEST_CASE("Ampere constant banks 24-31 read the root tables from bank 17", "[video_core][ampere]") {
+    const auto lower = [](const Instruction& instruction) {
+        const std::array<Instruction, 2> code{{instruction, EXIT}};
+        return LowerToMaxwell(code);
+    };
+    const auto field = [](u64 word, u32 offset, u32 count) {
+        return (word >> offset) & ((u64{1} << count) - 1);
+    };
+    // Cyberpunk 2077's ULDC.64 UR4, c[0x1f][0x0] and ULDC.64 UR4, c[0x19][0x8]: LDC.64 from
+    // bank 17, root table n at byte n * 256.
+    const auto check_load = [&](const Instruction& instruction, u32 offset) {
+        const auto loaded = lower(instruction);
+        INFO(loaded.error);
+        REQUIRE(static_cast<bool>(loaded));
+        const u64 ldc = FindMaxwell(loaded, 0xef9, 52);
+        REQUIRE(ldc != 0);
+        CHECK(field(ldc, 36, 5) == 17);
+        CHECK(field(ldc, 20, 16) == offset);
+        CHECK(field(ldc, 48, 3) == 5);
+    };
+    check_load({{0x00047ab9, 0x07c00000, 0x00000a00, 0x000fe200}}, 0x700);
+    check_load({{0x00047ab9, 0x06400200, 0x00000a00, 0x000fe400}}, 0x108);
+
+    // MOV R0, c[0x19][0x18] and IMAD.MOV.U32 R0, RZ, RZ, c[0x19][0x18]: a constant buffer MOV
+    // from bank 17 at 0x118. Bank 24 keeps its offset.
+    const auto check_move = [&](const Instruction& instruction, u32 offset) {
+        const auto moved = lower(instruction);
+        INFO(moved.error);
+        REQUIRE(static_cast<bool>(moved));
+        const u64 mov = FindMaxwell(moved, 0x4c98, 48);
+        REQUIRE(mov != 0);
+        CHECK(field(mov, 34, 5) == 17);
+        CHECK(field(mov, 20, 14) * 4 == offset);
+    };
+    check_move({{0x00007a02, 0x06400600, 0x00000f00, 0x040fc400}}, 0x118);
+    check_move({{0xff007624, 0x06400600, 0x078e00ff, 0x040fc400}}, 0x118);
+    check_move({{0x00007a02, 0x06000600, 0x00000f00, 0x040fc400}}, 0x18);
+
+    // MOV R0, c[0x19][0x100] is past its 256-byte table.
+    CHECK_FALSE(lower({{0x00007a02, 0x06404000, 0x00000f00, 0x040fc400}}));
+
+    // ULDC.U8 UR8, c[0x19][UR6-0x1] and c[0x18][UR6-0x1]: an indexed displacement is signed, so
+    // table 1's base wraps it to 0xff and bank 24 keeps 0xffff.
+    for (const auto& [bank, offset] : {std::pair{25U, 0xffU}, std::pair{24U, 0xffffU}}) {
+        const u32 address = (bank << 22) | (0xffffU << 6);
+        const auto indexed = lower({{0x06087abb, address, 0x08000000, 0x000fe400}});
+        INFO(indexed.error);
+        REQUIRE(static_cast<bool>(indexed));
+        const u64 ldc = FindMaxwell(indexed, 0xef9, 52);
+        CHECK(field(ldc, 36, 5) == 17);
+        CHECK(field(ldc, 20, 16) == offset);
+    }
+}
+
+TEST_CASE("Ampere indexed root-table displacements stay in the signed LDC field",
+          "[video_core][ampere]") {
+    const auto lower = [](const Instruction& instruction) {
+        return LowerToMaxwell(std::array{instruction, EXIT});
+    };
+    // ULDC.U8 UR8, c[bank][UR6+displacement] and LDC R20, c[bank][R2+displacement]. Table 1's base
+    // (256) takes 0x7f00 to 0x8000, which Maxwell would read as -0x8000: rejected, as is 0x7ffc.
+    // 0x7efc still fits, and bank 24 has no base. LDC.IS wraps its sum at 16 bits, so it is kept.
+    const auto uniform = [](u32 bank, u32 displacement) {
+        return Instruction{{0x06087abb, (bank << 22) | (displacement << 6), 0x08000000, 0x000fe400}};
+    };
+    const auto load = [](u32 bank, u32 displacement, u32 mode) {
+        return Instruction{{0x02147b82, (bank << 22) | (displacement << 6), mode << 14, 0}};
+    };
+    for (const u32 displacement : {0x7f00U, 0x7ffcU}) {
+        CHECK_FALSE(lower(uniform(25, displacement)));
+        CHECK_FALSE(lower(load(25, displacement, 0)));
+        CHECK(static_cast<bool>(lower(load(25, displacement, 2))));
+        CHECK(static_cast<bool>(lower(uniform(24, displacement))));
+        CHECK(static_cast<bool>(lower(load(24, displacement, 0))));
+    }
+    CHECK_FALSE(lower(load(31, 0x7900, 0)));
+    CHECK(static_cast<bool>(lower(load(31, 0x78fc, 0))));
+    const auto kept = lower(uniform(25, 0x7efc));
+    INFO(kept.error);
+    REQUIRE(static_cast<bool>(kept));
+    CHECK(((FindMaxwell(kept, 0xef9, 52) >> 20) & 0xffff) == 0x7ffc);
 }
 
 TEST_CASE("Ampere Ocarina byte constant loads, ULEA carries to UP3 and two-source F2IP",

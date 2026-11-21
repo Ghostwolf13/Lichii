@@ -14,16 +14,16 @@ class RyujinxDialog : public QDialog {
     Q_OBJECT
 
 public:
-    explicit RyujinxDialog(std::filesystem::path eden_path, std::filesystem::path ryu_path,
-                           QWidget* parent = nullptr);
+    explicit RyujinxDialog(std::filesystem::path lichii_path, std::filesystem::path ryujinx_path,
+                           const QString& ryujinx_save_id, QWidget* parent = nullptr);
     ~RyujinxDialog();
 
 private slots:
-    void fromEden();
+    void fromLichii();
     void fromRyujinx();
 
 private:
     Ui::RyujinxDialog* ui;
-    std::filesystem::path m_eden;
+    std::filesystem::path m_lichii;
     std::filesystem::path m_ryu;
 };

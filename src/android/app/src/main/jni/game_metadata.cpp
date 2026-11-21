@@ -41,10 +41,7 @@ static RomMetadata CacheRomMetadata(const std::string& path) {
             entry.developer = control.first->GetDeveloperName();
             entry.version = control.first->GetVersionString();
         } else {
-            FileSys::NACP nacp{};
-            entry.developer = loader->ReadControlData(nacp) == Loader::ResultStatus::Success
-                ? nacp.GetDeveloperName()
-                : "";
+            loader->ReadDeveloper(entry.developer);
             entry.version = "1.0.0";
         }
         if (loader->GetFileType() == Loader::FileType::NRO) {

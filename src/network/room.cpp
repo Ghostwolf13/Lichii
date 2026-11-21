@@ -327,7 +327,7 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
 
     if (preferred_fake_ip != NoPreferredIP) {
         // Verify if the preferred fake ip is available
-        if (!IsValidFakeIPAddress(preferred_fake_ip)) {
+        if (preferred_fake_ip == IPv4Address{} || !IsValidFakeIPAddress(preferred_fake_ip)) {
             SendIPCollision(event->peer);
             return;
         }

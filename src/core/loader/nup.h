@@ -11,6 +11,7 @@
 #include "core/loader/loader.h"
 
 namespace FileSys {
+class ManualContentProvider;
 class NACP;
 class NupContainer;
 } // namespace FileSys
@@ -19,7 +20,7 @@ namespace Loader {
 
 /// Loads a NUP (NX Package) container: loose ExeFS/RomFS trees for a base
 /// program plus its updates in one file. The newest update package is layered
-/// over the base; add-on content packages are recognized but not yet mounted.
+/// over the base; add-on content packages are served as installed add-ons.
 class AppLoader_NUP final : public AppLoader {
 public:
     explicit AppLoader_NUP(FileSys::VirtualFile file_);
@@ -40,6 +41,9 @@ public:
 
     LoadResult Load(Kernel::KProcess& process, Core::System& system) override;
 
+    /// Adds the container's add-ons for this application to the provider, newest version each.
+    void RegisterContent(FileSys::ManualContentProvider& provider) const;
+
     ResultStatus VerifyIntegrity(std::function<bool(size_t, size_t)> progress_callback) override;
 
     ResultStatus ReadRomFS(FileSys::VirtualFile& out_file) override;
@@ -49,7 +53,12 @@ public:
     ResultStatus ReadIcon(std::vector<u8>& buffer) override;
     ResultStatus ReadTitle(std::string& title) override;
     ResultStatus ReadControlData(FileSys::NACP& control) override;
+    ResultStatus ReadDeveloper(std::string& developer) override;
+    ResultStatus ReadDisplayVersion(std::string& version) override;
     ResultStatus ReadNSOModules(Modules& modules) override;
+    ResultStatus ReadMainBuildId(Core::System& system, std::array<u8, 0x20>& build_id) override;
+
+    std::optional<std::string> ReadContainerUpdateVersion() const;
 
 private:
     std::unique_ptr<FileSys::NupContainer> nup;
@@ -57,8 +66,11 @@ private:
 
     std::unique_ptr<FileSys::NACP> nacp_file;
     FileSys::VirtualFile icon_file;
+    std::optional<std::size_t> embedded_program_package;
     u64 base_title_id{};
+    u64 upgrade_program_id{};
     std::string display_title;
+    std::string display_publisher;
     std::string display_version;
     bool has_program{};
 };

@@ -77,7 +77,7 @@ public:
     }
 };
 
-void LoopProcess(Core::System& system) {
+void LoopProcess(Core::System& system, const SystemDataView* isolated_system_data) {
     auto server_manager = std::make_unique<ServerManager>(system);
 
     server_manager->RegisterNamedService("ns:am2", std::make_shared<IServiceGetterInterface>(system, "ns:am2"), 5);
@@ -93,8 +93,10 @@ void LoopProcess(Core::System& system) {
     server_manager->RegisterNamedService("pdm:ntfy", std::make_shared<INotifyService>(system));
     server_manager->RegisterNamedService("pdm:qry", std::make_shared<IQueryService>(system));
 
-    server_manager->RegisterNamedService("pl:s", std::make_shared<IPlatformServiceManager>(system, "pl:s"));
-    server_manager->RegisterNamedService("pl:u", std::make_shared<IPlatformServiceManager>(system, "pl:u"));
+    server_manager->RegisterNamedService(
+        "pl:s", std::make_shared<IPlatformServiceManager>(system, "pl:s", isolated_system_data));
+    server_manager->RegisterNamedService(
+        "pl:u", std::make_shared<IPlatformServiceManager>(system, "pl:u", isolated_system_data));
     ServerManager::RunServer(std::move(server_manager));
 }
 

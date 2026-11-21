@@ -87,6 +87,12 @@ struct RuntimeInfo {
     VaryingState previous_stage_stores;
     /// Fragment stage after a mesh program: generic inputs it writes per primitive.
     std::bitset<32> per_primitive_generics{};
+    /// Fragment stage after the mesh emulation's vertex shader: per_primitive_generics arrive
+    /// flat from each primitive's own vertices instead of as PerPrimitiveEXT inputs.
+    bool per_primitive_flat{};
+    /// Fragment stage after the mesh emulation's vertex shader: PrimitiveId is the flat input at
+    /// this generic location, not the built-in. ~0 when the mesh program writes no PrimitiveId.
+    u32 primitive_id_location{~0U};
     /// Last pre-rasterization stage: generic outputs the fragment stage reads screen-linear.
     /// They are written times Position.w and the fragment stage reads them perspective-correct
     /// times FragCoord.w, so clipping a primitive close to the camera interpolates them right.

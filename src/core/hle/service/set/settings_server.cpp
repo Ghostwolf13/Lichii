@@ -6,12 +6,14 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <utility>
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/set/key_code_map.h"
 #include "core/hle/service/set/settings_server.h"
+#include "core/hle/service/set/system_settings_server.h"
 
 namespace Service::Set {
 namespace {
@@ -88,7 +90,9 @@ LanguageCode GetLanguageCodeFromIndex(std::size_t index) {
     return available_language_codes.at(index);
 }
 
-ISettingsServer::ISettingsServer(Core::System& system_) : ServiceFramework{system_, "set"} {
+ISettingsServer::ISettingsServer(Core::System& system_,
+                                 std::shared_ptr<ISystemSettingsServer> scratch_profile_)
+    : ServiceFramework{system_, "set"}, scratch_profile{std::move(scratch_profile_)} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, C<&ISettingsServer::GetLanguageCode>, "GetLanguageCode"},
@@ -118,11 +122,18 @@ ISettingsServer::ISettingsServer(Core::System& system_) : ServiceFramework{syste
 ISettingsServer::~ISettingsServer() = default;
 
 Result ISettingsServer::GetLanguageCode(Out<LanguageCode> out_language_code) {
-    LOG_DEBUG(Service_SET, "called {}", Settings::values.language_index.GetValue());
+    LOG_DEBUG(Service_SET, "called");
 
-    *out_language_code = available_language_codes[static_cast<std::size_t>(
-        Settings::values.language_index.GetValue())];
+    *out_language_code = GetEffectiveLanguageCode();
     R_SUCCEED();
+}
+
+LanguageCode ISettingsServer::GetEffectiveLanguageCode() const {
+    if (scratch_profile) {
+        return scratch_profile->GetScratchLanguageCode();
+    }
+    return GetLanguageCodeFromIndex(static_cast<std::size_t>(
+        Settings::values.language_index.GetValue()));
 }
 
 Result ISettingsServer::GetAvailableLanguageCodes(
@@ -158,7 +169,9 @@ Result ISettingsServer::GetAvailableLanguageCodeCount(Out<s32> out_count) {
 Result ISettingsServer::GetRegionCode(Out<SystemRegionCode> out_region_code) {
     LOG_DEBUG(Service_SET, "called");
 
-    *out_region_code = static_cast<SystemRegionCode>(Settings::values.region_index.GetValue());
+    *out_region_code =
+        scratch_profile ? scratch_profile->GetScratchRegionCode()
+                        : static_cast<SystemRegionCode>(Settings::values.region_index.GetValue());
     R_SUCCEED();
 }
 
@@ -188,16 +201,15 @@ Result ISettingsServer::GetKeyCodeMap(
 
     R_UNLESS(out_key_code_map != nullptr, ResultNullPointer);
 
-    const auto language_code =
-        available_language_codes[static_cast<s32>(Settings::values.language_index.GetValue())];
+    const auto language_code = GetEffectiveLanguageCode();
     const auto key_code =
         std::find_if(language_to_layout.cbegin(), language_to_layout.cend(),
                      [=](const auto& element) { return element.first == language_code; });
 
     if (key_code == language_to_layout.cend()) {
         LOG_ERROR(Service_SET,
-                  "Could not find keyboard layout for language index {}, defaulting to English us",
-                  Settings::values.language_index.GetValue());
+                  "Could not find keyboard layout for language code {}, defaulting to English us",
+                  language_code);
         *out_key_code_map = KeyCodeMapEnglishUsInternational;
         R_SUCCEED();
     }
@@ -218,16 +230,15 @@ Result ISettingsServer::GetKeyCodeMap2(
 
     R_UNLESS(out_key_code_map != nullptr, ResultNullPointer);
 
-    const auto language_code =
-        available_language_codes[static_cast<s32>(Settings::values.language_index.GetValue())];
+    const auto language_code = GetEffectiveLanguageCode();
     const auto key_code =
         std::find_if(language_to_layout.cbegin(), language_to_layout.cend(),
                      [=](const auto& element) { return element.first == language_code; });
 
     if (key_code == language_to_layout.cend()) {
         LOG_ERROR(Service_SET,
-                  "Could not find keyboard layout for language index {}, defaulting to English us",
-                  Settings::values.language_index.GetValue());
+                  "Could not find keyboard layout for language code {}, defaulting to English us",
+                  language_code);
         *out_key_code_map = KeyCodeMapEnglishUsInternational;
         R_SUCCEED();
     }
@@ -238,6 +249,10 @@ Result ISettingsServer::GetKeyCodeMap2(
 Result ISettingsServer::GetDeviceNickName(
     OutLargeData<std::array<u8, 0x80>, BufferAttr_HipcMapAlias> out_device_name) {
     LOG_DEBUG(Service_SET, "called");
+
+    if (scratch_profile) {
+        return scratch_profile->GetDeviceNickName(out_device_name);
+    }
 
     const std::size_t string_size =
         (std::min)(Settings::values.device_name.GetValue().size(), out_device_name->size());
@@ -253,16 +268,15 @@ Result ISettingsServer::GetKeyCodeMapByPort(OutLargeData<KeyCodeMap, BufferAttr_
     // Similar to other key code map functions, just pass through to the main implementation
     R_UNLESS(out_key_code_map != nullptr, ResultNullPointer);
 
-    const auto language_code =
-        available_language_codes[static_cast<s32>(Settings::values.language_index.GetValue())];
+    const auto language_code = GetEffectiveLanguageCode();
     const auto key_code =
         std::find_if(language_to_layout.cbegin(), language_to_layout.cend(),
                      [=](const auto& element) { return element.first == language_code; });
 
     if (key_code == language_to_layout.cend()) {
         LOG_ERROR(Service_SET,
-                  "Could not find keyboard layout for language index {}, defaulting to English us",
-                  Settings::values.language_index.GetValue());
+                  "Could not find keyboard layout for language code {}, defaulting to English us",
+                  language_code);
         *out_key_code_map = KeyCodeMapEnglishUsInternational;
         R_SUCCEED();
     }

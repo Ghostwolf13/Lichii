@@ -4,10 +4,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "core/hle/result.h"
+#include "core/hle/service/am/am_results.h"
 #include "core/hle/service/am/am_types.h"
 #include "core/hle/service/am/applet.h"
 #include "core/hle/service/am/applet_data_broker.h"
 #include "core/hle/service/am/applet_manager.h"
+#include "core/hle/service/am/frontend/applets.h"
 #include "core/hle/service/am/service/application_accessor.h"
 #include "core/hle/service/am/service/library_applet_accessor.h"
 #include "core/hle/service/am/service/storage.h"
@@ -24,27 +26,27 @@ IApplicationAccessor::IApplicationAccessor(Core::System& system_, std::shared_pt
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, D<&IApplicationAccessor::GetAppletStateChangedEvent>, "GetAppletStateChangedEvent"},
-        {1, nullptr, "IsCompleted"},
+        {1, D<&IApplicationAccessor::IsCompleted>, "IsCompleted"},
         {10, D<&IApplicationAccessor::Start>, "Start"},
         {20, D<&IApplicationAccessor::RequestExit>, "RequestExit"},
         {25, D<&IApplicationAccessor::Terminate>, "Terminate"},
         {30, D<&IApplicationAccessor::GetResult>, "GetResult"},
         {101, D<&IApplicationAccessor::RequestForApplicationToGetForeground>, "RequestForApplicationToGetForeground"},
-        {110, nullptr, "TerminateAllLibraryApplets"},
-        {111, nullptr, "AreAnyLibraryAppletsLeft"},
+        {110, D<&IApplicationAccessor::TerminateAllLibraryApplets>, "TerminateAllLibraryApplets"},
+        {111, D<&IApplicationAccessor::AreAnyLibraryAppletsLeft>, "AreAnyLibraryAppletsLeft"},
         {112, D<&IApplicationAccessor::GetCurrentLibraryApplet>, "GetCurrentLibraryApplet"},
-        {120, nullptr, "GetApplicationId"},
+        {120, D<&IApplicationAccessor::GetApplicationId>, "GetApplicationId"},
         {121, D<&IApplicationAccessor::PushLaunchParameter>, "PushLaunchParameter"},
         {122, D<&IApplicationAccessor::GetApplicationControlProperty>, "GetApplicationControlProperty"},
-        {123, nullptr, "GetApplicationLaunchProperty"},
+        {123, D<&IApplicationAccessor::GetApplicationLaunchProperty>, "GetApplicationLaunchProperty"},
         {124, nullptr, "GetApplicationLaunchRequestInfo"},
         {130, D<&IApplicationAccessor::SetUsers>, "SetUsers"},
         {131, D<&IApplicationAccessor::CheckRightsEnvironmentAvailable>, "CheckRightsEnvironmentAvailable"},
         {132, D<&IApplicationAccessor::GetNsRightsEnvironmentHandle>, "GetNsRightsEnvironmentHandle"},
-        {140, nullptr, "GetDesirableUids"},
+        {140, D<&IApplicationAccessor::GetDesirableUids>, "GetDesirableUids"},
         {150, D<&IApplicationAccessor::ReportApplicationExitTimeout>, "ReportApplicationExitTimeout"},
-        {160, nullptr, "SetApplicationAttribute"},
-        {170, nullptr, "HasSaveDataAccessPermission"},
+        {160, D<&IApplicationAccessor::SetApplicationAttribute>, "SetApplicationAttribute"},
+        {170, D<&IApplicationAccessor::HasSaveDataAccessPermission>, "HasSaveDataAccessPermission"},
         {180, nullptr, "PushToFriendInvitationStorageChannel"},
         {190, nullptr, "PushToNotificationStorageChannel"},
         {200, nullptr, "RequestApplicationSoftReset"},
@@ -87,6 +89,13 @@ Result IApplicationAccessor::GetResult() {
     LOG_INFO(Service_AM, "called");
     std::scoped_lock lk{m_applet->lock};
     R_RETURN(m_applet->terminate_result);
+}
+
+Result IApplicationAccessor::IsCompleted(Out<bool> out_is_completed) {
+    LOG_DEBUG(Service_AM, "called");
+    std::scoped_lock lk{m_applet->lock};
+    *out_is_completed = m_applet->is_completed;
+    R_SUCCEED();
 }
 
 Result IApplicationAccessor::GetAppletStateChangedEvent(
@@ -132,6 +141,66 @@ Result IApplicationAccessor::GetCurrentLibraryApplet(
     Out<SharedPointer<ILibraryAppletAccessor>> out_accessor) {
     LOG_INFO(Service_AM, "(STUBBED) called");
     *out_accessor = nullptr;
+    R_SUCCEED();
+}
+
+Result IApplicationAccessor::TerminateAllLibraryApplets() {
+    LOG_INFO(Service_AM, "called");
+    std::list<std::shared_ptr<Applet>> child_applets;
+    {
+        std::scoped_lock lk{m_applet->lock};
+        child_applets = m_applet->child_applets;
+    }
+    for (const auto& child_applet : child_applets) {
+        {
+            std::scoped_lock lk{child_applet->lock};
+            child_applet->process->Terminate();
+            child_applet->terminate_result = AM::ResultLibraryAppletTerminated;
+        }
+        if (child_applet->frontend) {
+            child_applet->frontend->RequestExit();
+        }
+    }
+    R_SUCCEED();
+}
+
+Result IApplicationAccessor::AreAnyLibraryAppletsLeft(Out<bool> out_is_any_left) {
+    LOG_DEBUG(Service_AM, "called");
+    std::scoped_lock lk{m_applet->lock};
+    *out_is_any_left = !m_applet->child_applets.empty();
+    R_SUCCEED();
+}
+
+Result IApplicationAccessor::GetApplicationId(Out<u64> out_application_id) {
+    LOG_DEBUG(Service_AM, "called");
+    *out_application_id = m_applet->program_id;
+    R_SUCCEED();
+}
+
+Result IApplicationAccessor::GetApplicationLaunchProperty(
+    Out<Glue::ApplicationLaunchProperty> out_launch_property) {
+    LOG_DEBUG(Service_AM, "called");
+    R_RETURN(system.GetARPManager().GetLaunchProperty(out_launch_property.Get(),
+                                                      m_applet->program_id));
+}
+
+Result IApplicationAccessor::GetDesirableUids(
+    Out<s32> out_count, OutArray<Common::UUID, BufferAttr_HipcMapAlias> out_user_ids) {
+    LOG_DEBUG(Service_AM, "(STUBBED) called");
+    *out_count = 0;
+    R_SUCCEED();
+}
+
+Result IApplicationAccessor::SetApplicationAttribute(
+    InBuffer<BufferAttr_HipcMapAlias> attribute) {
+    LOG_WARNING(Service_AM, "(STUBBED) called, size={}", attribute.size());
+    R_SUCCEED();
+}
+
+Result IApplicationAccessor::HasSaveDataAccessPermission(Out<bool> out_has_permission,
+                                                         u64 application_id) {
+    LOG_DEBUG(Service_AM, "(STUBBED) called, application_id={:016X}", application_id);
+    *out_has_permission = true;
     R_SUCCEED();
 }
 

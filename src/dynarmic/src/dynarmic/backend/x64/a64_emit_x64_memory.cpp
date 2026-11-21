@@ -7,6 +7,7 @@
  */
 
 #include <array>
+#include <atomic>
 #include <initializer_list>
 #include <tuple>
 #include <utility>
@@ -28,6 +29,16 @@
 namespace Dynarmic::Backend::X64 {
 
 using namespace Xbyak::util;
+
+static void RecordFastmemFault(const A64::UserConfig& conf, bool recompile) {
+    if (auto* counters = conf.counters) {
+        static_assert(std::atomic_ref<u64>::is_always_lock_free);
+        std::atomic_ref{counters->fastmem_faults}.fetch_add(1, std::memory_order_relaxed);
+        if (recompile) {
+            std::atomic_ref{counters->fastmem_recompiles}.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
 
 void A64EmitX64::GenMemory128Accessors() {
     code.align();

@@ -91,9 +91,15 @@ function(FixMsysPath target)
         INTERFACE_INCLUDE_DIRECTORIES ${include_dir})
 endfunction()
 
-# Saves linking time
+# Saves linking time. YUZU_MINGW_KEEP_SYMBOLS keeps the symbol table, and any debug line tables
+# the build adds (such as -gline-tables-only), for sampling profiles.
+option(YUZU_MINGW_KEEP_SYMBOLS "Keep symbols in MinGW release builds" OFF)
 if (MINGW)
-    set(MINGW_FLAGS "-Wl,--strip-all -Wl,--gc-sections")
+    if (YUZU_MINGW_KEEP_SYMBOLS)
+        set(MINGW_FLAGS "-Wl,--gc-sections")
+    else()
+        set(MINGW_FLAGS "-Wl,--strip-all -Wl,--gc-sections")
+    endif()
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE
         "${CMAKE_EXE_LINKER_FLAGS_RELEASE} ${MINGW_FLAGS}")
 endif()

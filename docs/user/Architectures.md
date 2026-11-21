@@ -24,9 +24,26 @@ ARM64, aka aarch64, is the only supported architecture for Android, with limited
 
 ### Caveats
 
-NCE (Native Code Execution) is currently only available on Android and (experimentally) Linux. Support for macOS is in the works, but Windows is extremely unlikely to ever happen (if you want it--submit patches!). Generally, if NCE is available, you should pretty much always use it due to the massive performance hit JIT has.
+Dynarmic (JIT) is the default CPU backend. ARM64 builds for Android and Linux also offer
+Native (NCE) for supported 39-bit applications on hosts with 4 KiB pages. NCE runs guest
+instructions in the emulator's process and does not isolate them from the host process.
+Do not use in-process NCE with software you don't trust. Windows does not offer a native backend.
 
-When NCE is enabled, do note that the GPU will almost always be the limiting factor. This is especially the case for Android, as well as desktops that lack dedicated GPUs; Adreno, Mali, PowerVR, etc. GPUs are generally significantly weaker relative to their respective CPUs.
+On Linux, NCE also needs multicore mode, the normal CPU clock, and speed control
+independent of CPU timing. It falls back to Dynarmic before loading guest code
+if those requirements aren't met, if a debugger is enabled, or if it can't
+reserve a shared identity mapping. The Linux tests cover synthetic guest code;
+they don't establish retail game, Direct NVN, or dynamically generated code compatibility.
+
+Apple Silicon offers an experimental Hypervisor backend for 64-bit, 39-bit applications.
+It requires multicore mode and an executable signed with the `com.apple.security.hypervisor`
+entitlement.
+It runs guest instructions directly in a VM, so guest CPU faults exit through Hypervisor.framework
+instead of the Linux signals. The VM maps 4 KiB guest pages over 16 KiB host backing, with guest
+read, write, and execute permissions applied separately. The host backing is not executable in
+the emulator process: Dynarmic's separate `MAP_JIT` arena is unchanged. If VM creation is
+unavailable, or the title uses unsupported CPU settings, Lichii uses Dynarmic. If vCPU setup
+fails before execution, Lichii reloads the title once with Dynarmic without changing the setting.
 
 Windows/arm64 is *very* experimental and is unlikely to work at all. Support and testing is in the works.
 

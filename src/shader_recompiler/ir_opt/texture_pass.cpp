@@ -122,6 +122,32 @@ u32 DynamicDescriptorCount(u32 base_offset, u32 size_shift, u32 max_descriptors)
     return std::min(descriptor_limit, available_count);
 }
 
+// The elements a dynamic offset can select below the clamp to the last one: a bit index found by
+// FLO (FindUMsb, or 31 minus it for FLO.SH) takes one of 32. Its -1 for no bit set is past any
+// count, so it takes the last element as it does in a longer array.
+u32 DynamicDescriptorIndexLimit(const IR::U32& dynamic_offset, u32 size_shift) {
+    const IR::Inst* const offset = dynamic_offset.InstRecursive();
+    if (!offset || offset->GetOpcode() != IR::Opcode::ShiftLeftLogical32 ||
+        !offset->Arg(1).IsImmediate() || offset->Arg(1).U32() != size_shift) {
+        return ~0U;
+    }
+    const auto is_bit_index = [](const IR::Value& value) {
+        const IR::Inst* inst = value.IsImmediate() ? nullptr : value.InstRecursive();
+        if (inst && inst->GetOpcode() == IR::Opcode::BitwiseXor32 && inst->Arg(1).IsImmediate() &&
+            inst->Arg(1).U32() == 31) {
+            inst = inst->Arg(0).IsImmediate() ? nullptr : inst->Arg(0).InstRecursive();
+        }
+        return inst && (inst->GetOpcode() == IR::Opcode::FindUMsb32 ||
+                        inst->GetOpcode() == IR::Opcode::FindSMsb32);
+    };
+    const IR::Value index = offset->Arg(0);
+    const IR::Inst* const select = index.IsImmediate() ? nullptr : index.InstRecursive();
+    if (select && select->GetOpcode() == IR::Opcode::SelectU32) {
+        return is_bit_index(select->Arg(1)) && is_bit_index(select->Arg(2)) ? 32U : ~0U;
+    }
+    return is_bit_index(index) ? 32U : ~0U;
+}
+
 u32 SaturatingSub(u32 lhs, u32 rhs) {
     return lhs > rhs ? lhs - rhs : 0;
 }
@@ -1290,7 +1316,10 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         .secondary_offset = 0,
         .secondary_shift_left = 0,
         .dynamic_offset = dynamic_offset,
-        .count = DynamicDescriptorCount(base_offset, size_shift, (std::min)({DESCRIPTOR_MAX_COUNT, sampled_limit, resource_limit})),
+        .count = (std::min)(DynamicDescriptorCount(base_offset, size_shift,
+                                                   (std::min)({DESCRIPTOR_MAX_COUNT, sampled_limit,
+                                                               resource_limit})),
+                            DynamicDescriptorIndexLimit(dynamic_offset, size_shift)),
         .has_secondary = false,
     };
 }

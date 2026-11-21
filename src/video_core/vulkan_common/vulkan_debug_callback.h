@@ -8,4 +8,8 @@ namespace Vulkan {
 
 vk::DebugUtilsMessenger CreateDebugUtilsCallback(const vk::Instance& instance);
 
+/// Feeds AddressMap (EDEN_NX2_FAULT_MAP) with the driver's device address binding reports.
+vk::DebugUtilsMessenger CreateAddressBindingCallback(const vk::Instance& instance,
+                                                     const vk::InstanceDispatch& dld);
+
 } // namespace Vulkan

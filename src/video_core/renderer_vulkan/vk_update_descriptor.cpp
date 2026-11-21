@@ -43,6 +43,7 @@ void UpdateDescriptorQueue::TickFrame() {
 void UpdateDescriptorQueue::Acquire(Scheduler& scheduler, size_t required_entries,
                                     bool use_descriptor_buffer_) {
     use_descriptor_buffer = supports_descriptor_buffer && use_descriptor_buffer_;
+    rejected_texel_buffer = false;
     static constexpr size_t DEFAULT_REQUIRED_ENTRIES = 0x400;
     const size_t reserve = required_entries > 0 ? required_entries : DEFAULT_REQUIRED_ENTRIES;
     if (reserve > maximum_frame_payload_size) {

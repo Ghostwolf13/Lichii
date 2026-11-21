@@ -992,6 +992,40 @@ void GatherInfoFromHeader(Environment& env, Info& info) {
         // TODO: Legacy varyings
     }
 }
+
+/// True when position z and w are each stored once, in the same block, from the same value, and
+/// the program leaves the viewport at 0.
+bool PositionOnFarPlane(const IR::Program& program) {
+    const IR::Inst* z_store{};
+    const IR::Inst* w_store{};
+    const IR::Block* z_block{};
+    const IR::Block* w_block{};
+    for (IR::Block* const block : program.post_order_blocks) {
+        for (const IR::Inst& inst : block->Instructions()) {
+            if (inst.GetOpcode() == IR::Opcode::SetAttributeIndexed) {
+                return false;
+            }
+            if (inst.GetOpcode() != IR::Opcode::SetAttribute) {
+                continue;
+            }
+            const IR::Attribute attr{inst.Arg(0).Attribute()};
+            if (attr == IR::Attribute::ViewportIndex || attr == IR::Attribute::ViewportMask) {
+                return false;
+            }
+            if (attr != IR::Attribute::PositionZ && attr != IR::Attribute::PositionW) {
+                continue;
+            }
+            auto& store{attr == IR::Attribute::PositionZ ? z_store : w_store};
+            if (store) {
+                return false;
+            }
+            store = &inst;
+            (attr == IR::Attribute::PositionZ ? z_block : w_block) = block;
+        }
+    }
+    return z_store && w_store && z_block == w_block &&
+           z_store->Arg(1).Resolve() == w_store->Arg(1).Resolve();
+}
 } // Anonymous namespace
 
 void CollectShaderInfoPass(Environment& env, IR::Program& program) {
@@ -1029,6 +1063,7 @@ void CollectShaderInfoPass(Environment& env, IR::Program& program) {
         }
     }
     GatherInfoFromHeader(env, info);
+    info.position_on_far_plane = program.stage == Stage::VertexB && PositionOnFarPlane(program);
 }
 
 } // namespace Shader::Optimization

@@ -98,6 +98,8 @@ struct MeshEmulationSetup {
     u32 block_words{};          ///< output words per mesh workgroup
     u32 max_primitives{};       ///< primitives per mesh workgroup
     u32 primitive_vertices{3};  ///< vertices per primitive: 1 points, 2 lines, 3 triangles
+    /// Generic location carrying the mesh program's PrimitiveId to the pixel program, ~0 if none
+    u32 primitive_id_location{~0U};
     // With a task program (stage 0, the mesh program at mesh_stage): its payload buffer and the
     // distribution pass's offsets and arguments (Shader::RuntimeInfo), and that pass's shader.
     bool has_task{};
@@ -181,6 +183,13 @@ public:
         return fragment_has_color0_output;
     }
 
+    /// The vertex shader is the last pre-rasterization stage and puts every vertex on the far
+    /// plane, and depth bias enable is a dynamic state. Without a dynamic depth clamp enable the
+    /// pipeline clamps depth.
+    bool OnFarPlane() const noexcept {
+        return on_far_plane;
+    }
+
     /// Color components of a render target the fragment shader writes, as VkColorComponentFlags
     VkColorComponentFlags ColorOutputMask(size_t render_target) const noexcept {
         return (color_output_mask >> (render_target * 4)) & 0xF;
@@ -261,8 +270,21 @@ public:
 
     void AddTransition(GraphicsPipeline* transition);
 
-    bool Configure(bool is_indexed) {
-        return configure_func(this, is_indexed);
+    struct PreparedBinding {
+        std::array<u32, Shader::Backend::SPIRV::NUM_TEXTURE_AND_IMAGE_SCALING_WORDS> rescaling{};
+        RenderAreaPushConstant render_area{};
+        std::shared_ptr<const std::vector<DescriptorUpdateEntry>> descriptors{};
+        VkDeviceSize descriptor_buffer_offset{};
+        u32 descriptor_buffer_chunk{};
+        std::optional<f32> down_factor{};
+        bool is_rescaling{};
+        std::optional<bool> bind_pipeline{};
+    };
+
+    void RecordPreparedBinding(const PreparedBinding& binding);
+
+    bool Configure(bool is_indexed, std::optional<PreparedBinding>* deferred = nullptr) {
+        return configure_func(this, is_indexed, deferred);
     }
 
     [[nodiscard]] GraphicsPipeline* Next(const GraphicsPipelineCacheKey& current_key) noexcept {
@@ -383,7 +405,7 @@ public:
     /// the constant buffers again) and records the draw's descriptors with the image views,
     /// samplers and texture buffers the last captured Configure resolved. False when the draw
     /// can't be recorded, as for Configure.
-    bool ConfigureDelta(bool is_indexed);
+    bool ConfigureDelta(bool is_indexed, std::optional<PreparedBinding>* deferred = nullptr);
 
     /// The next Configure keeps the views and samplers it resolves for delta draws. With
     /// `verify`, it first compares them with the ones kept before; DeltaMismatch reports it.
@@ -401,7 +423,9 @@ public:
 
     template <typename Spec>
     static auto MakeConfigureSpecFunc() {
-        return [](GraphicsPipeline* pl, bool is_indexed) { return pl->ConfigureImpl<Spec>(is_indexed); };
+        return [](GraphicsPipeline* pl, bool is_indexed, std::optional<PreparedBinding>* deferred) {
+            return pl->ConfigureImpl<Spec>(is_indexed, deferred);
+        };
     }
 
     void SetEngine(Tegra::Engines::Maxwell3D* maxwell3d_, Tegra::MemoryManager* gpu_memory_) {
@@ -411,12 +435,18 @@ public:
 
 private:
     template <typename Spec>
-    bool ConfigureImpl(bool is_indexed);
+    bool ConfigureImpl(bool is_indexed, std::optional<PreparedBinding>* deferred);
 
     void KeepImageDescriptors(size_t stage, size_t first_entry);
 
+    void CheckColorFeedbackLoop(std::span<const VideoCommon::ImageViewInOut> views,
+                                const std::array<bool, NUM_STAGES>& stages, size_t fragment_entry);
+
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
-                       const RenderAreaPushConstant& render_are);
+                       const RenderAreaPushConstant& render_area,
+                       std::optional<PreparedBinding>* deferred);
+
+    void RecordBinding(const PreparedBinding& binding, const DescriptorUpdateEntry* descriptor_data);
 
     void MakePipeline(VkRenderPass render_pass);
 
@@ -434,7 +464,7 @@ private:
     GuestDescriptorQueue& guest_descriptor_queue;
     DescriptorBufferRing& descriptor_buffer_ring;
 
-    bool (*configure_func)(GraphicsPipeline*, bool){};
+    bool (*configure_func)(GraphicsPipeline*, bool, std::optional<PreparedBinding>*){};
 
     std::vector<GraphicsPipelineCacheKey> transition_keys;
     std::vector<GraphicsPipeline*> transitions;
@@ -454,6 +484,7 @@ private:
     std::vector<SampledImage> sampled_images;
     u32 num_textures{};
     bool fragment_has_color0_output{};
+    bool on_far_plane{};
     u32 color_output_mask{};
     bool writes_storage{};
     /// Every texture is sampled with a handle read from a constant buffer: ConfigureImpl can
@@ -500,9 +531,9 @@ private:
     u64 kept_scale_epoch{};
     bool kept_images_valid{};
 
-    vk::DescriptorSetLayout descriptor_set_layout;
+    VkDescriptorSetLayout descriptor_set_layout{}; ///< Owned by the PipelineLayoutCache
     DescriptorAllocator descriptor_allocator;
-    vk::PipelineLayout pipeline_layout;
+    VkPipelineLayout pipeline_layout{}; ///< Owned by the PipelineLayoutCache
     vk::DescriptorUpdateTemplate descriptor_update_template;
     vk::Pipeline pipeline;
 

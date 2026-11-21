@@ -569,6 +569,8 @@ add_library(core STATIC
     hle/service/audio/hardware_opus_decoder.h
     hle/service/bcat/backend/backend.cpp
     hle/service/bcat/backend/backend.h
+    hle/service/bcat/backend/nextendo.cpp
+    hle/service/bcat/backend/nextendo.h
     hle/service/bcat/bcat.cpp
     hle/service/bcat/bcat.h
     hle/service/bcat/bcat_result.h
@@ -668,6 +670,7 @@ add_library(core STATIC
     hle/service/filesystem/fsp/fs_i_save_data_info_reader.h
     hle/service/filesystem/fsp/fs_i_storage.cpp
     hle/service/filesystem/fsp/fs_i_storage.h
+    hle/service/filesystem/fsp/fs_read_throttle.h
     hle/service/filesystem/fsp/fs_read_trace.cpp
     hle/service/filesystem/fsp/fs_read_trace.h
     hle/service/filesystem/fsp/fsp_ldr.cpp
@@ -675,6 +678,8 @@ add_library(core STATIC
     hle/service/filesystem/fsp/fsp_pr.cpp
     hle/service/filesystem/fsp/fsp_pr.h
     hle/service/filesystem/fsp/fsp_srv.cpp
+    hle/service/filesystem/fsp/fsp_system_archive.cpp
+    hle/service/filesystem/fsp/fsp_system_archive.h
     hle/service/filesystem/fsp/fsp_srv.h
     hle/service/filesystem/fsp/fsp_types.h
     hle/service/filesystem/fsp/save_data_transfer_prohibiter.cpp
@@ -851,6 +856,8 @@ add_library(core STATIC
     hle/service/ns/ecommerce_interface.h
     hle/service/ns/factory_reset_interface.cpp
     hle/service/ns/factory_reset_interface.h
+    hle/service/ns/game_list_applications.cpp
+    hle/service/ns/game_list_applications.h
     hle/service/ns/language.cpp
     hle/service/ns/language.h
     hle/service/ns/ns.cpp
@@ -1083,6 +1090,7 @@ add_library(core STATIC
     hle/service/nx2_video_ready.h
     hle/service/services.cpp
     hle/service/services.h
+    hle/service/system_data_view.h
     hle/service/set/factory_settings_server.cpp
     hle/service/set/factory_settings_server.h
     hle/service/set/firmware_debug_settings_server.cpp
@@ -1310,6 +1318,16 @@ if (HAS_NCE)
         arm/nce/patcher.h
         arm/nce/visitor_base.h)
     target_link_libraries(core PRIVATE merry::oaknut)
+endif()
+
+if (HAS_HYPERVISOR)
+    find_library(HYPERVISOR_FRAMEWORK Hypervisor REQUIRED)
+    target_sources(core PRIVATE
+        arm/hypervisor/arm_hypervisor.cpp
+        arm/hypervisor/arm_hypervisor.h
+        arm/hypervisor/hv_vm.cpp
+        arm/hypervisor/hv_vm.h)
+    target_link_libraries(core PRIVATE "${HYPERVISOR_FRAMEWORK}")
 endif()
 
 if (ARCHITECTURE_x86_64 OR ARCHITECTURE_arm64 OR ARCHITECTURE_riscv64 OR ARCHITECTURE_loongarch64)

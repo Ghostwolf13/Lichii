@@ -13,7 +13,7 @@ TBD
 ### Pre-Requisites
 
 1. The Eden Emulator fully set up and configured.
-2. The Amiibo file you want to use.
+2. Amiibo data you are authorized to copy and use. Lichii does not provide these files or download sources for them.
 
     <aside>
 

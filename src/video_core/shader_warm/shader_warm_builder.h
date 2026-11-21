@@ -9,6 +9,7 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <unordered_set>
 
 #include "common/common_types.h"
 #include "common/settings_enums.h"
@@ -86,15 +87,39 @@ bool WriteWarmMarker(const std::filesystem::path& warm_file, const WarmStamp& st
 void DropStaleWarmMarker(const std::filesystem::path& warm_file,
                          const std::filesystem::path& new_file);
 
+/// Built keys of an unfinished precache (same folder, extension .progress), written by the
+/// emulator when the loading screen's precache was skipped or stopped. The next precache of the
+/// same file, driver and variant builds only the rest.
+std::filesystem::path WarmProgressPath(const std::filesystem::path& warm_file);
+
+/// The compute keys (ComputePipelineCacheKey::Hash) recorded as built for `current`, empty when
+/// there is no progress file or it was written for another stamp.
+std::unordered_set<u64> ReadWarmProgress(const std::filesystem::path& warm_file,
+                                         const WarmStamp& current);
+
+/// Records `built` for `stamp`. Returns false when it cannot be written.
+bool WriteWarmProgress(const std::filesystem::path& warm_file, const WarmStamp& stamp,
+                       const std::unordered_set<u64>& built);
+
+/// "Precompile All Shaders" of one game (same folder, extension .requested): the game's precache
+/// runs before it starts whatever precache_shaders says, and the boot builds every pipeline the
+/// title's cache recorded (as build_all_cached_shaders does).
+std::filesystem::path WarmRequestPath(const std::filesystem::path& warm_file);
+bool WarmRequested(const std::filesystem::path& warm_file);
+/// Sets or clears the request. Returns false when it cannot be changed.
+bool SetWarmRequested(const std::filesystem::path& warm_file, bool requested);
+
 /// True when the title's precache has never finished: no precache file yet, or no marker next
 /// to it. A marker that no longer matches (new driver) is not seen here: the emulator checks that
 /// at boot.
 bool WarmPending(u64 title_id);
 
-/// Whether this boot precaches before the game starts: Always, or Ask when the frontend asked and
-/// the user agreed (`asked`). Off never does.
-[[nodiscard]] constexpr bool PrecacheBeforeStart(Settings::PrecacheShaders mode, bool asked) {
-    return mode == Settings::PrecacheShaders::Always ||
+/// Whether this boot precaches before the game starts: Always, Ask when the frontend asked and
+/// the user agreed (`asked`), or a game whose shaders the user asked to precompile
+/// (`requested`, WarmRequested). Off does only for the latter.
+[[nodiscard]] constexpr bool PrecacheBeforeStart(Settings::PrecacheShaders mode, bool asked,
+                                                 bool requested = false) {
+    return requested || mode == Settings::PrecacheShaders::Always ||
            (mode == Settings::PrecacheShaders::Ask && asked);
 }
 
@@ -109,8 +134,9 @@ bool TakeWarmBeforeStart();
 void RequestSkipWarm();
 bool TakeSkipWarm();
 
-/// Removes the title's precache file, its marker and count, the list of precached graphics
-/// pipelines older builds kept and a leftover temporary file (rebuild or delete from the UI). Returns false when a file exists but cannot be removed, with
+/// Removes the title's precache file, its marker, count, progress and request, the list of
+/// precached graphics pipelines older builds kept and a leftover temporary file (rebuild or
+/// delete from the UI). Returns false when a file exists but cannot be removed, with
 /// the reason in `error` when given.
 bool DeleteWarmFiles(u64 title_id, std::string* error = nullptr);
 
@@ -124,6 +150,7 @@ struct Result {
     bool ok{};
     std::string error;           ///< Empty when ok
     size_t archives{};           ///< Shader archives found in the game files
+    size_t packs{};              ///< Asset packs scanned for zstd frames (IsFramePack)
     size_t compute_programs{};   ///< Entries written to the precache file
     size_t skipped{};            ///< Programs that failed to extract or convert
 };
@@ -144,7 +171,7 @@ Result BuildWarmFiles(Core::System& system, const std::filesystem::path& game_pa
 struct BuildOptions {
     /// Folder for warm-compute.bin; empty: <shader dir>/<title id>.
     std::filesystem::path output_dir;
-    /// Conversion threads, 0: a quarter of the CPU threads, 2 to 6.
+    /// Conversion threads, 0: every CPU thread.
     size_t threads{};
 };
 

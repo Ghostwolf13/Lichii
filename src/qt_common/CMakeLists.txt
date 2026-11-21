@@ -19,6 +19,7 @@ add_library(qt_common STATIC
 
     util/path.h util/path.cpp
     util/game.h util/game.cpp
+    util/custom_game_metadata.cpp
     util/meta.h util/meta.cpp
     util/content.h util/content.cpp
     util/rom.h util/rom.cpp
@@ -33,6 +34,7 @@ add_library(qt_common STATIC
 
     game_list/model.h game_list/model.cpp
     game_list/worker.h game_list/worker.cpp
+    game_list/patch_cache.h
     game_list/game_list_p.h
 
     qt_string_lookup.h
@@ -41,6 +43,14 @@ add_library(qt_common STATIC
     discord/discord.h
     render/context.h
     render/emu_thread.h render/emu_thread.cpp)
+
+if (LICHII_TESTS)
+    add_executable(game_list_patch_cache_tests
+        ../../tools/integration/game_list_patch_cache_test.cpp)
+    target_include_directories(game_list_patch_cache_tests PRIVATE ..)
+    target_link_libraries(game_list_patch_cache_tests PRIVATE Qt6::Core)
+    add_test(NAME game_list_patch_cache_tests COMMAND game_list_patch_cache_tests)
+endif()
 
 if (UNIX)
     target_sources(qt_common PRIVATE gui_settings.cpp gui_settings.h)

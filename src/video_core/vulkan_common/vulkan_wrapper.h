@@ -189,6 +189,7 @@ struct InstanceDispatch {
     PFN_vkGetPhysicalDeviceToolProperties vkGetPhysicalDeviceToolProperties{};
     PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties{};
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR vkGetPhysicalDeviceSurfaceCapabilitiesKHR{};
+    PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR vkGetPhysicalDeviceSurfaceCapabilities2KHR{};
     PFN_vkGetPhysicalDeviceSurfaceFormatsKHR vkGetPhysicalDeviceSurfaceFormatsKHR{};
     PFN_vkGetPhysicalDeviceSurfacePresentModesKHR vkGetPhysicalDeviceSurfacePresentModesKHR{};
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR{};
@@ -373,6 +374,8 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkCmdSetDescriptorBufferOffsetsEXT vkCmdSetDescriptorBufferOffsetsEXT{};
     PFN_vkUpdateDescriptorSets vkUpdateDescriptorSets{};
     PFN_vkWaitForFences vkWaitForFences{};
+    PFN_vkWaitForPresentKHR vkWaitForPresentKHR{};
+    PFN_vkWaitForPresent2KHR vkWaitForPresent2KHR{};
     PFN_vkWaitSemaphores vkWaitSemaphores{};
 };
 
@@ -1190,6 +1193,30 @@ public:
         return dld->vkDeviceWaitIdle(handle);
     }
 
+    /// VK_KHR_present_wait; VK_ERROR_EXTENSION_NOT_PRESENT when it isn't loaded.
+    VkResult WaitForPresentKHR(VkSwapchainKHR swapchain, u64 present_id,
+                               u64 timeout) const noexcept {
+        if (!dld->vkWaitForPresentKHR) {
+            return VK_ERROR_EXTENSION_NOT_PRESENT;
+        }
+        return dld->vkWaitForPresentKHR(handle, swapchain, present_id, timeout);
+    }
+
+    /// VK_KHR_present_wait2; VK_ERROR_EXTENSION_NOT_PRESENT when it isn't loaded.
+    VkResult WaitForPresent2KHR(VkSwapchainKHR swapchain, u64 present_id,
+                                u64 timeout) const noexcept {
+        if (!dld->vkWaitForPresent2KHR) {
+            return VK_ERROR_EXTENSION_NOT_PRESENT;
+        }
+        const VkPresentWait2InfoKHR info{
+            .sType = VK_STRUCTURE_TYPE_PRESENT_WAIT_2_INFO_KHR,
+            .pNext = nullptr,
+            .presentId = present_id,
+            .timeout = timeout,
+        };
+        return dld->vkWaitForPresent2KHR(handle, swapchain, &info);
+    }
+
     void ResetQueryPool(VkQueryPool query_pool, u32 first, u32 count) const noexcept {
         dld->vkResetQueryPool(handle, query_pool, first, count);
     }
@@ -1238,6 +1265,11 @@ public:
     bool GetSurfaceSupportKHR(u32 queue_family_index, VkSurfaceKHR) const;
 
     VkSurfaceCapabilitiesKHR GetSurfaceCapabilitiesKHR(VkSurfaceKHR) const;
+
+    /// Fills capabilities (and its pNext chain) through VK_KHR_get_surface_capabilities2. Returns
+    /// false when the instance does not have it.
+    bool GetSurfaceCapabilities2KHR(VkSurfaceKHR surface,
+                                    VkSurfaceCapabilities2KHR& capabilities) const;
 
     std::vector<VkSurfaceFormatKHR> GetSurfaceFormatsKHR(VkSurfaceKHR) const;
 

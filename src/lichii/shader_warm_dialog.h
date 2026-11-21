@@ -28,6 +28,12 @@ class QPushButton;
 /// True when the title has a shader precache file.
 bool ShaderWarmFilesExist(u64 title_id);
 
+/// True when the user asked to precompile all of the title's shaders (Precompile All Shaders).
+bool ShaderWarmRequested(u64 title_id);
+
+/// Sets or clears that request. Returns false when it cannot be changed.
+bool SetShaderWarmRequested(u64 title_id, bool requested);
+
 /// Removes the title's precache files. Returns false and fills `error` on failure.
 bool DeleteShaderWarmFiles(u64 title_id, std::string& error);
 

@@ -23,9 +23,9 @@
       </sizepolicy>
      </property>
      <property name="text">
-      <string>Linking save data to Ryujinx lets both Ryujinx and Lichii reference the same save files for your games.
+      <string>Ryujinx save ID: %1
 
-By selecting &quot;From Lichii&quot;, previous save data stored in Ryujinx will be deleted, and vice versa for &quot;From Ryujinx&quot;.</string>
+Choose which save both emulators should use. Replaced saves are kept as backups. Close any running game in Lichii and Ryujinx before linking.</string>
      </property>
      <property name="wordWrap">
       <bool>true</bool>

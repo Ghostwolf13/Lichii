@@ -17,6 +17,7 @@ public:
 
     void ReloadAllValues() override;
     void SaveAllValues() override;
+    void SaveLastSeenRelease(u32 build);
 
     void ReadQtControlPlayerValues(std::size_t player_index);
     void SaveQtControlPlayerValues(std::size_t player_index);

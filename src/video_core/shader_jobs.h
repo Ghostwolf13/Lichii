@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -163,6 +164,10 @@ public:
     /// A queued job is cancelled at once. A running CPU stage sees StopRequested() and no driver
     /// stage follows it; a running driver stage completes.
     void Cancel(const ShaderJobHandle& handle);
+
+    /// Cancels the job only while it is queued, before or after its CPU stage, and returns the
+    /// status it was queued in; nothing when a stage of it is running or it has ended.
+    std::optional<ShaderJobStatus> CancelQueued(const ShaderJobHandle& handle);
 
     /// Cancel for every job of the batch, now and later submitted.
     void Cancel(const ShaderJobBatch& batch);

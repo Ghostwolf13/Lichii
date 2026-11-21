@@ -94,12 +94,29 @@ private:
 /// reads them back runs, so other frames skip the copies.
 [[nodiscard]] bool RecordingSampledTextures() noexcept;
 
+/// The format DecodeBlocks turns a block-compressed format (BCn or ASTC) into, or nullopt when it
+/// is not compressed or the frame dump has no decoder for it.
+[[nodiscard]] std::optional<VideoCore::Surface::PixelFormat> DecodedFormat(
+    VideoCore::Surface::PixelFormat format);
+
+/// Decodes one level of tightly packed `format` blocks, width x height x depth texels, to
+/// DecodedFormat(format) texels.
+[[nodiscard]] std::vector<u8> DecodeBlocks(VideoCore::Surface::PixelFormat format,
+                                           std::span<const u8> blocks, u32 width, u32 height,
+                                           u32 depth);
+
+/// The first level of a mip chain (`level_bytes`, finest first) from which the levels down to the
+/// coarsest fit in `limit` bytes, or level_bytes.size() when not even the coarsest fits.
+[[nodiscard]] size_t FirstSampledLevel(std::span<const size_t> level_bytes, size_t limit);
+
 /// EDEN_NX2_FRAME_DUMP=<dir> reads back one whole frame: the color targets of every pass, the
 /// images written by every compute dispatch and the presented image. EDEN_NX2_FRAME_DUMP_AT picks
 /// the frame, in seconds after boot ("45") or as a frame number ("2700f").
 /// EDEN_NX2_FRAME_DUMP_SAMPLED=1 also reads back every texture a pass samples (3D and depth
 /// included), once per pass, as the first draw sampling it sees it, and the textures each compute
 /// shader samples, once per shader, before its first dispatch, with each texture's sampler state,
+/// every level of the view (the finest left out first when they do not all fit), BCn and ASTC
+/// decoded,
 /// and the uniform and storage buffers of every draw and dispatch, once per shader and binding, with
 /// each dispatch's group counts. Readbacks are encoded and written on a worker thread so the
 /// capture does not stall the game.
@@ -196,6 +213,8 @@ private:
         u32 height;
         u32 depth;
         s32 level;
+        /// The level in the host image, which may keep only the guest levels from one on.
+        s32 host_level;
         s32 layer;
         GPUVAddr gpu_addr;
         bool rescaled;
@@ -229,8 +248,11 @@ private:
         bool truncated{};
     };
 
-    std::optional<Target> MakeTarget(ImageView& view, u32 slot) const;
+    /// `level` picks another level of the view's image than its base.
+    std::optional<Target> MakeTarget(ImageView& view, u32 slot,
+                                     std::optional<s32> level = std::nullopt) const;
     static u32 TexelBytes(const Target& target);
+    static size_t ReadbackBytes(const Target& target);
     static int Decode(const Target& target, const u8* pixel, std::array<float, 4>& out);
     bool Record(const Target& target, std::string name, std::string tags);
     bool RecordSampled(const Sampled& texture, u32 index, std::string name, std::string tags);
@@ -263,6 +285,7 @@ private:
     std::vector<Readback> readbacks;
     size_t pending_bytes{};
     size_t recorded_bytes{};
+    size_t sampled_bytes{};
     size_t written_bytes{};
     u32 sequence{};
     u32 images{};

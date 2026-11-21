@@ -17,6 +17,13 @@ constexpr bool ValidColorFormats(VideoCore::Surface::PixelFormat input,
             output == PixelFormat::R16G16B16A16_FLOAT);
 }
 
+// The depth FSR 3.1 and DLSS read through a depth-aspect view: 32-bit float or 24-bit with stencil.
+constexpr bool IsUpscalerDepthFormat(VideoCore::Surface::PixelFormat format) {
+    using VideoCore::Surface::PixelFormat;
+    return format == PixelFormat::D32_FLOAT || format == PixelFormat::D24_UNORM_S8_UINT ||
+           format == PixelFormat::S8_UINT_D24_UNORM;
+}
+
 constexpr std::uint64_t FastFusionProgramId = 0x040041E0212AE000ULL;
 constexpr std::array FastFusionCandidates{0xb8ed9b1cd5c24e6dULL, 0x7f0f03c0529ca569ULL,
                                           0x7a06618494a29bcdULL};

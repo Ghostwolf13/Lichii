@@ -368,6 +368,40 @@ TEST_CASE("Texture arrays a cap cut to one element still count as arrays",
     CHECK_NOTHROW(Shader::Optimization::LimitSampledTextureArrays(shader.program, host));
 }
 
+TEST_CASE("A texture array indexed by a found bit has 32 elements",
+          "[video_core][texture_handles]") {
+    for (const bool shift : {false, true}) {
+        CAPTURE(shift);
+        HandleProgram shader;
+        shader.env.cbuf_values = {{{14, 0x300}, 0xabc}};
+        const Value msb{shader.Emit(Opcode::FindUMsb32, {shader.Storage(0)})};
+        const Value index{
+            shift ? shader.Emit(Opcode::SelectU32,
+                                {shader.Emit(Opcode::IEqual, {msb, Value{~0U}}), msb,
+                                 shader.Emit(Opcode::BitwiseXor32, {msb, Value{31U}})})
+                  : msb};
+        const Value offset{shader.Emit(Opcode::ShiftLeftLogical32, {index, Value{3U}})};
+        auto& sample{shader.Sample(
+            shader.Emit(Opcode::GetCbufU32, {Value{14U}, shader.Add(offset, Value{0x300U})}))};
+        shader.Run();
+        const auto& descriptor = shader.Descriptor(sample);
+        CHECK(descriptor.handle_program == ~0U);
+        CHECK(descriptor.count == 32);
+        CHECK(descriptor.size_shift == 3);
+        CHECK(descriptor.cbuf_index == 14);
+        CHECK(descriptor.cbuf_offset == 0x300);
+        REQUIRE(sample.Arg(0).InstRecursive()->GetOpcode() == Opcode::UMin32);
+        CHECK(sample.Arg(0).InstRecursive()->Arg(1).U32() == 31);
+    }
+    HandleProgram shader;
+    shader.env.cbuf_values = {{{14, 0x300}, 0xabc}};
+    const Value offset{shader.Emit(Opcode::ShiftLeftLogical32, {shader.Storage(0), Value{3U}})};
+    auto& sample{shader.Sample(
+        shader.Emit(Opcode::GetCbufU32, {Value{14U}, shader.Add(offset, Value{0x300U})}))};
+    shader.Run();
+    CHECK(shader.Descriptor(sample).count > 32);
+}
+
 TEST_CASE("Texture descriptors a cap makes equal share one binding",
           "[video_core][texture_handles]") {
     // An array of the textures at c0[0] and the texture at c0[0] read on its own: cut to one

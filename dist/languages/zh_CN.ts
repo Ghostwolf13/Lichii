@@ -45,6 +45,30 @@ li.checked::marker { content: &quot;\2612&quot;; }
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:7pt;&quot;&gt;&amp;quot;Nintendo Switch&amp;quot; is a trademark of Nintendo. Eden is not affiliated with Nintendo in any way.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
         <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:7pt;&quot;&gt;&amp;quot;Nintendo Switch&amp;quot; 是任天堂的注册商标。Eden 与任天堂没有任何关系。&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
+    <message>
+        <location filename="../../src/lichii/aboutdialog.ui" line="+14"/>
+        <source>About Lichii</source>
+        <translation>关于 Lichii</translation>
+    </message>
+    <message>
+        <location line="+13"/>
+        <source>Lichii is an experimental open-source emulator for the Nintendo Switch 2, based on Eglantine and Eden.
+
+This software should not be used to play games you have not legally obtained.</source>
+        <translation>Lichii 是一个面向 Nintendo Switch 2 的实验性开源模拟器，基于 Eglantine 与 Eden。
+
+请勿用本软件运行你未通过合法途径获得的游戏。</translation>
+    </message>
+    <message>
+        <location line="+15"/>
+        <source>&lt;html&gt;&lt;body&gt;&lt;p&gt;&lt;img src=":/lichii/icons/menu_code.png" width="14" height="14" align="middle"/&gt;&amp;nbsp;&lt;a style="text-decoration:none" href="https://github.com/zortos293/Eglantine"&gt;Source Code&lt;/a&gt;&amp;nbsp;&amp;nbsp;&amp;nbsp;&amp;nbsp;&lt;img src=":/lichii/icons/menu_bug.png" width="14" height="14" align="middle"/&gt;&amp;nbsp;&lt;a style="text-decoration:none" href="https://github.com/zortos293/Eglantine/issues"&gt;Report an Issue&lt;/a&gt;&amp;nbsp;&amp;nbsp;&amp;nbsp;&amp;nbsp;&lt;img src=":/lichii/icons/menu_info.png" width="14" height="14" align="middle"/&gt;&amp;nbsp;&lt;a style="text-decoration:none" href="https://github.com/zortos293/Eglantine#credits-and-license"&gt;Credits and License&lt;/a&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
+        <translation>&lt;html&gt;&lt;body&gt;&lt;p&gt;&lt;img src=":/lichii/icons/menu_code.png" width="14" height="14" align="middle"/&gt;&amp;nbsp;&lt;a style="text-decoration:none" href="https://github.com/zortos293/Eglantine"&gt;源代码&lt;/a&gt;&amp;nbsp;&amp;nbsp;&amp;nbsp;&amp;nbsp;&lt;img src=":/lichii/icons/menu_bug.png" width="14" height="14" align="middle"/&gt;&amp;nbsp;&lt;a style="text-decoration:none" href="https://github.com/zortos293/Eglantine/issues"&gt;报告问题&lt;/a&gt;&amp;nbsp;&amp;nbsp;&amp;nbsp;&amp;nbsp;&lt;img src=":/lichii/icons/menu_info.png" width="14" height="14" align="middle"/&gt;&amp;nbsp;&lt;a style="text-decoration:none" href="https://github.com/zortos293/Eglantine#credits-and-license"&gt;致谢与许可&lt;/a&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+    </message>
+    <message>
+        <location line="+16"/>
+        <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=" font-size:7pt;"&gt;&amp;quot;Nintendo Switch&amp;quot; is a trademark of Nintendo. Lichii is not affiliated with Nintendo in any way.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=" font-size:7pt;"&gt;「Nintendo Switch」是任天堂的商标。Lichii 与任天堂没有任何关联。&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+    </message>
 </context>
 <context>
     <name>CalibrationConfigurationDialog</name>
@@ -2158,6 +2182,380 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
         <source>Grid View</source>
         <translation>网格视图</translation>
     </message>
+    <message>
+        <location filename="../../src/lichii/configuration/shared_widget.cpp" line="+72"/>
+        <source>Use global (%1)</source>
+        <translation>使用全局（%1）</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Use the global value</source>
+        <translation>使用全局值</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>HDR output:</source>
+        <translation>HDR 输出：</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>HDR output for games with an HDR mode. Requires Vulkan.
+Off (default): always SDR.
+Auto: HDR while Windows HDR ("Use HDR") is on for the monitor that shows the game, SDR otherwise and on hosts that cannot tell.
+On: HDR whenever the display driver offers an HDR format.
+The game is told the display is HDR only while Lichii really presents HDR. SDR games and menus are shown at the reference white.
+While HDR is active, anti-aliasing, post-processing and FSR/SGSR upscaling are off and the window is scaled bilinearly. Frame generation keeps working.
+Screenshots are tone mapped to SDR.</source>
+        <translation>为支持 HDR 模式的游戏输出 HDR。需要 Vulkan。
+关（默认）：始终 SDR。
+自动：显示游戏的显示器在 Windows 中开启 HDR（“使用 HDR”）时输出 HDR，否则输出 SDR；无法判断的主机也输出 SDR。
+开：只要显示驱动提供 HDR 格式就输出 HDR。
+只有在 Lichii 真正输出 HDR 时才告诉游戏显示器是 HDR。SDR 游戏与菜单按参考白显示。
+HDR 启用期间，抗锯齿、后处理与 FSR/SGSR 上采样都会关闭，窗口使用双线性缩放。插帧仍然有效。
+截图会色调映射到 SDR。</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>HDR format:</source>
+        <translation>HDR 格式：</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>HDR10: 10-bit PQ, what HDR displays take.
+scRGB: 16-bit float. Try it if HDR shows banding, which some NVIDIA drivers do with 10-bit in fullscreen.</source>
+        <translation>HDR10：10 位 PQ，HDR 显示器采用的方式。
+scRGB：16 位浮点。如果 HDR 出现色带（某些 NVIDIA 驱动在 10 位全屏时会这样），可以试试它。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>HDR Reference White</source>
+        <translation>HDR 参考白</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Reference white in nits reported to the game, the brightness of its HUD and menus. 0 (default): Windows' SDR content brightness for the monitor, so the game matches the desktop; elsewhere the Switch 2 calibration, HDR Peak Luminance divided by 1.5, rounded up and clamped to 50-300 nits.
+SDR games and menus are shown at this brightness while HDR is active, and HDR screenshots map it to SDR white.</source>
+        <translation>向游戏报告的参考白（单位：尼特），也就是它 HUD 与菜单的亮度。0（默认）：使用 Windows 中该显示器的 SDR 内容亮度，让游戏与桌面一致；无法获取时用 Switch 2 校准值，即 HDR 峰值亮度除以 1.5、向上取整并限制在 50–300 尼特。
+HDR 启用期间，SDR 游戏与菜单按此亮度显示，HDR 截图也把它映射为 SDR 白。</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>HDR Peak Luminance</source>
+        <translation>HDR 峰值亮度</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Peak luminance in nits reported to the game, which tone maps to it. 0 (default): the monitor's peak from its EDID as Windows reports it; elsewhere 300 nits, the Switch 2 HDR calibration's starting value.
+Also the HDR10 metadata peak, and what an HDR image rolls off to on an SDR screen.</source>
+        <translation>向游戏报告的峰值亮度（单位：尼特），游戏据此做色调映射。0（默认）：使用 Windows 报告的显示器 EDID 峰值；无法获取时用 300 尼特，即 Switch 2 HDR 校准的起始值。
+它同时也是 HDR10 元数据里的峰值，以及在 SDR 屏幕上 HDR 画面的滚降目标。</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Generates intermediate frames for smoother motion. Requires Vulkan.
+Optical Flow Interpolation is built in. LSFG requires Lossless.dll in the user directory's lossless folder.</source>
+        <translation>生成中间帧以获得更流畅的画面。需要 Vulkan。
+光流插帧是内置的。LSFG 需要在用户目录的 lossless 文件夹里放 Lossless.dll。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Lichii Optical Flow Frame Generation is built in and runs on any GPU.
+NVIDIA DLSS Frame Generation (Windows only) needs a GeForce RTX 40 series or newer GPU (3x and 4x need an RTX 50 series), Hardware-accelerated GPU scheduling on in Windows' graphics settings, "Use NVIDIA DLSS" on and NVIDIA's files from the NVIDIA DLSS panel. It takes the game's depth and motion vectors from the DLSS evaluation, so it runs in The Legend of Zelda: Ocarina of Time only, docked, with DLSS as its upscaler. Other games, and scRGB HDR output, use Lichii Optical Flow Frame Generation instead.
+VSync is off while it runs. Choosing it takes effect when a game starts.</source>
+        <translation>Lichii 光流插帧是内置的，任何 GPU 都能运行。
+NVIDIA DLSS 插帧（仅 Windows）需要 GeForce RTX 40 系列或更新的 GPU（3 倍与 4 倍需要 RTX 50 系列）、在 Windows 显卡设置里开启硬件加速 GPU 计划、开启“使用 NVIDIA DLSS”，以及来自 NVIDIA DLSS 面板的 NVIDIA 文件。它从 DLSS 求值中取得游戏的深度与运动矢量，因此只在《塞尔达传说 时之笛》的主机模式、且以 DLSS 作为上采样器时可用。其他游戏以及 scRGB HDR 输出会改用 Lichii 光流插帧。
+它运行时 VSync 会关闭。选择后在该游戏启动时生效。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Pins the emulator's GPU threads to dedicated physical CPU cores and keeps the emulated CPU cores off them.
+Can hurt performance on CPUs with few cores. Skipped on CPUs with fewer than 6 physical performance cores.
+Windows and Linux only. Takes effect when a game starts.</source>
+        <translation>把模拟器的 GPU 线程固定到专用的物理 CPU 核心，并让模拟的 CPU 核心避开这些核心。
+在核心较少的 CPU 上可能反而降低性能。物理性能核少于 6 个的 CPU 会跳过。
+仅限 Windows 与 Linux。游戏启动时生效。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Builds shaders on the loading screen, on every CPU thread, so they don't stutter the first time the game uses them: the compute shaders found in the game files. The first launch reads the game files and takes a few minutes; later launches only build what is new, until the GPU driver changes. The loading screen has a Skip button.
+Ask asks at launch while the game has never been precached.
+Precompile All Shaders in a game's context menu does this for that game whatever this says, and builds every shader its earlier sessions saved too.</source>
+        <translation>在加载界面用全部 CPU 线程构建着色器，让游戏第一次用到它们时不卡顿：也就是游戏文件里能找到的 compute 着色器。首次启动会读取游戏文件，需要几分钟；之后每次启动只构建新增的部分，直到 GPU 驱动发生变化。加载界面有「跳过」按钮。
+「询问」会在游戏从未预缓存过时于启动时询问。
+游戏右键菜单里的「预编译所有着色器」不管这里怎么设置都会对该游戏执行，并且还会构建它此前会话保存的所有着色器。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Build all cached shaders before game start</source>
+        <translation>游戏开始前构建所有已缓存的着色器</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Builds every shader saved by earlier play sessions on the loading screen and keeps them built, so places you visited long ago don't stutter. Without it, only the shaders of recent sessions are built there and the rest in the background or when the game first needs them.
+Loading takes longer and uses more memory, about 0.3 MB per shader, up to a quarter of the RAM. Takes effect when a game starts.</source>
+        <translation>在加载界面构建此前所有游戏会话保存的着色器并一直保持已构建，这样很久以前去过的地方也不会卡顿。关闭时，那里只会构建最近会话的着色器，其余的放到后台或游戏首次需要时再构建。
+加载会更久、占用更多内存，大约每个着色器 0.3 MB，最多可用到内存的四分之一。游戏启动时生效。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Switch 2 draws and compute with unbuilt shaders:</source>
+        <translation>Switch 2 绘制与 compute 使用尚未构建的着色器时：</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Only applies when "Don't wait for shaders that are still compiling" is on. Decides what Switch 2 work does when its pipeline is still building. Only work that redraws what an earlier frame drew can be skipped: draws that are depth-tested into a target drawn before, and compute passes whose outputs the GPU wrote before. Other work waits unless the separate mesh skip option applies.
+Wait stalls the GPU until the pipeline is ready (no missing effects, but long stalls on new content). Skip drops that work, which can leave an effect missing for a few frames. Bounded (default) waits up to the time below per frame, then skips. The EDEN_NX2_ASYNC_DISCARD=1 environment variable still forces Skip.</source>
+        <translation>只在开启「不等待仍在编译的着色器」时有效。决定 Switch 2 的工作在管线仍在构建时怎么做。只有重绘此前帧已绘制内容的工作才能跳过：深度测试到此前绘制过的目标的绘制，以及输出此前已由 GPU 写入过的 compute 通道。其他工作会等待，除非单独开启 mesh 跳过选项。
+「等待」会让 GPU 停住直到管线就绪（不会缺效果，但新内容会有长时间停顿）。「跳过」会丢弃这些工作，可能导致某个效果缺失几帧。「有上限」（默认）每帧最多等待下面设置的时间，之后跳过。环境变量 EDEN_NX2_ASYNC_DISCARD=1 仍会强制跳过。</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Used by the Bounded mode: the most time per frame that Switch 2 draws and compute passes may wait in total for pipelines that are still building. Once spent, the remaining unbuilt work of that frame that can be skipped is skipped.</source>
+        <translation>供「有上限」模式使用：Switch 2 的绘制与 compute 通道每帧总共最多等待仍在构建的管线多久。用完之后，该帧剩余可跳过的未构建工作会被跳过。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Skip Switch 2 mesh draws with unbuilt shaders</source>
+        <translation>跳过使用未构建着色器的 Switch 2 mesh 绘制</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Only applies when "Don't wait for shaders that are still compiling" is on. Skips Switch 2 mesh draws while their pipelines build, even in Wait mode. This can reduce stalls, but some objects may not appear until their shaders finish building.</source>
+        <translation>只在开启「不等待仍在编译的着色器」时有效。管线构建期间跳过 Switch 2 的 mesh 绘制，即使在「等待」模式下也如此。这能减少停顿，但有些物体可能要到着色器构建完成才出现。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Mario Kart World: 60 FPS mode</source>
+        <translation>马力欧赛车 世界：60 FPS 模式</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Forces the game's 60 FPS mode everywhere, not only in cutscenes. The game advances one 60 FPS step per frame, so it never runs fast. Takes effect after restarting the game and takes precedence over the 30 FPS mode.</source>
+        <translation>强制游戏在所有场景使用 60 FPS 模式，而不只在过场动画里。游戏每帧推进一个 60 FPS 步长，因此不会加速。重启游戏后生效，并优先于 30 FPS 模式。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Mario Kart World: drop to 30 FPS when slow</source>
+        <translation>马力欧赛车 世界：卡顿时降到 30 FPS</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Only applies with the 60 FPS mode. When your PC can't hold 60 FPS, the game switches to its 30 FPS mode and keeps normal speed, then tries 60 again every few seconds. Turn it off to stay at 60 FPS, where slow frames play in slow motion. Takes effect after restarting the game.</source>
+        <translation>仅在 60 FPS 模式下有效。当你的 PC 无法维持 60 FPS 时，游戏切到它自己的 30 FPS 模式并保持正常速度，然后每隔几秒再尝试 60 FPS。关闭它会一直保持在 60 FPS，此时慢帧会以慢动作播放。重启游戏后生效。</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Hyrule Warriors: Age of Imprisonment: dynamic FPS (experimental)</source>
+        <translation>塞尔达无双 封印战记：动态帧率（实验）</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Drops to 30 FPS with the game's split-screen time step while the game runs below about 50 FPS, so heavy slowdowns don't slow down the game, and tries 60 FPS again every few seconds.</source>
+        <translation>当游戏运行低于约 50 FPS 时，改用游戏的分屏时间步降到 30 FPS，避免严重掉速拖慢游戏，并且每隔几秒再尝试 60 FPS。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Hyrule Warriors: Age of Imprisonment: 30 FPS mode</source>
+        <translation>塞尔达无双 封印战记：30 FPS 模式</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Always runs at 30 FPS with the game's split-screen time step, at normal game speed. Takes precedence over dynamic FPS.</source>
+        <translation>始终以游戏的分屏时间步运行在 30 FPS，保持正常游戏速度。优先于动态帧率。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Mesh Shaders</source>
+        <translation>Mesh 着色器</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>How Switch 2 games' mesh shader geometry is drawn.
+Native uses the GPU's mesh shaders. Compute Fallback emulates them with compute shaders: it can be slower in scenes with a lot of foliage, and it can't draw every kind of mesh program.
+Automatic uses the compute fallback on AMD RDNA2 GPUs (RX 6000 series), where native mesh shaders hang the GPU, and native mesh shaders everywhere else.</source>
+        <translation>Switch 2 游戏的 mesh 着色器几何体如何绘制。
+「原生」使用 GPU 的 mesh 着色器。「Compute 回退」用 compute 着色器模拟：在植被很多的场景里会更慢，而且并非所有 mesh 程序都能绘制。
+「自动」在会让 GPU 挂死的 AMD RDNA2 GPU（RX 6000 系列）上使用 compute 回退，其余情况使用原生 mesh 着色器。</translation>
+    </message>
+    <message>
+        <location line="-484"/>
+        <source>Bilinear while HDR output is active.</source>
+        <translation>HDR 输出开启时使用双线性。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Runs a Switch 2 game's own DLSS (its upscaling network, translated for this GPU) instead of AMD FSR 3.1 in its place.
+AMD FSR 3.1 still draws while the network is checked, when it can't run on this GPU, with resolution scaling, and for the rest of the session if its output fails Lichii's checks.
+Takes effect when a game starts.</source>
+        <translation>以 Switch 2 游戏自带的 DLSS（把它的一次性上采样网络为本 GPU 转换）代替 AMD FSR 3.1。
+在网络校验期间、它无法在本 GPU 上运行、开启分辨率缩放、以及它的输出未通过 Lichii 检查后直到本次会话结束，仍会由 AMD FSR 3.1 绘制。
+游戏启动时生效。</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Rate of the Switch 2 VSync event that games start their frames on (default 60 Hz).
+Above 60 Hz most games run too fast; use it with a game patch that follows real time, such as "FPS Unlock (built-in)" for Ocarina of Time.
+Takes effect when a game starts.</source>
+        <translation>游戏开始每一帧所依据的 Switch 2 VSync 事件频率（默认 60 Hz）。
+高于 60 Hz 时大多数游戏会跑得过快；请配合跟随真实时间的游戏补丁使用，例如《时之笛》的“FPS Unlock（内置）”。
+游戏启动时生效。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Strength of RCAS (AMD's contrast-adaptive sharpening) on the upscaler used in place of a game's DLSS (AMD FSR 3.1); 0% turns it off.
+Also sets the sharpening of the AMD FSR 1 and SGSR window adapting filters.</source>
+        <translation>替代游戏 DLSS 的上采样器（AMD FSR 3.1）上 RCAS（AMD 的对比度自适应锐化）的强度；0% 表示关闭。
+它同时设置 AMD FSR 1 与 SGSR 窗口适配滤镜的锐化。</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Use FSR 4 (fsr4-vk community Vulkan port) in place of FSR 3.1</source>
+        <translation>用 FSR 4（fsr4-vk 社区 Vulkan 移植版）替代 FSR 3.1</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Uses fsr4-vk, a community Vulkan port of AMD's ML-based FSR 4.1.1 that Lichii's x86-64 Linux packages include, where FSR replaces a game's upscaler (Ocarina of Time with the setting above). It is not AMD's official FSR 4 and is not affiliated with or endorsed by AMD. Radeon RX 6000 or newer, or an RDNA 3 Ryzen GPU, on Mesa's RADV driver; RDNA 4 runs the FP8 network, older GPUs the INT8 one.
+If FSR 4 can't run, FSR 3.1 is used and the log says why. Takes effect when a game starts.</source>
+        <translation>在 FSR 替代游戏上采样器时（配合上面的设置，即《时之笛》），使用 fsr4-vk —— 一个把 AMD 基于机器学习的 FSR 4.1.1 移植到 Vulkan 的社区版本，Lichii 的 x86-64 Linux 包已自带。它不是 AMD 官方的 FSR 4，与 AMD 无关，也未获其认可。需要 Radeon RX 6000 或更新，或 RDNA 3 的 Ryzen GPU，并使用 Mesa 的 RADV 驱动；RDNA 4 运行 FP8 网络，较老的 GPU 运行 INT8 版本。
+如果 FSR 4 无法运行，会改用 FSR 3.1，并在日志里说明原因。游戏启动时生效。</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Uses AMD's ML-based FSR 4 where FSR replaces a game's upscaler (Ocarina of Time with the setting above). Radeon RX 6000 or newer, or a Ryzen AI processor, with a current AMD driver.
+Needs AMD's FidelityFX runtime, which Lichii downloads from AMD when you ask. The files are AMD's, under AMD's licence. Without them, or if FSR 4 can't run, FSR 3.1 is used. Takes effect when a game starts.</source>
+        <translation>在 FSR 替代游戏上采样器时（配合上面的设置，即《时之笛》），使用 AMD 基于机器学习的 FSR 4。需要 Radeon RX 6000 或更新，或 Ryzen AI 处理器，并安装较新的 AMD 驱动。
+需要 AMD 的 FidelityFX 运行库，由 Lichii 在你请求时从 AMD 下载。这些文件属于 AMD，受 AMD 许可约束。没有它们，或 FSR 4 无法运行时，会改用 FSR 3.1。游戏启动时生效。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, instead of AMD FSR 3.1.
+Needs NVIDIA's Streamline loader, and NVIDIA DLSS unless the NVIDIA app has downloaded it; Lichii does not ship NVIDIA's files. Use the download button below.
+In Fire Emblem: Fortune's Weave it replaces the game's DLSS while "Use the game's own DLSS" is off.
+In The Legend of Zelda: Ocarina of Time it replaces the game's upscaler at 1x resolution scale.
+The window adapting filter (the FSR 1, Bilinear and similar button in the status bar) is separate and runs after DLSS. While DLSS runs, the status bar shows DLSS, its mode and its preset. If DLSS fails, it stays off until the game restarts and the log says why.
+Takes effect when a game starts.</source>
+        <translation>在 GeForce RTX 显卡上用 NVIDIA DLSS 替代 Switch 2 游戏自带的 DLSS，而不用 AMD FSR 3.1。
+需要 NVIDIA 的 Streamline 加载器，以及 NVIDIA DLSS（除非 NVIDIA app 已下载过）；Lichii 不分发 NVIDIA 的文件，请用下面的下载按钮。
+在《火焰纹章 万缕千丝》里，它会在关闭“使用游戏自带的 DLSS”时替代游戏的 DLSS。
+在《塞尔达传说 时之笛》里，它会在 1 倍分辨率缩放时替代游戏的上采样器。
+窗口适配滤镜（状态栏里的 FSR 1、双线性等按钮）是另一套，在 DLSS 之后运行。DLSS 运行时，状态栏会显示 DLSS、它的模式与预设。如果 DLSS 失败，它会一直关闭到游戏重启，并在日志里说明原因。
+游戏启动时生效。</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Applies only when a game uses its own DLSS.
+Automatic selects a mode for the game's render/output sizes. Native (DLAA) applies anti-aliasing at the game's render resolution, then scales to its output; Ocarina's 1440p mode stays at 1440p instead of reconstructing to 4K.
+In The Legend of Zelda: Ocarina of Time (docked, with the Max Resolution add-on), Balanced, Performance and Ultra Performance lower the game's render resolution from 2560x1440 to 2276x1280, 1920x1080 and 1280x720 before DLSS reconstructs 4K. That resolution changes when the game starts.
+In other games, explicit modes only apply when the game's render size is within NVIDIA's supported range; otherwise Automatic is used and the fallback is logged. There they don't change the game's render resolution. Apply/OK updates the mode while playing.</source>
+        <translation>仅在游戏使用自带 DLSS 时有效。
+「自动」会根据游戏的渲染/输出尺寸选择模式。「原生（DLAA）」在游戏的渲染分辨率上做抗锯齿，然后缩放到输出尺寸；时之笛的 1440p 模式会保持在 1440p，而不是重建到 4K。
+在《塞尔达传说 时之笛》中（主机模式，启用 Max Resolution 插件），「平衡」「性能」「超高性能」会把游戏的渲染分辨率从 2560x1440 依次降到 2276x1280、1920x1080、1280x720，再由 DLSS 重建 4K。该分辨率在游戏启动时变更。
+在其他游戏中，只有游戏的渲染尺寸落在 NVIDIA 支持的范围内，显式模式才会生效；否则会使用「自动」，并在日志中记录回退。在那里它们不会改变游戏的渲染分辨率。游玩中点「应用」/「确定」会立即更新模式。</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Applies only when a game uses its own DLSS.
+M (DLSS 4.5) is Lichii's default for every quality mode. NVIDIA recommends K for DLAA/Quality/Balanced, M for Performance, and L for Ultra Performance.
+L/M cost more on RTX 20/30 GPUs; consider K. J may reduce ghosting but flicker more. E/F are deprecated CNN models. NVIDIA default lets the runtime choose.
+L/M require DLSS 310.5 or newer; the download button provides 310.9.16. If Fire Emblem shows horizontal lines with L/M at 2x, try K. NVIDIA app overrides may supersede this choice. Apply/OK updates it while playing.</source>
+        <translation>仅在游戏使用自带 DLSS 时有效。
+M（DLSS 4.5）是 Lichii 对每个质量模式的默认值。NVIDIA 建议 DLAA/质量/平衡用 K，性能用 M，超高性能用 L。
+L/M 在 RTX 20/30 显卡上开销更高，可以考虑 K。J 可能减少拖影但闪烁更多。E/F 是已弃用的 CNN 模型。「NVIDIA 默认」让运行时自行选择。
+L/M 需要 DLSS 310.5 或更新；下载按钮提供 310.9.16。如果《火焰纹章》在 2 倍时用 L/M 出现横线，可以试试 K。NVIDIA app 的覆盖设置可能会取代这里的选项。游玩中点「应用」/「确定」会立即更新。</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>The anti-aliasing method to use.
+SMAA offers the best quality.
+FXAA can produce a more stable picture in lower resolutions.
+Off while HDR output is active.</source>
+        <translation>要使用的抗锯齿方式。
+SMAA 画质最好。
+FXAA 在较低分辨率下画面更稳定。
+HDR 输出开启时会关闭。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>The Legend of Zelda: Ocarina of Time only.
+Game: the game's own anti-aliasing network, which sharpens heavily.
+No sharpening: the image as the game renders it, without the network (faster; pairs well with a higher resolution). Has no effect while NVIDIA DLSS is on.
+Takes effect when the game starts.</source>
+        <translation>仅适用于《塞尔达传说 时之笛》。
+「游戏」：使用游戏自带的抗锯齿网络，锐化很重。
+「不锐化」：保持游戏渲染出的画面，不使用该网络（更快；与更高分辨率搭配更好）。NVIDIA DLSS 开启时无效。
+游戏启动时生效。</translation>
+    </message>
+    <message>
+        <location line="+106"/>
+        <source>How much of a Switch 2 compute shader's storage buffer is treated as written by the GPU after each dispatch.
+Auto marks what the shader's stores can reach and falls back to Full when that cannot be proven.
+Full marks the whole binding (up to 8 MiB), the original behaviour: it can delay the game's own writes to nearby memory (flickering effects) and copy far more data back from the GPU.</source>
+        <translation>每次 dispatch 之后，Switch 2 的 compute 着色器存储缓冲有多大范围被视为已由 GPU 写入。
+「自动」标记着色器写入可能到达的范围，无法证明时回退到「完整」。
+「完整」标记整个绑定（最多 8 MiB），即原来的行为：它可能推迟游戏对邻近内存的写入（效果闪烁），并从 GPU 拷贝回多得多的数据。</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Don't wait for shaders that are still compiling</source>
+        <translation>不等待仍在编译的着色器</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>On (default): a draw or compute pass whose shader is still compiling is skipped for a few frames, so a new shader costs a brief pop-in instead of a freeze.
+Off (accurate): the game waits for every shader, so nothing is ever missing, but each new shader can freeze the game for up to a few seconds.</source>
+        <translation>开（默认）：着色器仍在编译的绘制或 compute 通道会被跳过几帧，因此新着色器只会带来短暂的对象晚出现，而不是卡住。
+关（精确）：游戏等待每一个着色器，不会缺任何东西，但每个新着色器都可能让游戏卡住最多几秒。</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Lichii Optical Flow Frame Generation</source>
+        <translation>Lichii 光流插帧</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>NVIDIA DLSS Frame Generation</source>
+        <translation>NVIDIA DLSS 插帧</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>On</source>
+        <translation>开</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>HDR10 (10-bit)</source>
+        <translation>HDR10（10 位）</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>scRGB (16-bit float)</source>
+        <translation>scRGB（16 位浮点）</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Native</source>
+        <translation>原生</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Compute Fallback</source>
+        <translation>Compute 回退</translation>
+    </message>
+    <message>
+        <location line="+20"/>
+        <source>Dynarmic (JIT)</source>
+        <translation>Dynarmic（JIT）</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Native (NCE)</source>
+        <translation>原生（NCE）</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Hypervisor (requires multicore)</source>
+        <translation>Hypervisor（需要多核）</translation>
+    </message>
 </context>
 <context>
     <name>ConfigureApplets</name>
@@ -2808,6 +3206,11 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
         <source>**This will be reset automatically when Eden closes.</source>
         <translation>**这会在 Eden 关闭时自动重置。</translation>
     </message>
+    <message>
+        <location line="+36"/>
+        <source>**This will be reset automatically when Lichii closes.</source>
+        <translation>**Lichii 关闭时会自动重置。</translation>
+    </message>
 </context>
 <context>
     <name>ConfigureDebugController</name>
@@ -2943,6 +3346,11 @@ Enabling it bypasses such prompts and directly exits the emulation.</source>
         <location filename="../../src/lichii/configuration/configure_dialog.cpp" line="84"/>
         <source>Web</source>
         <translation>网络</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/configuration/configure.ui" line="+14"/>
+        <source>Lichii Configuration</source>
+        <translation>Lichii 设置</translation>
     </message>
 </context>
 <context>
@@ -3225,6 +3633,11 @@ Would you like to delete the old save data?</source>
         <source>This directory is already in the list.</source>
         <translation>这个目录已经在列表中了。</translation>
     </message>
+    <message>
+        <location filename="../../src/lichii/configuration/configure_general.cpp" line="+101"/>
+        <source>Lichii</source>
+        <translation>Lichii</translation>
+    </message>
 </context>
 <context>
     <name>ConfigureGraphics</name>
@@ -3288,6 +3701,16 @@ Would you like to delete the old save data?</source>
         <location filename="../../src/lichii/configuration/configure_graphics.cpp" line="397"/>
         <source>VSync On</source>
         <translation>垂直同步开</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/configuration/configure_graphics.cpp" line="+257"/>
+        <source>nits</source>
+        <translation>尼特</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source> Hz</source>
+        <translation> Hz</translation>
     </message>
 </context>
 <context>
@@ -3600,6 +4023,11 @@ Would you like to delete the old save data?</source>
         <source>Clear</source>
         <translation>清除</translation>
     </message>
+    <message>
+        <location filename="../../src/lichii/configuration/configure_input.cpp" line="+149"/>
+        <source>Microphone</source>
+        <translation>麦克风</translation>
+    </message>
 </context>
 <context>
     <name>ConfigureInputAdvanced</name>
@@ -3815,6 +4243,11 @@ Would you like to delete the old save data?</source>
         <location filename="../../src/lichii/configuration/configure_input_advanced.ui" line="2772"/>
         <source>Disable SDL WGI/XInput (Requires restart)</source>
         <translation>禁用 SDL WGI/XInput (需要重启)</translation>
+    </message>
+    <message>
+        <location line="+16"/>
+        <source>Requires restarting Lichii</source>
+        <translation>需要重启 Lichii</translation>
     </message>
 </context>
 <context>
@@ -4544,6 +4977,11 @@ To invert the axes, first move your joystick vertically, and then horizontally.<
         <source>UDP Test or calibration configuration is in progress.&lt;br&gt;Please wait for them to finish.</source>
         <translation>UDP 测试或触摸校准正在进行中。&lt;br&gt;请耐心等待。</translation>
     </message>
+    <message>
+        <location line="+94"/>
+        <source>Lichii</source>
+        <translation>Lichii</translation>
+    </message>
 </context>
 <context>
     <name>ConfigureMousePanning</name>
@@ -4671,6 +5109,331 @@ Current values are %1% and %2% respectively.</source>
         <source>Enable Airplane Mode</source>
         <translation>启用飞行模式</translation>
     </message>
+    <message>
+        <location line="+7"/>
+        <source>Plays local wireless games with other Lichii instances or ldn_mitm consoles on the same network, without a room. If you are in a room when a game starts local play, the room is used instead.</source>
+        <translation>在同一网络上的其他 Lichii 实例或 ldn_mitm 主机之间游玩本地无线游戏，无需房间。如果游戏开始本地联机时你正处于某个房间，则会使用该房间。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>LAN play</source>
+        <translation>LAN 联机</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Host redirect</source>
+        <translation>主机重定向</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Redirect host names to a server you run</source>
+        <translation>把主机名重定向到你自己运行的服务器</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>For a server you run yourself. While this is on, the host names below and their subdomains resolve to 127.0.0.1, and connections to 127.0.0.1 on port 443 go to the server address. The CA certificate is trusted for every secure connection a game makes. Changes take effect when a game starts.</source>
+        <translation>用于你自己运行的服务器。开启后，下面的主机名及其子域会解析到 127.0.0.1，而发往 127.0.0.1 443 端口的连接会转到服务器地址。该 CA 证书会被信任用于游戏发起的每个安全连接。更改在游戏启动时生效。</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Host names</source>
+        <translation>主机名</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Host names separated by commas or spaces, for example *.a.example b.example. Each also covers its subdomains.</source>
+        <translation>主机名以逗号或空格分隔，例如 *.a.example b.example。每一项也会覆盖其子域。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Server address</source>
+        <translation>服务器地址</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>IPv4 address and port of your server, for example 192.168.1.20:8443. Leave it empty if your server listens on this PC on port 443.</source>
+        <translation>你服务器的 IPv4 地址与端口，例如 192.168.1.20:8443。如果你的服务器就在本机监听 443 端口，可留空。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>CA certificate</source>
+        <translation>CA 证书</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>The CA certificate (DER, at most 64 KiB) that signed your server's certificate. Optional.</source>
+        <translation>为你的服务器证书签名的 CA 证书（DER 格式，最大 64 KiB）。可选。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Browse...</source>
+        <translation>浏览…</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Other host names don't resolve, and games can reach only this PC and the server address. Games get an id token Lichii makes for the current user instead of their Nextendo one. Multiplayer rooms are not affected.</source>
+        <translation>其他主机名不会解析，游戏只能访问本机和服务器地址。游戏会拿到 Lichii 为当前用户生成的 id token，而不是 Nextendo 的。多人房间不受影响。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Block all other network access</source>
+        <translation>阻止其他所有网络访问</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Nextendo Network</source>
+        <translation>Nextendo 网络</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Play online through Nextendo Network</source>
+        <translation>通过 Nextendo 网络在线游玩</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Nextendo Network is a community service that replaces Nintendo's online servers. When this is on, the games it supports connect to Nextendo instead of Nintendo and send your Nextendo game token to it. Airplane mode is turned off. Online play needs a Nextendo account with a verified e-mail address and a linked Discord account.</source>
+        <translation>Nextendo 网络是一个替代任天堂在线服务器的社区服务。开启后，受支持的游戏会连接到 Nextendo 而不是任天堂，并把你的 Nextendo 游戏令牌发过去。飞行模式会被关闭。在线游玩需要已验证邮箱并已关联 Discord 账号的 Nextendo 账户。</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Client ID</source>
+        <translation>客户端 ID</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Profile</source>
+        <translation>配置</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/configuration/configure_network.cpp" line="+275"/>
+        <source>Sign in to Nextendo</source>
+        <translation>登录 Nextendo</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Sign out</source>
+        <translation>退出登录</translation>
+    </message>
+    <message>
+        <location line="+41"/>
+        <source>Accept</source>
+        <translation>接受</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Decline</source>
+        <translation>拒绝</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/configuration/configure_network.cpp" line="+175"/>
+        <source>Remove friend</source>
+        <translation>移除好友</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Friend code, for example SW-0000-0000-0000</source>
+        <translation>好友码，例如 SW-0000-0000-0000</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Add friend</source>
+        <translation>添加好友</translation>
+    </message>
+    <message>
+        <location line="+17"/>
+        <source>Use my Nextendo nickname and picture for the current user (replaces its name and icon)</source>
+        <translation>为当前用户使用我的 Nextendo 昵称和头像（会替换它的名称和图标）</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/configuration/configure_network.cpp" line="-401"/>
+        <source>Online play needs a verified e-mail address. Verify it on nextendo.network.</source>
+        <translation>在线游玩需要已验证的邮箱地址，请在 nextendo.network 上验证。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Online play needs a Discord account. Link one on nextendo.network.</source>
+        <translation>在线游玩需要 Discord 账号，请在 nextendo.network 上关联一个。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>nextendo.network has suspended this account.</source>
+        <translation>nextendo.network 已暂停此账户。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>This account is already playing online on another device.</source>
+        <translation>此账户已在另一台设备上在线游玩。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>nextendo.network doesn't recognise this account.</source>
+        <translation>nextendo.network 不认识此账户。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>nextendo.network refuses online play for this account (%1).</source>
+        <translation>nextendo.network 拒绝了此账户的在线游玩（%1）。</translation>
+    </message>
+    <message>
+        <location line="+42"/>
+        <source>Select the CA certificate</source>
+        <translation>选择 CA 证书</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>DER certificates (*.der *.cer *.crt);;All files (*)</source>
+        <translation>DER 证书 (*.der *.cer *.crt);;所有文件 (*)</translation>
+    </message>
+    <message>
+        <location line="+24"/>
+        <source>Friend request sent.</source>
+        <translation>好友请求已发送。</translation>
+    </message>
+    <message>
+        <location line="+77"/>
+        <source>Cancel sign-in</source>
+        <translation>取消登录</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Finish signing in to Nextendo in your browser.</source>
+        <translation>请在浏览器中完成 Nextendo 登录。</translation>
+    </message>
+    <message>
+        <location line="+31"/>
+        <source>Open this address in your browser to sign in: %1</source>
+        <translation>请在浏览器中打开此地址以登录：%1</translation>
+    </message>
+    <message>
+        <location line="+36"/>
+        <source>Sign-in failed: %1</source>
+        <translation>登录失败：%1</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Your Nextendo session expired. Sign in again.</source>
+        <translation>你的 Nextendo 会话已过期，请重新登录。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Your session was ended on nextendo.network. Sign in again.</source>
+        <translation>你的会话已在 nextendo.network 上结束，请重新登录。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>The sign-in didn't allow online play. Sign in again and allow it.</source>
+        <translation>本次登录未允许在线游玩。请重新登录并允许。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Not signed in.</source>
+        <translation>未登录。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Signed in.</source>
+        <translation>已登录。</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Signed in as %1.</source>
+        <translation>已以 %1 登录。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Nextendo did not issue an online play token, so games can't log in to Nextendo yet.</source>
+        <translation>Nextendo 没有签发在线游玩令牌，因此游戏暂时无法登录 Nextendo。</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Friends and presence aren't available for Lichii on Nextendo right now.</source>
+        <translation>Lichii 目前在 Nextendo 上无法使用好友与在线状态功能。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Sign in again to add friends and show them what you play. Online play keeps working until then.</source>
+        <translation>重新登录即可添加好友并向他们展示你在玩什么。在此之前在线游玩仍可继续。</translation>
+    </message>
+    <message>
+        <location line="+13"/>
+        <source>%1 is signed in to the same Nextendo account. Nextendo allows one online session per account, so only one of these profiles can play online at a time.</source>
+        <translation>%1 已登录同一个 Nextendo 账户。Nextendo 每个账户只允许一个在线会话，因此这些配置中同时只有一个能在线游玩。</translation>
+    </message>
+    <message>
+        <location line="+20"/>
+        <source>Your friend code: %1</source>
+        <translation>你的好友码：%1</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>%1 (%2): %3</source>
+        <translation>%1（%2）：%3</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>wants to be your friend</source>
+        <translation>想加你为好友</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>playing</source>
+        <translation>游玩中</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>online</source>
+        <translation>在线</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>offline</source>
+        <translation>离线</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>request sent</source>
+        <translation>请求已发送</translation>
+    </message>
+    <message>
+        <location line="+26"/>
+        <source>Remove %1 from your Nextendo friends?</source>
+        <translation>要把 %1 从你的 Nextendo 好友中移除吗？</translation>
+    </message>
+    <message>
+        <location line="+31"/>
+        <source>Sign in to Nextendo first.</source>
+        <translation>请先登录 Nextendo。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>This sign-in doesn't allow friends. Sign in again and allow them.</source>
+        <translation>本次登录未允许好友功能。请重新登录并允许。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Could not reach nextendo.network.</source>
+        <translation>无法连接到 nextendo.network。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>That is your own friend code.</source>
+        <translation>这是你自己的好友码。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>nextendo.network doesn't know that player or friend code.</source>
+        <translation>nextendo.network 不认识该玩家或好友码。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>A friend list is full.</source>
+        <translation>某个好友列表已满。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>nextendo.network refused the request (HTTP %1).</source>
+        <translation>nextendo.network 拒绝了该请求（HTTP %1）。</translation>
+    </message>
 </context>
 <context>
     <name>ConfigurePerGame</name>
@@ -4778,6 +5541,121 @@ Current values are %1% and %2% respectively.</source>
         <location filename="../../src/lichii/configuration/configure_per_game.cpp" line="90"/>
         <source>Properties</source>
         <translation>属性</translation>
+    </message>
+    <message>
+        <location line="+73"/>
+        <source>Preview a local icon next to the archive. Online lookup is optional. Apply or OK saves changes.</source>
+        <translation>在封面旁预览本地图标。在线查找是可选的。点「应用」或「确定」保存更改。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Detect Icon</source>
+        <translation>识别图标</translation>
+    </message>
+    <message>
+        <location line="+13"/>
+        <source>Preview a local image as the game icon. Apply or OK saves changes.</source>
+        <translation>把本地图片预览为游戏图标。点「应用」或「确定」保存更改。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Upload Icon...</source>
+        <translation>上传图标…</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Browse iiDB Artwork...</source>
+        <translation>浏览 iiDB 封面…</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Choose online artwork using your own iiDB API key. Apply or OK saves changes.</source>
+        <translation>用你自己的 iiDB API 密钥挑选在线封面。点「应用」或「确定」保存更改。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Show the game's own icon again. Apply or OK saves changes.</source>
+        <translation>恢复游戏自带的图标。点「应用」或「确定」保存更改。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Remove Custom Icon</source>
+        <translation>移除自定义图标</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Allow online lookup</source>
+        <translation>允许在线查找</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>If no local icon is found, send the game name to GitHub, Wikipedia and Bing to look for an icon. Disabled by default.</source>
+        <translation>如果找不到本地图标，就把游戏名发给 GitHub、Wikipedia 和 Bing 去查找图标。默认关闭。</translation>
+    </message>
+    <message>
+        <location line="+149"/>
+        <source>Name shown in the library. Clear it to use the game's own name.</source>
+        <translation>在库中显示的名称。留空则使用游戏自带的名称。</translation>
+    </message>
+    <message>
+        <location line="+109"/>
+        <source>Select Game Icon</source>
+        <translation>选择游戏图标</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Images (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*)</source>
+        <translation>图片 (*.png *.jpg *.jpeg *.bmp *.webp);;所有文件 (*)</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Invalid Image</source>
+        <translation>图片无效</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Select a PNG, JPEG, BMP or WebP image up to 8 MiB, 8192 pixels per side and 16 megapixels.</source>
+        <translation>请选择不超过 8 MiB、每边 8192 像素、总计 1600 万像素的 PNG、JPEG、BMP 或 WebP 图片。</translation>
+    </message>
+    <message>
+        <location line="+35"/>
+        <source>Please enter a game name first so the icon can be detected.</source>
+        <translation>请先输入游戏名，才能识别图标。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>The game name is too long to search.</source>
+        <translation>游戏名太长，无法用于搜索。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Detecting...</source>
+        <translation>正在识别…</translation>
+    </message>
+    <message>
+        <location line="+17"/>
+        <source>Game Artwork</source>
+        <translation>游戏封面</translation>
+    </message>
+    <message>
+        <location line="-16"/>
+        <source>The artwork could not be removed.</source>
+        <translation>无法移除封面。</translation>
+    </message>
+    <message>
+        <location line="+17"/>
+        <source>The artwork could not be saved.</source>
+        <translation>无法保存封面。</translation>
+    </message>
+    <message>
+        <location line="+19"/>
+        <source>Game Name</source>
+        <translation>游戏名称</translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>The game name could not be saved.</source>
+        <translation>无法保存游戏名。</translation>
     </message>
 </context>
 <context>
@@ -4900,6 +5778,16 @@ Once deleted, these can NOT be recovered. Are you 100% sure you want to delete t
         <location filename="../../src/lichii/configuration/configure_per_game_addons.cpp" line="274"/>
         <source>&amp;Open in File Manager</source>
         <translation>在文件管理器中打开(&amp;O)</translation>
+    </message>
+    <message>
+        <location line="+49"/>
+        <source>Update (NUP)</source>
+        <translation>更新（NUP）</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>This update is part of the NUP and cannot be disabled here.</source>
+        <translation>此更新包含在 NUP 之中，无法在这里禁用。</translation>
     </message>
 </context>
 <context>
@@ -5510,6 +6398,11 @@ Drag points to change position, or double-click table cells to edit values.</sou
         <source>Restore Defaults</source>
         <translation>恢复默认</translation>
     </message>
+    <message>
+        <location line="+12"/>
+        <source>Warning: The settings in this page affect the inner workings of Lichii's emulated touchscreen. Changing them may result in undesirable behavior, such as the touchscreen partially or not working. You should only use this page if you know what you are doing.</source>
+        <translation>警告：本页设置会影响 Lichii 模拟触摸屏的内部机制。修改它们可能导致不良后果，例如触摸屏部分失灵或完全无法使用。只有在你清楚自己在做什么时，才应使用本页。</translation>
+    </message>
 </context>
 <context>
     <name>ConfigureUI</name>
@@ -5678,6 +6571,41 @@ Drag points to change position, or double-click table cells to edit values.</sou
         <comment>Screenshot width value</comment>
         <translation>自动 (%1 x %2, %3 x %4)</translation>
     </message>
+    <message>
+        <location line="+12"/>
+        <source>iiDB Artwork API Key...</source>
+        <translation>iiDB 封面 API 密钥…</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Set, test or forget the personal key for browsing iiDB artwork in game Properties.</source>
+        <translation>设置、测试或忘记在游戏「属性」里浏览 iiDB 封面所用的个人密钥。</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/configuration/configure_ui.cpp" line="+61"/>
+        <source>SteamGridDB API key:</source>
+        <translation>SteamGridDB API 密钥：</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Empty: no online lookup</source>
+        <translation>留空：不进行在线查找</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Artwork is looked up on steamgriddb.com only when a key is set, for games that have no icon and no custom artwork. The picture is saved as the game's custom artwork, so you can still replace it in Configure Game.</source>
+        <translation>只有在设置了密钥时，才会到 steamgriddb.com 查找封面，并且仅针对既没有图标也没有自定义封面的游戏。图片会保存为该游戏的自定义封面，你仍然可以在「配置游戏」里替换它。</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>&lt;a href="%1"&gt;Get a key&lt;/a&gt;</source>
+        <translation>&lt;a href="%1"&gt;获取密钥&lt;/a&gt;</translation>
+    </message>
+    <message>
+        <location line="+60"/>
+        <source>%1 - not in this build</source>
+        <translation>%1 — 此版本不包含</translation>
+    </message>
 </context>
 <context>
     <name>ConfigureVibration</name>
@@ -5758,6 +6686,36 @@ Drag points to change position, or double-click table cells to edit values.</sou
         <source>Enable Accurate Vibration</source>
         <translation>启用精确震动</translation>
     </message>
+    <message>
+        <location line="+7"/>
+        <source>Play HD Rumble through the DualSense haptic actuators, left and right apart. Requires a USB connection and a single wired DualSense; otherwise standard rumble is used.</source>
+        <translation>通过 DualSense 的左右两个触觉致动器分别播放 HD 震动。需要 USB 连接且只接一个有线 DualSense，否则会使用普通震动。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Enable DualSense HD Haptics</source>
+        <translation>启用 DualSense HD 触觉反馈</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>On controllers with two rumble motors, send each part of the HD Rumble to the motor that matches its frequency: low tones to the heavy motor, high tones to the light one. When off, each band drives its own motor as before.</source>
+        <translation>对于有两个震动马达的手柄，把 HD 震动的每个部分送到频率与之匹配的马达：低频送到重马达，高频送到轻马达。关闭时，各频段仍像以前那样驱动各自的马达。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Frequency-aware rumble</source>
+        <translation>按频率分配的震动</translation>
+    </message>
+    <message>
+        <location line="+22"/>
+        <source>On controllers with motors in their triggers, also play the light part of the HD Rumble on them: the left side on the left trigger, the right side on the right one. 20% is a good start.</source>
+        <translation>对于扳机里也带马达的手柄，把 HD 震动中较轻的部分也送到扳机上：左侧送到左扳机，右侧送到右扳机。20% 是个不错的起点。</translation>
+    </message>
+    <message>
+        <location line="-19"/>
+        <source>Trigger rumble</source>
+        <translation>扳机震动</translation>
+    </message>
 </context>
 <context>
     <name>ConfigureWeb</name>
@@ -5824,6 +6782,11 @@ Drag points to change position, or double-click table cells to edit values.</sou
         <source>Must be 48 characters, and lowercase a-z</source>
         <comment>Tooltip</comment>
         <translation>必须为48个字符，且a-z为小写</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Lichii Web Service</source>
+        <translation>Lichii Web 服务</translation>
     </message>
 </context>
 <context>
@@ -5941,6 +6904,21 @@ Drag points to change position, or double-click table cells to edit values.</sou
         <location filename="../../src/lichii/deps_dialog.cpp" line="22"/>
         <source>Version</source>
         <translation>版本</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/deps_dialog.ui" line="+14"/>
+        <source>Lichii Dependencies</source>
+        <translation>Lichii 依赖</translation>
+    </message>
+    <message>
+        <location line="+58"/>
+        <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=" font-size:28pt;"&gt;Lichii Dependencies&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=" font-size:28pt;"&gt;Lichii 依赖&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+    </message>
+    <message>
+        <location line="+13"/>
+        <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;The projects that make Lichii possible&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;成就了 Lichii 的这些项目&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
 </context>
 <context>
@@ -6333,6 +7311,86 @@ Please go to Configure -&gt; System -&gt; Network and make a selection.</source>
         <location filename="../../src/lichii/game/game_list.cpp" line="643"/>
         <source>Clear</source>
         <translation>清除</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Rebuild Shader Precache</source>
+        <translation>重建着色器预缓存</translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>Build Shader Precache</source>
+        <translation>构建着色器预缓存</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Precompile All Shaders</source>
+        <translation>预编译所有着色器</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Delete Shader Precache</source>
+        <translation>删除着色器预缓存</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Dump NUP...</source>
+        <translation>导出 NUP…</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Convert to NUP...</source>
+        <translation>转换为 NUP…</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Convert to NX...</source>
+        <translation>转换为 NX…</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Manage NX Archive</source>
+        <translation>管理 NX 归档</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Add Update or DLC...</source>
+        <translation>添加更新或 DLC…</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Remove Update or DLC...</source>
+        <translation>移除更新或 DLC…</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Edit Title and Icon...</source>
+        <translation>编辑标题与图标…</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Edit NUP Metadata...</source>
+        <translation>编辑 NUP 元数据…</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Look up artwork on SteamGridDB</source>
+        <translation>在 SteamGridDB 上查找封面</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Submit compatibility report…</source>
+        <translation>提交兼容性报告…</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/game/game_tree.cpp" line="+76"/>
+        <source>1 game</source>
+        <translation>1 个游戏</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1 games</source>
+        <translation>%1 个游戏</translation>
     </message>
 </context>
 <context>
@@ -6738,6 +7796,26 @@ Debug Message: </source>
         <source>Toggle Performance Overlay</source>
         <translation>切换性能覆盖层</translation>
     </message>
+    <message>
+        <location line="+1"/>
+        <source>Exit Eglantine</source>
+        <translation>退出 Eglantine</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>HOME Button</source>
+        <translation>HOME 键</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Report a Bug</source>
+        <translation>报告问题</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/configuration/configure_hotkeys.cpp" line="-400"/>
+        <source>Exit Lichii</source>
+        <translation>退出 Lichii</translation>
+    </message>
 </context>
 <context>
     <name>InstallDialog</name>
@@ -6808,6 +7886,21 @@ Debug Message: </source>
         <location filename="../../src/lichii/loading_screen.cpp" line="173"/>
         <source>Estimated Time %1</source>
         <translation>所需时间: %1</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/loading_screen.cpp" line="+100"/>
+        <source>Skip</source>
+        <translation>跳过</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Start the game now. The shaders not precached yet are precached on a later launch.</source>
+        <translation>立即开始游戏。尚未预缓存的着色器会在下次启动时预缓存。</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Precaching shaders %1 / %2</source>
+        <translation>正在预缓存着色器 %1 / %2</translation>
     </message>
 </context>
 <context>
@@ -8268,6 +9361,669 @@ Would you like to bypass this and exit anyway?</source>
         <source>Null</source>
         <translation>空</translation>
     </message>
+    <message>
+        <location line="+8"/>
+        <source>&amp;Report a Bug...</source>
+        <translation>报告问题(&amp;R)…</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Medium (44x44)</source>
+        <translation>中（44x44）</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Cover (160x160)</source>
+        <translation>封面（160x160）</translation>
+    </message>
+    <message>
+        <location line="+141"/>
+        <source>Your Nextendo session expired, so Lichii signed you out.</source>
+        <translation>你的 Nextendo 会话已过期，Lichii 已让你退出登录。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Your session was ended on nextendo.network, so Lichii signed you out.</source>
+        <translation>你的会话已在 nextendo.network 上结束，Lichii 已让你退出登录。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Your Nextendo sign-in didn't allow online play, so Lichii signed you out.</source>
+        <translation>你的 Nextendo 登录未允许在线游玩，Lichii 已让你退出登录。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Signed out of Nextendo</source>
+        <translation>已退出 Nextendo</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Sign in again in Configure &gt; Network.</source>
+        <translation>请在「设置 &gt; 网络」中重新登录。</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Nextendo online play is on, but you aren't signed in. Sign in in Configure &gt; Network.</source>
+        <translation>Nextendo 在线游玩已开启，但你尚未登录。请在「设置 &gt; 网络」中登录。</translation>
+    </message>
+    <message>
+        <location line="+25"/>
+        <source>Nextendo doesn't offer online play for this game right now.</source>
+        <translation>Nextendo 目前不为此游戏提供在线游玩。</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>This version of the game can't play online on Nextendo. Update it to %1.</source>
+        <translation>此版本的游戏无法在 Nextendo 上在线游玩。请更新到 %1。</translation>
+    </message>
+    <message>
+        <location line="+31"/>
+        <source>Nextendo Sign-ins</source>
+        <translation>Nextendo 登录</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>NVIDIA DLSS is upscaling the game, in the mode shown. The window adapting filter runs after it.</source>
+        <translation>NVIDIA DLSS 正以所示模式为游戏上采样。窗口适配滤镜在其后运行。</translation>
+    </message>
+    <message>
+        <location line="+452"/>
+        <source>Restore Previous Version...</source>
+        <translation>恢复上一个版本…</translation>
+    </message>
+    <message>
+        <location line="+30"/>
+        <source>Restore Previous Version</source>
+        <translation>恢复上一个版本</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Go back to the version this one replaced? Your settings and data are not changed.</source>
+        <translation>要回到被这个版本取代的上一个版本吗？你的设置与数据不会改变。</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Failed to restore</source>
+        <translation>恢复失败</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Could not restore the previous version: %1</source>
+        <translation>无法恢复上一个版本：%1</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>%1&lt;br&gt;Dump current keys from your own console and install them with Tools &gt; Install Decryption Keys, then start the game again. The log names the missing key.</source>
+        <translation>%1&lt;br&gt;请从你自己的主机导出当前 keys，并用「工具 &gt; 安装解密密钥」安装，然后重新启动游戏。日志里会写明缺失的是哪个密钥。</translation>
+    </message>
+    <message>
+        <location line="+37"/>
+        <source>Not enough RAM</source>
+        <translation>内存不足</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>This PC has %1 GB of RAM. Switch 2 games need at least 16 GB, and 32 GB is recommended.
+
+Games can crash, and can even freeze or crash the whole PC.
+
+This setup isn't supported, so please don't open issues or ask for help about crashes on it.</source>
+        <translation>这台 PC 只有 %1 GB 内存。Switch 2 游戏至少需要 16 GB，建议 32 GB。
+
+游戏可能崩溃，甚至可能让整台 PC 卡死或崩溃。
+
+这种配置不受支持，请不要为此类崩溃提交 issue 或寻求帮助。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Continue anyway</source>
+        <translation>仍然继续</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Don't show this again</source>
+        <translation>不再显示</translation>
+    </message>
+    <message>
+        <location line="+26"/>
+        <source>NX Archive</source>
+        <translation>NX 归档</translation>
+    </message>
+    <message>
+        <location line="-2673"/>
+        <source>Wait for the NX metadata edit to finish before starting a game.</source>
+        <translation>请等 NX 元数据编辑完成后再启动游戏。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Conversion in Progress</source>
+        <translation>正在转换</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>This game cannot be started while its dump is being converted.</source>
+        <translation>游戏的 dump 转换期间无法启动该游戏。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Shader Precache in Progress</source>
+        <translation>正在预缓存着色器</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Games cannot be started while the shader precache is being built. Wait for it to finish or cancel it.</source>
+        <translation>着色器预缓存构建期间无法启动游戏。请等待完成或取消。</translation>
+    </message>
+    <message>
+        <location line="+102"/>
+        <source>Preparing game files...</source>
+        <translation>正在准备游戏文件…</translation>
+    </message>
+    <message>
+        <location line="+19"/>
+        <source>Unable to prepare game files</source>
+        <translation>无法准备游戏文件</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Game preparation failed. See the log for details.</source>
+        <translation>游戏准备失败，详情请查看日志。</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Checking online patches...</source>
+        <translation>正在检查在线补丁…</translation>
+    </message>
+    <message>
+        <location line="-1480"/>
+        <source>Not enough memory to start the game</source>
+        <translation>内存不足，无法启动游戏</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Lichii could not allocate the game's memory. Close other applications and check that your system has enough available memory and paging-file space, then try again.</source>
+        <translation>Lichii 无法为游戏分配内存。请关闭其他程序，确认系统有足够的可用内存和页面文件空间，然后重试。</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Stop emulation before linking saves</source>
+        <translation>关联存档前请先停止模拟</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Close the running game before changing Ryujinx save links.</source>
+        <translation>更改 Ryujinx 存档关联前，请先关闭正在运行的游戏。</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Installable Switch File (*.nca *.nsp *.nsz *.xci *.xcz);;Nintendo Content Archive (*.nca);;Nintendo Submission Package (*.nsp *.nsz);;NX Cartridge Image (*.xci *.xcz)</source>
+        <translation>可安装的 Switch 文件 (*.nca *.nsp *.nsz *.xci *.xcz);;任天堂内容归档 (*.nca);;任天堂发行包 (*.nsp *.nsz);;NX 卡带镜像 (*.xci *.xcz)</translation>
+    </message>
+    <message>
+        <location line="+197"/>
+        <source>Stop emulation before editing NX metadata.</source>
+        <translation>编辑 NX 元数据前请先停止模拟。</translation>
+    </message>
+    <message>
+        <location line="+26"/>
+        <source>Stop the game before changing its NX archive.</source>
+        <translation>更改游戏的 NX 归档前请先停止游戏。</translation>
+    </message>
+    <message>
+        <location line="+15"/>
+        <source>Convert to NUP</source>
+        <translation>转换为 NUP</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>The target archive already exists:
+%1</source>
+        <translation>目标归档已存在：
+%1</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Resume Conversion</source>
+        <translation>继续转换</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Resume the interrupted conversion?</source>
+        <translation>要继续被中断的转换吗？</translation>
+    </message>
+    <message>
+        <location line="+28"/>
+        <source>Converting to NUP</source>
+        <translation>正在转换为 NUP</translation>
+    </message>
+    <message>
+        <location line="+47"/>
+        <source>Conversion Complete</source>
+        <translation>转换完成</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>The NUP was created and the loose folder was removed.</source>
+        <translation>NUP 已创建，松散文件夹已删除。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>The NUP was created. You can delete the loose folder if you no longer need it.</source>
+        <translation>NUP 已创建。如果不再需要松散文件夹，可以自行删除。</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Conversion Cancelled</source>
+        <translation>转换已取消</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>The conversion can be resumed by choosing Convert to NUP again.</source>
+        <translation>再次选择「转换为 NUP」即可继续这次转换。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Conversion Failed</source>
+        <translation>转换失败</translation>
+    </message>
+    <message>
+        <location line="+57"/>
+        <source>Precache Shaders</source>
+        <translation>预缓存着色器</translation>
+    </message>
+    <message>
+        <location line="-61"/>
+        <source>Close the running game first.</source>
+        <translation>请先关闭正在运行的游戏。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>This game is being converted. Try again when it is done.</source>
+        <translation>这个游戏正在转换，请完成后再试。</translation>
+    </message>
+    <message>
+        <location line="+21"/>
+        <source>Precompile All Shaders</source>
+        <translation>预编译所有着色器</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>The setting could not be saved in the shader folder.</source>
+        <translation>无法把该设置保存到着色器文件夹。</translation>
+    </message>
+    <message>
+        <location line="+35"/>
+        <source>The shaders of this game are not precached yet. Precache them now?
+
+The game starts when they are done. The first time, the game files are read and their compute shaders are built on every CPU thread, which takes a few minutes. Later launches only build what is new, until the GPU driver changes. The loading screen has a Skip button.
+
+You can change this in Configure, Graphics, Advanced.</source>
+        <translation>这个游戏的着色器还没有预缓存。要现在预缓存吗？
+
+完成后游戏就会启动。首次会读取游戏文件，用全部 CPU 线程构建其中的 compute 着色器，需要几分钟。之后每次启动只构建新增的部分，直到 GPU 驱动发生变化。加载界面有「跳过」按钮。
+
+你可以在「设置 &gt; 图形 &gt; 高级」里修改这一行为。</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Precache now</source>
+        <translation>现在预缓存</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Start without</source>
+        <translation>不预缓存直接开始</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Delete Shader Precache</source>
+        <translation>删除着色器预缓存</translation>
+    </message>
+    <message>
+        <location line="-13"/>
+        <source>Shaders are being precached. Try again when it is done.</source>
+        <translation>正在预缓存着色器，请完成后再试。</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Delete the shader precache files of this game? They are built again the next time the game is precached.</source>
+        <translation>要删除这个游戏的着色器预缓存文件吗？下次预缓存时会重新构建。</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>The files could not be deleted: %1</source>
+        <translation>无法删除这些文件：%1</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Extract NUP</source>
+        <translation>解包 NUP</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>The target directory already exists:
+%1</source>
+        <translation>目标目录已存在：
+%1</translation>
+    </message>
+    <message>
+        <location line="+12"/>
+        <source>Extracting NUP</source>
+        <translation>正在解包 NUP</translation>
+    </message>
+    <message>
+        <location line="+48"/>
+        <source>Extraction Complete</source>
+        <translation>解包完成</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>The NUP was extracted. You can delete the NUP file if you no longer need it.</source>
+        <translation>NUP 已解包。如果不再需要 NUP 文件，可以自行删除。</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Extraction Failed</source>
+        <translation>解包失败</translation>
+    </message>
+    <message>
+        <location line="+34"/>
+        <source>Editing NUP Metadata</source>
+        <translation>正在编辑 NUP 元数据</translation>
+    </message>
+    <message>
+        <location line="+48"/>
+        <source>Edit Complete</source>
+        <translation>编辑完成</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>The NUP metadata was updated.</source>
+        <translation>NUP 元数据已更新。</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Edit Failed</source>
+        <translation>编辑失败</translation>
+    </message>
+    <message>
+        <location line="+43"/>
+        <source>Check for Updates</source>
+        <translation>检查更新</translation>
+    </message>
+    <message>
+        <location line="-38"/>
+        <source>This is a test or development build (%1) without a published release tag, so Lichii cannot compare it with published releases. Download a release from GitHub to get updates.</source>
+        <translation>这是测试或开发版本（%1），没有已发布的版本标签，因此 Lichii 无法与已发布版本比较。请从 GitHub 下载正式版本以获得更新。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>GitHub is limiting requests from your network right now. Please try again later.</source>
+        <translation>GitHub 目前正在限制来自你所在网络的请求，请稍后再试。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>GitHub answered with HTTP error %1. Please try again later.</source>
+        <translation>GitHub 返回了 HTTP 错误 %1，请稍后再试。</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Could not reach GitHub. Check your internet connection and try again.</source>
+        <translation>无法连接 GitHub，请检查网络后重试。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Could not check for updates: GitHub rate limit reached. Lichii will try again at the next start.</source>
+        <translation>无法检查更新：已达 GitHub 速率限制。Lichii 会在下次启动时再试。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Could not check for updates: GitHub answered with HTTP %1.</source>
+        <translation>无法检查更新：GitHub 返回 HTTP %1。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>You're on the latest build (%1).</source>
+        <translation>你已是最新版本（%1）。</translation>
+    </message>
+    <message>
+        <location line="+53"/>
+        <source>DLSS %1 %2</source>
+        <translation>DLSS %1 %2</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source> (%1 DOESN'T FIT)</source>
+        <translation>（%1 不适用）</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>DLSS FG</source>
+        <translation>DLSS 插帧</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>DLSS FG paused</source>
+        <translation>DLSS 插帧已暂停</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source> + %1 generated</source>
+        <translation> + 已生成 %1</translation>
+    </message>
+    <message>
+        <location line="+12"/>
+        <source>NO FG</source>
+        <translation>无插帧</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Frame generation is off.</source>
+        <translation>插帧已关闭。</translation>
+    </message>
+    <message>
+        <location line="+19"/>
+        <source>FG %1 %2X</source>
+        <translation>插帧 %1 %2X</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>FG %1 AUTO</source>
+        <translation>插帧 %1 自动</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source> It adds up to %1 frames per game frame to reach %2 FPS.</source>
+        <translation> 每个游戏帧额外插入 %1 帧，达到 %2 FPS。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Frame generation is on.%1 Whether it runs shows here once a game starts.</source>
+        <translation>插帧已开启。%1 是否实际运行会在游戏开始后显示在这里。</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Frame generation needs the Vulkan renderer.</source>
+        <translation>插帧需要 Vulkan 渲染器。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>This build was compiled without frame generation.</source>
+        <translation>此版本编译时未包含插帧功能。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>This GPU lacks Vulkan features LSFG needs (Vulkan memory model and null descriptors). Lichii Optical Flow Frame Generation may still work.</source>
+        <translation>此 GPU 缺少 LSFG 需要的 Vulkan 特性（Vulkan 内存模型与 null 描述符）。Lichii 光流插帧或许仍可使用。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>This GPU can't write to the window's swapchain format from a shader, so generated frames can't be presented.</source>
+        <translation>此 GPU 无法从着色器写入窗口交换链格式，因此无法呈现生成的帧。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>LSFG needs Lossless.dll from Lossless Scaling in the "lossless" folder of the user directory. It is missing or could not be loaded.</source>
+        <translation>LSFG 需要 Lossless Scaling 的 Lossless.dll，放在用户目录的「lossless」文件夹里。它缺失或无法加载。</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>FG UNAVAILABLE</source>
+        <translation>插帧不可用</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Frame generation is on but not running. %1</source>
+        <translation>插帧已开启但未运行。%1</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source> NVIDIA DLSS Frame Generation can't run for this game or setup, so Lichii Optical Flow Frame Generation runs instead; the log says why.</source>
+        <translation> 此游戏或此配置无法运行 NVIDIA DLSS 插帧，因此改用 Lichii 光流插帧；具体原因见日志。</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Frame generation is running.%1%2</source>
+        <translation>插帧正在运行。%1%2</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source> It also pauses while the game already reaches %1 FPS.</source>
+        <translation> 当游戏已达到 %1 FPS 时它也会暂停。</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>%1 (IDLE)</source>
+        <translation>%1（空闲）</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Frame generation is on but generated no frames in the last half second. It pauses while it warms up, for a second after a frame takes longer than 100 ms, and while frames arrive in bursts.%1%2</source>
+        <translation>插帧已开启，但过去半秒没有生成任何帧。它在预热时会暂停，某一帧耗时超过 100 ms 后会暂停一秒，帧成批到达时也会暂停。%1%2</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Restart Lichii to apply the X11 backend.</source>
+        <translation>重启 Lichii 以应用 X11 后端。</translation>
+    </message>
+    <message>
+        <location line="+127"/>
+        <source>Are you sure you want to close Lichii?</source>
+        <translation>确定要关闭 Lichii 吗？</translation>
+    </message>
+    <message>
+        <location line="+116"/>
+        <source>The currently running application has requested Lichii to not exit.
+
+Would you like to bypass this and exit anyway?</source>
+        <translation>当前运行的应用请求 Lichii 不要退出。
+
+要忽略它并仍然退出吗？</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Auto</source>
+        <translation>自动</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>DLAA</source>
+        <translation>DLAA</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Quality</source>
+        <translation>质量</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Balanced</source>
+        <translation>平衡</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Performance</source>
+        <translation>性能</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Ultra Performance</source>
+        <translation>超高性能</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>M</source>
+        <translation>M</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>NVIDIA default</source>
+        <translation>NVIDIA 默认</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>E</source>
+        <translation>E</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>F</source>
+        <translation>F</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>J</source>
+        <translation>J</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>K</source>
+        <translation>K</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>L</source>
+        <translation>L</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>LSFG</source>
+        <translation>LSFG</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Optical Flow</source>
+        <translation>光流</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>NVIDIA DLSS Frame Generation</source>
+        <translation>NVIDIA DLSS 插帧</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>FSR 1</source>
+        <translation>FSR 1</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>FSR 1 Soft</source>
+        <translation>FSR 1 柔和</translation>
+    </message>
+    <message>
+        <location line="+239"/>
+        <source>Check for &amp;Updates...</source>
+        <translation>检查更新(&amp;U)…</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Lichii found Nextendo sign-ins for %n profile(s) this NAND doesn't have. Profiles deleted in an older build left theirs behind.
+
+Remove and sign out those sign-ins? Keep them if the profiles are in another NAND folder.</source>
+        <translation>Lichii 在这个 NAND 里找不到 %n 个账户档案对应的 Nextendo 登录。旧版本删除账户档案时把这些登录留了下来。
+
+要移除并登出这些登录吗？如果这些账户档案在另一个 NAND 文件夹里，请保留它们。</translation>
+    </message>
 </context>
 <context>
     <name>MigrationWorker</name>
@@ -8577,6 +10333,11 @@ Proceed anyway?</source>
         <comment>Tooltip</comment>
         <translation>长度需为 1-32 个字符</translation>
     </message>
+    <message>
+        <location line="+7"/>
+        <source>Lichii</source>
+        <translation>Lichii</translation>
+    </message>
 </context>
 <context>
     <name>OverlayDialog</name>
@@ -8683,6 +10444,11 @@ p, li { white-space: pre-wrap; }
         <location filename="../../src/lichii/render/performance_overlay.cpp" line="151"/>
         <source>%1 ms</source>
         <translation>%1 ms</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/render/performance_overlay.cpp" line="+215"/>
+        <source>FG +%1</source>
+        <translation>生成帧 +%1</translation>
     </message>
 </context>
 <context>
@@ -9208,6 +10974,80 @@ p, li { white-space: pre-wrap; }
         <location filename="../../src/qt_common/game_list/game_list_p.h" line="376"/>
         <source>Favorites</source>
         <translation>收藏</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/user_data_migration.cpp" line="+41"/>
+        <source>Recover unfinished import</source>
+        <translation>恢复未完成的导入</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>An earlier import did not finish. Recover the previous profile and retry? No source or backup data will be deleted.</source>
+        <translation>先前的一次导入没有完成。要恢复上一个配置并重试吗？不会删除任何源数据或备份数据。</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Move Old Data (retain backup)</source>
+        <translation>移动旧数据（保留备份）</translation>
+    </message>
+    <message>
+        <location line="+43"/>
+        <source>Import an existing emulator profile into Lichii?
+Copy keeps the original profile unchanged and is recommended.
+Move retains a recovery backup and requires space for a full copy.
+Link shares settings and saves with the source emulator.
+Existing Lichii data is kept in backup directories, not merged or deleted.
+
+Close the source emulator, then choose its profile below.
+Close this window to decide on the next launch.</source>
+        <translation>要把已有的模拟器配置导入 Lichii 吗？
+「复制」会保持原配置不变，推荐使用。
+「移动」会保留一份恢复备份，并需要足够的空间做一次完整复制。
+「关联」与来源模拟器共用设置与存档。
+现有的 Lichii 数据会保存在备份目录里，不会被合并或删除。
+
+请先关闭来源模拟器，然后在下面选择它的配置。
+关闭此窗口可在下次启动时再决定。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Import</source>
+        <translation>导入</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Start fresh</source>
+        <translation>重新开始</translation>
+    </message>
+    <message>
+        <location line="+28"/>
+        <source>Lichii will use its own profile. Your old emulator data has not been changed.</source>
+        <translation>Lichii 将使用自己的配置。你原来的模拟器数据没有被改动。</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/main.cpp" line="+261"/>
+        <source>Lichii startup stopped</source>
+        <translation>Lichii 启动已中止</translation>
+    </message>
+    <message>
+        <location filename="../../src/lichii/nx_tools.cpp" line="-875"/>
+        <source>Crop Icon</source>
+        <translation>裁剪图标</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Click or drag to move the square. Zoom to keep a smaller part.</source>
+        <translation>点击或拖动来移动方框。放大可保留更小的区域。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Zoom:</source>
+        <translation>缩放：</translation>
+    </message>
+    <message>
+        <location filename="../../src/qt_common/game_list/worker.cpp" line="-320"/>
+        <source>%1 (update)</source>
+        <translation>%1（更新）</translation>
     </message>
 </context>
 <context>
@@ -10615,6 +12455,20 @@ By selecting &quot;From Eden&quot;, previous save data stored in Ryujinx will be
         <source>OS returned error: %1</source>
         <translation>OS 返回错误: %1</translation>
     </message>
+    <message>
+        <location line="+12"/>
+        <source>Ryujinx save ID: %1
+
+Choose which save both emulators should use. Replaced saves are kept as backups. Close any running game in Lichii and Ryujinx before linking.</source>
+        <translation>Ryujinx 存档 ID：%1
+
+请选择两个模拟器共用哪一份存档。被替换的存档会保留为备份。关联之前，请先关闭 Lichii 与 Ryujinx 中正在运行的游戏。</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>From Lichii</source>
+        <translation>来自 Lichii</translation>
+    </message>
 </context>
 <context>
     <name>SequenceDialog</name>
@@ -10744,6 +12598,119 @@ Error code: %3</source>
         <location filename="../../src/lichii/updater/update_dialog.cpp" line="173"/>
         <source>Successfully downloaded %1. Would you like to open it?</source>
         <translation>已成功下载 %1。您要打开它吗?</translation>
+    </message>
+    <message>
+        <location line="+13"/>
+        <source>Would you like to download this update?</source>
+        <translation>要下载这个更新吗？</translation>
+    </message>
+    <message>
+        <location line="-301"/>
+        <source>&lt;a href="%1"&gt;View on GitHub&lt;/a&gt;</source>
+        <translation>&lt;a href="%1"&gt;在 GitHub 上查看&lt;/a&gt;</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Remind Me Later</source>
+        <translation>稍后提醒</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Skip This Version</source>
+        <translation>跳过此版本</translation>
+    </message>
+    <message>
+        <location line="+19"/>
+        <source> This release has no PGO build, so the standard build will be downloaded.</source>
+        <translation> 这个版本没有 PGO 构建，将下载标准构建。</translation>
+    </message>
+    <message>
+        <location line="+62"/>
+        <source>Failed to restart</source>
+        <translation>重启失败</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Please start %1 again yourself.</source>
+        <translation>请手动重新启动 %1。</translation>
+    </message>
+    <message>
+        <location line="+29"/>
+        <source>Failed to install the update</source>
+        <translation>无法安装更新</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Could not start the update installer.</source>
+        <translation>无法启动更新安装程序。</translation>
+    </message>
+    <message>
+        <location line="+63"/>
+        <source>Another Lichii window is already updating this installation.</source>
+        <translation>另一个 Lichii 窗口正在更新这个安装。</translation>
+    </message>
+    <message>
+        <location line="+16"/>
+        <source>Could not replace %1. Your installation was not changed.</source>
+        <translation>无法替换 %1。你的安装没有被改动。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Update Installed</source>
+        <translation>更新已安装</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>The new version is installed. The previous version is kept as %1.
+
+Restart now?</source>
+        <translation>新版本已安装。旧版本保留为 %1。
+
+现在重启吗？</translation>
+    </message>
+    <message>
+        <location line="+27"/>
+        <source>Could not create a folder for the update.</source>
+        <translation>无法为更新创建文件夹。</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Unpacking...</source>
+        <translation>正在解包…</translation>
+    </message>
+    <message>
+        <location line="+13"/>
+        <source>The downloaded update could not be unpacked.</source>
+        <translation>无法解包下载的更新。</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Update Ready</source>
+        <translation>更新已就绪</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Lichii will close, install the update and start again. The previous version is kept, and your settings and data are not changed.
+
+Restart now?</source>
+        <translation>Lichii 将关闭、安装更新并重新启动。旧版本会保留，你的设置与数据不会改变。
+
+现在重启吗？</translation>
+    </message>
+    <message>
+        <location line="+19"/>
+        <source>Downloading... (try %1 of %2)</source>
+        <translation>正在下载…（第 %1 次，共 %2 次）</translation>
+    </message>
+    <message>
+        <location line="+50"/>
+        <source>Download failed verification</source>
+        <translation>下载未通过校验</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>The downloaded file does not match the checksum GitHub published for it, so it was discarded. Try again later.</source>
+        <translation>下载的文件与 GitHub 发布的校验和不符，已被丢弃。请稍后再试。</translation>
     </message>
 </context>
 <context>
@@ -10976,6 +12943,16 @@ Error code: %3</source>
         <source>The catalog returned an invalid response. No game was confirmed.</source>
         <translation>目录返回了无效响应。未确认任何游戏。</translation>
     </message>
+    <message>
+        <location line="+1"/>
+        <source>CPU</source>
+        <translation>CPU</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>GPU</source>
+        <translation>GPU</translation>
+    </message>
 </context>
 <context>
     <name>ConfigureMicrophone</name>
@@ -11038,6 +13015,11 @@ Error code: %3</source>
     <message>
         <source>Listening. Speak into your microphone.</source>
         <translation>正在聆听。请对麦克风说话。</translation>
+    </message>
+    <message>
+        <location line="+36"/>
+        <source>%1%</source>
+        <translation>%1%</translation>
     </message>
 </context>
 <context>
@@ -11411,6 +13393,11 @@ or click to browse</source>
         <source>Cancelling...</source>
         <translation>正在取消...</translation>
     </message>
+    <message>
+        <location line="+23"/>
+        <source>%1%</source>
+        <translation>%1%</translation>
+    </message>
 </context>
 <context>
     <name>NvidiaDlssPanel</name>
@@ -11522,6 +13509,902 @@ Would you like to manually select a portable folder to use?</source>
     <message>
         <source>Could not find Ryujinx save data</source>
         <translation>找不到 Ryujinx 的存档数据</translation>
+    </message>
+</context>
+<context>
+    <name>BugReportDialog</name>
+    <message>
+        <location filename="../../src/lichii/bug_report_dialog.cpp" line="+19"/>
+        <source>Report a Bug</source>
+        <translation>报告问题</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Lichii is saving this moment: the log, your settings, a screenshot and the next frame with its shaders. Describe what went wrong and what you expected.</source>
+        <translation>Lichii 正在保存这一刻的状态：日志、你的设置、一张截图，以及带有着色器的下一帧。请描述出了什么问题、你原本期望是什么。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>For example: the sky turns white after the first cutscene in world 2.</source>
+        <translation>例如：在第 2 世界的第一段过场动画之后，天空变成了白色。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>&lt;b&gt;Send this report privately to the Lichii maintainers&lt;/b&gt; (the log bot's /bug command or a direct message), not to a public channel or issue. It holds the game's textures and shaders from one frame. Your user name is removed from paths and online service settings are left out.</source>
+        <translation>&lt;b&gt;请把这份报告私下发给 Lichii 维护者&lt;/b&gt;（日志机器人的 /bug 命令或私信），不要发到公开频道或 issue。它包含游戏某一帧的纹理与着色器。路径中已移除你的用户名，在线服务设置也不会包含在内。</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Save Report</source>
+        <translation>保存报告</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Open Folder</source>
+        <translation>打开文件夹</translation>
+    </message>
+    <message>
+        <location line="+30"/>
+        <source>Writing the report. The frame capture can take a minute in a busy scene.</source>
+        <translation>正在写入报告。在复杂场景下，捕获这一帧可能需要一分钟。</translation>
+    </message>
+    <message>
+        <location line="+23"/>
+        <source>Close</source>
+        <translation>关闭</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>The report could not be written: %1</source>
+        <translation>无法写入报告：%1</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Saved %1 (%2 MiB).</source>
+        <translation>已保存 %1（%2 MiB）。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>No frame capture: %1</source>
+        <translation>没有捕获到帧：%1</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Left out to fit the size limit: %1</source>
+        <translation>为满足大小限制而未包含：%1</translation>
+    </message>
+</context>
+<context>
+    <name>RecommendedSettingsDialog</name>
+    <message>
+        <location line="-52"/>
+        <source>%1 (game %2)</source>
+        <translation>%1（游戏 %2）</translation>
+    </message>
+    <message>
+        <location line="+36"/>
+        <source>They improve performance for most games. Games with their own value for one of these settings in their per-game settings use the recommended value too; other per-game settings do not change. Lichii keeps your own settings, global and per-game, so you can go back at any time with Help &gt; Restore My Previous Settings.</source>
+        <translation>这些设置能提升大多数游戏的性能。若某个游戏在自己的专属设置里为其中某项设了值，也会改用推荐值；其他专属设置不会改变。Lichii 会保留你自己的全局与专属设置，你随时可以用「帮助 &gt; 恢复原设置」改回去。</translation>
+    </message>
+    <message>
+        <location line="+20"/>
+        <source>Lichii now uses the recommended settings, in every game.</source>
+        <translation>Lichii 现在在所有游戏中都使用推荐设置。</translation>
+    </message>
+</context>
+<context>
+    <name>WhatsNewDialog</name>
+    <message>
+        <location filename="../../src/lichii/whats_new_dialog.cpp" line="+178"/>
+        <source>What's new in Lichii</source>
+        <translation>Lichii 新功能</translation>
+    </message>
+    <message>
+        <location line="+38"/>
+        <source>What's new</source>
+        <translation>新功能</translation>
+    </message>
+    <message>
+        <location line="+17"/>
+        <source>Previous release</source>
+        <translation>上一个版本</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>All releases on GitHub</source>
+        <translation>GitHub 上的所有版本</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>All releases</source>
+        <translation>所有版本</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Next release</source>
+        <translation>下一个版本</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Next</source>
+        <translation>下一个</translation>
+    </message>
+    <message>
+        <location line="+18"/>
+        <source>Lichii build %1</source>
+        <translation>Lichii 版本 %1</translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>Lichii</source>
+        <translation>Lichii</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>%1 · %2</source>
+        <translation>%1 · %2</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>No highlights were bundled for this build.</source>
+        <translation>此版本没有附带更新要点。</translation>
+    </message>
+    <message>
+        <location line="+13"/>
+        <source>Build %1</source>
+        <translation>版本 %1</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Previous</source>
+        <translation>上一个</translation>
+    </message>
+</context>
+<context>
+    <name>IiDB::ArtworkDialog</name>
+    <message>
+        <location filename="../../src/lichii/configuration/iidb_artwork_dialog.cpp" line="+40"/>
+        <source>Browse iiDB Artwork</source>
+        <translation>浏览 iiDB 封面</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Game title:</source>
+        <translation>游戏标题：</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Only the title you search is sent to iiDB, never your game files or ID.</source>
+        <translation>只有你搜索的标题会发送给 iiDB，绝不会发送你的游戏文件或 ID。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Search</source>
+        <translation>搜索</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>API Key…</source>
+        <translation>API 密钥…</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>iiDB match:</source>
+        <translation>iiDB 匹配：</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Choose a search result</source>
+        <translation>选择一个搜索结果</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>iiSU Box Art</source>
+        <translation>iiSU 封面</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Box Art</source>
+        <translation>封面</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Icons</source>
+        <translation>图标</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Artwork gallery</source>
+        <translation>封面图库</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Some thumbnails could not load because iiDB asked Lichii to wait.</source>
+        <translation>部分缩略图无法加载，因为 iiDB 要求 Lichii 稍后再试。</translation>
+    </message>
+    <message>
+        <location line="+56"/>
+        <source>Load More</source>
+        <translation>加载更多</translation>
+    </message>
+    <message>
+        <location line="-267"/>
+        <source>Preview Selected</source>
+        <translation>预览所选</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Original artwork</source>
+        <translation>原始封面</translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>Icon in Lichii</source>
+        <translation>在 Lichii 中的图标</translation>
+    </message>
+    <message>
+        <location line="+18"/>
+        <source>The original is shown in proportion. Lichii crops and scales it to a 256 × 256 icon, just like Upload Icon.</source>
+        <translation>原图按比例显示。Lichii 会像「上传图标」那样，把它裁切并缩放到 256 × 256 的图标。</translation>
+    </message>
+    <message>
+        <location line="+20"/>
+        <source>Cancel or a failed download or decode leaves the original artwork intact. Use Artwork stages the new icon; Apply or OK in Properties saves it.</source>
+        <translation>取消、下载失败或解码失败都会保留原有的封面。「使用封面」会先把新图标暂存，「属性」里的「应用」或「确定」才会真正保存。</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Catalog data from &lt;a href="https://iidb.iisu.network"&gt;iiDB&lt;/a&gt;, adapted from the &lt;a href="https://github.com/libretro/libretro-database"&gt;Libretro Database&lt;/a&gt; and its upstream sources (No-Intro and Redump), &lt;a href="https://creativecommons.org/licenses/by-sa/4.0/"&gt;CC BY-SA 4.0&lt;/a&gt;. &lt;a href="https://iisu.network/license"&gt;Artwork and catalog licensing&lt;/a&gt;.</source>
+        <translation>目录数据来自 &lt;a href="https://iidb.iisu.network"&gt;iiDB&lt;/a&gt;，改编自 &lt;a href="https://github.com/libretro/libretro-database"&gt;Libretro 数据库&lt;/a&gt; 及其上游来源（No-Intro 与 Redump），采用 &lt;a href="https://creativecommons.org/licenses/by-sa/4.0/"&gt;CC BY-SA 4.0&lt;/a&gt; 许可。&lt;a href="https://iisu.network/license"&gt;封面与目录的许可说明&lt;/a&gt;。</translation>
+    </message>
+    <message>
+        <location line="+12"/>
+        <source>Use Artwork</source>
+        <translation>使用封面</translation>
+    </message>
+    <message>
+        <location line="+90"/>
+        <source>Search for the game by title.</source>
+        <translation>按标题搜索这款游戏。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Searching iiDB…</source>
+        <translation>正在搜索 iiDB…</translation>
+    </message>
+    <message>
+        <location line="+23"/>
+        <source>No matching games with artwork. Try another title.</source>
+        <translation>没有找到带封面的匹配游戏，换个标题试试。</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Choose the matching iiDB game to see its artwork.</source>
+        <translation>选择匹配的 iiDB 游戏以查看其封面。</translation>
+    </message>
+    <message>
+        <location line="+34"/>
+        <source>Loading %1…</source>
+        <translation>正在加载 %1…</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Retry Gallery</source>
+        <translation>重试图库</translation>
+    </message>
+    <message>
+        <location line="+26"/>
+        <source>Artwork %1</source>
+        <translation>封面 %1</translation>
+    </message>
+    <message>
+        <location line="+12"/>
+        <source>iiDB repeated a gallery page. No more pages were loaded.</source>
+        <translation>iiDB 重复返回了同一页图库，没有加载更多页面。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Showing up to %1 pages in this category.</source>
+        <translation>此分类最多显示 %1 页。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>No usable images in this category.</source>
+        <translation>此分类没有可用的图片。</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>No artwork in this category.</source>
+        <translation>此分类没有封面。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Select an image to preview the original.</source>
+        <translation>选择一张图片以预览原图。</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>No preview</source>
+        <translation>无预览</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Downloading original…</source>
+        <translation>正在下载原图…</translation>
+    </message>
+    <message>
+        <location line="+16"/>
+        <source>Original: %1 × %2</source>
+        <translation>原始尺寸：%1 × %2</translation>
+    </message>
+</context>
+<context>
+    <name>IiDB::KeyDialog</name>
+    <message>
+        <location filename="../../src/lichii/configuration/iidb_key_dialog.cpp" line="+109"/>
+        <source>iiDB API Key</source>
+        <translation>iiDB API 密钥</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Enter a personal iiDB API key to search for artwork from game Properties. &lt;a href="https://iisu.network/wiki/iidb-developers/getting-started"&gt;Get a key&lt;/a&gt;.</source>
+        <translation>输入个人 iiDB API 密钥，即可在游戏「属性」里搜索封面。&lt;a href="https://iisu.network/wiki/iidb-developers/getting-started"&gt;获取密钥&lt;/a&gt;。</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Personal API key:</source>
+        <translation>个人 API 密钥：</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Remember in Windows Credential Manager</source>
+        <translation>记住到 Windows 凭据管理器</translation>
+    </message>
+    <message>
+        <location line="+15"/>
+        <source>Use Key</source>
+        <translation>使用密钥</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Test Connection</source>
+        <translation>测试连接</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Forget Key</source>
+        <translation>忘记密钥</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Test the entered key, or the current key if the field is blank. Testing does not save it.</source>
+        <translation>测试已输入的密钥；若输入框为空，则测试当前密钥。测试不会保存密钥。</translation>
+    </message>
+    <message>
+        <location line="+32"/>
+        <source>Testing iiDB access…</source>
+        <translation>正在测试 iiDB 访问…</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>iiDB accepted the key.</source>
+        <translation>iiDB 接受了这个密钥。</translation>
+    </message>
+    <message>
+        <location line="+17"/>
+        <source>Paste your key</source>
+        <translation>粘贴你的密钥</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Enter a replacement key</source>
+        <translation>输入替换用的密钥</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>No key set. You can use a key for this session only.</source>
+        <translation>尚未设置密钥。你可以只在本次会话中使用密钥。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>The key is available only until Lichii closes.</source>
+        <translation>该密钥仅在 Lichii 关闭前有效。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>The key is saved in Windows Credential Manager.</source>
+        <translation>密钥已保存到 Windows 凭据管理器。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Windows Credential Manager is unavailable. Keys are available for this session only.</source>
+        <translation>Windows 凭据管理器不可用，密钥仅在本次会话中有效。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Lichii couldn't save this key in Windows Credential Manager. It is available for this session only. Any saved key is unchanged.</source>
+        <translation>Lichii 无法把该密钥保存到 Windows 凭据管理器，它仅在本次会话中有效。已保存的密钥不受影响。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Lichii couldn't remove a saved key. Remove “Lichii/iiDB API Key” in Windows Credential Manager. Any key entered here is session-only.</source>
+        <translation>Lichii 无法删除已保存的密钥。请在 Windows 凭据管理器中删除「Lichii/iiDB API Key」。此处输入的密钥仅在本次会话有效。</translation>
+    </message>
+</context>
+<context>
+    <name>ShaderWarmDialog</name>
+    <message>
+        <location filename="../../src/lichii/shader_warm_dialog.cpp" line="+51"/>
+        <source>Reading game files</source>
+        <translation>正在读取游戏文件</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Extracting shaders</source>
+        <translation>正在提取着色器</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Converting shaders</source>
+        <translation>正在转换着色器</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Reading asset packs (MiB)</source>
+        <translation>正在读取资源包（MiB）</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Writing the precache file</source>
+        <translation>正在写入预缓存文件</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Precache shaders: %1</source>
+        <translation>预缓存着色器：%1</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Starting</source>
+        <translation>正在开始</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Cancel</source>
+        <translation>取消</translation>
+    </message>
+    <message>
+        <location line="+81"/>
+        <source>Stopping</source>
+        <translation>正在停止</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>%1: %L2 / %L3</source>
+        <translation>%1：%L2 / %L3</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>%1: %L2</source>
+        <translation>%1：%L2</translation>
+    </message>
+    <message>
+        <location line="+16"/>
+        <source>Shader precache is ready.</source>
+        <translation>着色器预缓存已就绪。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>This game keeps its shaders in a format Lichii can't read, so none are prepared from the game files.</source>
+        <translation>此游戏的着色器采用了 Lichii 无法读取的格式，因此没有从游戏文件中准备任何着色器。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>The game files have no compute shaders to prepare.</source>
+        <translation>游戏文件里没有可准备的 compute 着色器。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Compute programs: %L1</source>
+        <translation>compute 程序：%L1</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Skipped (could not be read or converted): %L1</source>
+        <translation>已跳过（无法读取或转换）：%L1</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>They are compiled on the loading screen the next time you start the game, on every CPU thread, with every pipeline your earlier sessions saved. Skip stops it; the next start goes on from there.</source>
+        <translation>下次启动游戏时，它们会在加载界面用全部 CPU 线程编译，并使用你此前会话保存的所有管线。点「跳过」可以中止，下次启动会从中断处继续。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>It is built on the loading screen when Precache shaders before game start is on.</source>
+        <translation>当「游戏开始前预缓存着色器」开启时，它会在加载界面构建。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Shader precache stopped.</source>
+        <translation>着色器预缓存已停止。</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Shader precache could not be built.</source>
+        <translation>无法构建着色器预缓存。</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>No details were given.</source>
+        <translation>没有提供详细信息。</translation>
+    </message>
+    <message>
+        <location line="+5"/>
+        <source>Close</source>
+        <translation>关闭</translation>
+    </message>
+</context>
+<context>
+    <name>NxTools</name>
+    <message>
+        <location filename="../../src/lichii/nx_tools.cpp" line="+499"/>
+        <source>%1 cannot be decrypted: %2
+
+Check that your keys are installed.</source>
+        <translation>无法解密 %1：%2
+
+请检查是否已安装 keys。</translation>
+    </message>
+    <message>
+        <location line="+52"/>
+        <source>Convert to NX</source>
+        <translation>转换为 NX</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Converting to NX</source>
+        <translation>正在转换为 NX</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>NX archive (*.nx)</source>
+        <translation>NX 归档 (*.nx)</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>The archive already exists:
+%1</source>
+        <translation>归档已存在：
+%1</translation>
+    </message>
+    <message>
+        <location line="+21"/>
+        <source>Updates and DLC of this game were found in the same folder.
+The checked ones are added to the NX archive:</source>
+        <translation>在同一文件夹里找到了这个游戏的更新和 DLC。
+勾选的项目会被加入 NX 归档：</translation>
+    </message>
+    <message>
+        <location line="+53"/>
+        <source>The NX archive was created:
+%1</source>
+        <translation>NX 归档已创建：
+%1</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Add to NX</source>
+        <translation>加入 NX</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>This NX archive cannot be read.</source>
+        <translation>无法读取这个 NX 归档。</translation>
+    </message>
+    <message>
+        <location line="+6"/>
+        <source>Add an update or DLC to this NX archive. The archive is changed in place; the content it already holds is kept.</source>
+        <translation>向这个 NX 归档添加更新或 DLC。归档会就地修改，其中已有的内容会保留。</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Update Folder...</source>
+        <translation>更新文件夹…</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>NSP or XCI Files...</source>
+        <translation>NSP 或 XCI 文件…</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Adding to NX</source>
+        <translation>正在加入 NX</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>Select the Update Folder</source>
+        <translation>选择更新文件夹</translation>
+    </message>
+    <message>
+        <location line="+17"/>
+        <source>Version number of this update (for example 196608 for v196608):</source>
+        <translation>这次更新的版本号（例如 v196608 填 196608）：</translation>
+    </message>
+    <message>
+        <location line="+12"/>
+        <source>Select Updates or DLC</source>
+        <translation>选择更新或 DLC</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Switch packages (*.nsp *.xci)</source>
+        <translation>Switch 安装包 (*.nsp *.xci)</translation>
+    </message>
+    <message>
+        <location line="+16"/>
+        <source>The NX archive was updated.</source>
+        <translation>NX 归档已更新。</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Remove from NX</source>
+        <translation>从 NX 中移除</translation>
+    </message>
+    <message>
+        <location line="+73"/>
+        <source>This NX archive cannot be read: %1</source>
+        <translation>无法读取这个 NX 归档：%1</translation>
+    </message>
+    <message>
+        <location line="-67"/>
+        <source>This NX archive holds no update or DLC to remove.</source>
+        <translation>这个 NX 归档里没有可移除的更新或 DLC。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>Select the content to remove from the archive:</source>
+        <translation>选择要从归档中移除的内容：</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>DLC %1 (v%2)</source>
+        <translation>DLC %1（v%2）</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Update %1 (v%2)</source>
+        <translation>更新 %1（v%2）</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Remove</source>
+        <translation>移除</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Removing from NX</source>
+        <translation>正在从 NX 中移除</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>The selected content was removed from the NX archive.</source>
+        <translation>所选内容已从 NX 归档中移除。</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Edit NX Metadata</source>
+        <translation>编辑 NX 元数据</translation>
+    </message>
+    <message>
+        <location line="+44"/>
+        <source>Title:</source>
+        <translation>标题：</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Publisher:</source>
+        <translation>发行商：</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Choose Image...</source>
+        <translation>选择图片…</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>256 x 256 (default)</source>
+        <translation>256 x 256（默认）</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>512 x 512</source>
+        <translation>512 x 512</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>1024 x 1024</source>
+        <translation>1024 x 1024</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Size of the icon stored in the archive</source>
+        <translation>归档中保存的图标尺寸</translation>
+    </message>
+    <message>
+        <location line="+18"/>
+        <source>This image cannot be converted.</source>
+        <translation>无法转换这张图片。</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>This image cannot be read.</source>
+        <translation>无法读取这张图片。</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Choose Image</source>
+        <translation>选择图片</translation>
+    </message>
+    <message>
+        <location line="+0"/>
+        <source>Images (*.png *.jpg *.jpeg *.bmp *.webp *.gif)</source>
+        <translation>图片 (*.png *.jpg *.jpeg *.bmp *.webp *.gif)</translation>
+    </message>
+    <message>
+        <location line="+15"/>
+        <source>Restore Original Image</source>
+        <translation>恢复原始图片</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Icon:</source>
+        <translation>图标：</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>The new title and icon are shown in every language. The game itself is not changed.</source>
+        <translation>新的标题和图标会在所有语言下显示。游戏本身不会被改动。</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>Editing NX metadata</source>
+        <translation>正在编辑 NX 元数据</translation>
+    </message>
+    <message>
+        <location line="+15"/>
+        <source>The icon cannot be saved.</source>
+        <translation>无法保存图标。</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>The NX archive metadata was updated.</source>
+        <translation>NX 归档元数据已更新。</translation>
+    </message>
+    <message>
+        <location line="+8"/>
+        <source>Cancel</source>
+        <translation>取消</translation>
+    </message>
+    <message>
+        <location line="+9"/>
+        <source>Cancelling...</source>
+        <translation>正在取消…</translation>
+    </message>
+    <message>
+        <location line="+16"/>
+        <source>Preparing...</source>
+        <translation>正在准备…</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Finishing...</source>
+        <translation>正在收尾…</translation>
+    </message>
+    <message>
+        <location line="+13"/>
+        <source>%1 left</source>
+        <translation>剩余 %1</translation>
+    </message>
+    <message>
+        <location line="+12"/>
+        <source>%1
+Elapsed: %2</source>
+        <translation>%1
+已用时间：%2</translation>
+    </message>
+    <message>
+        <location line="+67"/>
+        <source>Move the %1 original packages to the Recycle Bin</source>
+        <translation>把 %1 个原始安装包移到回收站</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Move the original folder to the Recycle Bin:
+%1</source>
+        <translation>把原始文件夹移到回收站：
+%1</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>Move the original game to the Recycle Bin:
+%1</source>
+        <translation>把原始游戏移到回收站：
+%1</translation>
+    </message>
+    <message>
+        <location line="+24"/>
+        <source>%1 of the %2 original packages could not be moved to the Recycle Bin. They may be in use.</source>
+        <translation>%2 个原始安装包中有 %1 个无法移到回收站，可能正在被使用。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>The original could not be moved to the Recycle Bin:
+%1
+
+It may be in use. You can delete it yourself.</source>
+        <translation>无法把原始文件移到回收站：
+%1
+
+它可能正在被使用。你可以自行删除。</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>less than a minute</source>
+        <translation>不到一分钟</translation>
+    </message>
+    <message>
+        <location line="+2"/>
+        <source>about %1 h %2 min</source>
+        <translation>约 %1 小时 %2 分钟</translation>
+    </message>
+    <message>
+        <location line="+23"/>
+        <source>Already added to the archive: %1</source>
+        <translation>已加入归档：%1</translation>
+    </message>
+    <message>
+        <location line="+11"/>
+        <source>Added: %1</source>
+        <translation>已添加：%1</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Already in the archive: %1</source>
+        <translation>归档中已有：%1</translation>
+    </message>
+    <message>
+        <location line="+10"/>
+        <source>Cancelled.</source>
+        <translation>已取消。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Cancelled. Nothing was changed on disk.</source>
+        <translation>已取消，磁盘上没有任何改动。</translation>
+    </message>
+    <message>
+        <location line="+7"/>
+        <source>The operation failed because the rebuild recipe could not be kept:
+%1
+
+Try again without the recipe? The game still runs from the NX archive, but the original package cannot be rebuilt exactly from it.</source>
+        <translation>操作失败，因为无法保留重建配方：
+%1
+
+要在没有配方的情况下重试吗？游戏仍然可以从 NX 归档运行，但无法再由它精确重建原始安装包。</translation>
+    </message>
+    <message>
+        <location line="+14"/>
+        <source>The operation failed:
+%1</source>
+        <translation>操作失败：
+%1</translation>
+    </message>
+    <message>
+        <location line="+3"/>
+        <source>about %n minute(s)</source>
+        <translation>约 %n 分钟</translation>
     </message>
 </context>
 </TS>

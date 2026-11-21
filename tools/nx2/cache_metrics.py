@@ -34,6 +34,9 @@ RUNTIME_ONE = re.compile(r"(Graphics|Compute) pipeline built on the GPU thread i
 # Nx2StutterSummary histograms: 1 ms bins, the last holding every longer frame
 OVERFLOW_BIN_MS = 299
 DKB_FRAME = re.compile(r"DKB renderer .*cpu_frame_wall_ms=([\d.]+)")
+DRIVER_BUILD_TIMES = re.compile(
+    r"(Shader cache v2 boot load|Background prebuild done).*driver build times: (\d+) under 10 ms, "
+    r"(\d+) 10-100 ms, (\d+) over 100 ms \(([\d.]+) s in all, longest ([\d.]+) ms\)")
 
 FRAME_MS_60 = 1000.0 / 60.0
 STUTTER_MS = 33.0
@@ -148,6 +151,7 @@ def analyze(lines, start_s=None, end_s=None):
     runtime_10s = []
     runtime_lines = {"Graphics": [], "Compute": []}
     dkb_frames = []
+    driver_build_times = {"boot": None, "prebuild": None}
     summaries = []
     stutters = []
     for line in lines:
@@ -185,6 +189,12 @@ def analyze(lines, start_s=None, end_s=None):
             runtime_lines[match.group(1)].append((line.t, float(match.group(2))))
         elif match := DKB_FRAME.search(text):
             dkb_frames.append((line.t, float(match.group(1))))
+        elif match := DRIVER_BUILD_TIMES.search(text):
+            phase = "boot" if match.group(1).startswith("Shader cache") else "prebuild"
+            driver_build_times[phase] = {
+                "under_10ms": int(match.group(2)), "10_100ms": int(match.group(3)),
+                "over_100ms": int(match.group(4)), "total_s": float(match.group(5)),
+                "longest_ms": float(match.group(6))}
         elif driver_loaded_t is None and "Loaded Vulkan driver pipeline cache:" in text:
             driver_loaded_t = line.t
         elif "Vulkan driver pipelines cached at:" in text:
@@ -220,6 +230,9 @@ def analyze(lines, start_s=None, end_s=None):
         "cache": {"hit_rate": None, "graphics_hit_rate": None, "compute_hit_rate": None,
                   "lookups": None, "file_bytes_at_boot": None, "file_bytes_at_end": None,
                   "driver_file_bytes_at_boot": None},
+        # Wall time of each driver build (vkCreate*Pipelines) at boot and in the background
+        # prebuild: a pipeline the driver's own cache held builds in a few milliseconds
+        "driver_build_times": driver_build_times,
         "window_s": None,
         "sources": {},
     }

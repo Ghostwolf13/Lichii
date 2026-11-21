@@ -234,6 +234,12 @@ void ConfigureInput::ApplyConfiguration() {
     Settings::values.players.SetGlobal(was_global);
 }
 
+void ConfigureInput::RestoreConfiguration() {
+    for (auto* controller : player_controllers) {
+        controller->RestoreConfiguration();
+    }
+}
+
 void ConfigureInput::changeEvent(QEvent* event) {
     if (event->type() == QEvent::LanguageChange) {
         RetranslateUI();

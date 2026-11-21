@@ -71,6 +71,7 @@ A64EmitX64::A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_in
     }
     GenMemory128Accessors();
     GenFastmemFallbacks();
+    GenCntpctFallback();
     GenTerminalHandlers();
     code.PreludeComplete();
     ClearFastDispatchTable();
@@ -743,7 +744,58 @@ void A64EmitX64::EmitA64GetCNTFRQ(A64EmitContext& ctx, IR::Inst* inst) {
     ctx.reg_alloc.DefineValue(code, inst, result);
 }
 
+void A64EmitX64::GenCntpctFallback() {
+    if (!conf.wall_clock_cntpct || !conf.inline_cntpct_mode || !conf.inline_cntpct_factor) {
+        return;
+    }
+    code.align();
+    cntpct_fallback = code.getCurr();
+    ABI_PushCallerSaveRegistersAndAdjustStackExcept(code, HostLoc::RDX);
+    Devirtualize<&A64::UserCallbacks::GetCNTPCT>(conf.callbacks).EmitCall(code);
+    code.mov(rdx, rax);
+    ABI_PopCallerSaveRegistersAndAdjustStackExcept(code, HostLoc::RDX);
+    code.ret();
+    PerfMapRegister(cntpct_fallback, code.getCurr(), "a64_cntpct_fallback");
+}
+
 void A64EmitX64::EmitA64GetCNTPCT(A64EmitContext& ctx, IR::Inst* inst) {
+    if (cntpct_fallback) {
+        ctx.reg_alloc.ScratchGpr(code, HostLoc::RAX);
+        const Xbyak::Reg64 result = ctx.reg_alloc.ScratchGpr(code, HostLoc::RDX);
+        const Xbyak::Reg64 tmp = ctx.reg_alloc.ScratchGpr(code);
+        Xbyak::Label fallback;
+        Xbyak::Label done;
+        code.mov(tmp, reinterpret_cast<u64>(conf.inline_cntpct_mode));
+        code.cmp(dword[tmp], 0);
+        code.jne(fallback, code.T_NEAR);
+        code.lfence();
+        code.rdtsc();
+        code.lfence();
+        code.shl(rdx, 32);
+        code.or_(rax, rdx);
+        code.mov(tmp, reinterpret_cast<u64>(conf.inline_cntpct_factor));
+        code.mul(qword[tmp]);
+        if (conf.inline_cntpct_last) {
+            code.mov(tmp, reinterpret_cast<u64>(conf.inline_cntpct_last));
+            if (conf.inline_cntpct_spin_ticks != 0) {
+                Xbyak::Label no_pause;
+                code.mov(rax, rdx);
+                code.sub(rax, qword[tmp]);
+                code.cmp(rax, conf.inline_cntpct_spin_ticks);
+                code.jae(no_pause);
+                code.pause();
+                code.pause();
+                code.L(no_pause);
+            }
+            code.mov(qword[tmp], rdx);
+        }
+        code.jmp(done);
+        code.L(fallback);
+        code.call(cntpct_fallback);
+        code.L(done);
+        ctx.reg_alloc.DefineValue(code, inst, result);
+        return;
+    }
     ctx.reg_alloc.HostCall(code, inst);
     if (!conf.wall_clock_cntpct) {
         code.UpdateTicks();

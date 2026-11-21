@@ -124,6 +124,12 @@ public:
     /// Returns the current CNTPCT tick value.
     u64 GetClockTicks() const;
 
+#if defined(ARCHITECTURE_x86_64)
+    void ConfigureInlineCntpct(bool supported);
+    void RefreshInlineCntpct();
+    const std::atomic<u32>* InlineCntpctMode() const;
+#endif
+
     /// Returns the current GPU tick value.
     u64 GetGPUTicks() const;
 
@@ -180,6 +186,12 @@ public:
     std::atomic<bool> wait_set{};
     std::atomic<bool> has_started{};
     bool is_multicore{};
+#if defined(ARCHITECTURE_x86_64)
+    // One applied setting for both GetClockTicks and already compiled JIT blocks.
+    // Zero is Normal without speed sync; all other values require the callback.
+    static constexpr u32 InlineCntpctDisabled = ~u32{0};
+    std::atomic<u32> inline_cntpct_mode{InlineCntpctDisabled};
+#endif
     /// Logs the timer thread's waits once a second (EDEN_NX2_HOSTTIMING_STATS=1, or the debug
     /// server's host_timing).
     std::atomic<bool> host_wait_stats{};

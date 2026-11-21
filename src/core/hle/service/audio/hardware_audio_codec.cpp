@@ -3,10 +3,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <new>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "common/logging.h"
@@ -40,6 +43,18 @@ void ReplyError(HLERequestContext& ctx, Result result) {
     IPC::ResponseBuilder reply{ctx, 2};
     reply.Push(result);
 }
+
+// EDEN_NX2_HWACOD_TRACE=1 logs instance lifecycles and, about once a second, each manager's tasks
+// by instance, so a stream that stops getting input shows up while the others keep going.
+bool TraceEnabled() {
+    static const bool enabled = std::getenv("EDEN_NX2_HWACOD_TRACE") != nullptr;
+    return enabled;
+}
+
+struct InstanceTrace {
+    u32 tasks, resets, errors;
+    u64 total_tasks;
+};
 }
 
 namespace Hwacod {
@@ -389,6 +404,9 @@ struct IHardwareAudioCodecManagerSession::Impl {
     bool locked{}, faulted{};
     u16 tag{};
     u32 logged_batches{}, logged_errors{};
+    std::vector<InstanceTrace> trace;
+    u32 trace_batches{};
+    std::chrono::steady_clock::time_point trace_start;
     u64 address{}, size{}, ring{};
     Hwacod::SharedMemoryWire layout{};
     Hwacod::BatchState batch;
@@ -445,6 +463,10 @@ Result IHardwareAudioCodecManagerSession::Initialize(
     R_TRY(p.batch.Initialize(layout.io_count, p.tag));
     p.instances.resize(layout.instance_count);
     p.live.resize(layout.instance_count);
+    if (TraceEnabled()) {
+        p.trace.resize(layout.instance_count);
+        p.trace_start = std::chrono::steady_clock::now();
+    }
     p.event = p.context.CreateEvent("hwacod completion");
     R_UNLESS(p.event, ResultOutOfSessions);
     auto& memory = process->GetMemory();
@@ -510,6 +532,14 @@ Result IHardwareAudioCodecManagerSession::InitializeInstance(
     p.instances[id] = std::move(decoder);
     p.live[id] = 1;
     ++p.batch.State().live_instances;
+    if (!p.trace.empty()) {
+        p.trace[id].total_tasks = 0;
+        LOG_INFO(Service_Audio,
+                 "hwacod tag={} instance {} initialized: kind {}, {} Hz, {} channels, {} samples per "
+                 "frame, {} streams ({} coupled)",
+                 p.tag, id, static_cast<u32>(config.kind), config.rate, config.channels,
+                 config.frame_samples, config.streams, config.coupled);
+    }
     R_SUCCEED();
 }
 
@@ -521,6 +551,10 @@ Result IHardwareAudioCodecManagerSession::FinalizeInstance(u32 id) {
     p.instances[id].reset();
     p.live[id] = 0;
     --p.batch.State().live_instances;
+    if (!p.trace.empty()) {
+        LOG_INFO(Service_Audio, "hwacod tag={} instance {} finalized after {} tasks", p.tag, id,
+                 p.trace[id].total_tasks);
+    }
     R_SUCCEED();
 }
 
@@ -572,6 +606,13 @@ Result IHardwareAudioCodecManagerSession::Execute(InBuffer<BufferAttr_HipcAutoSe
         if (task.notify) {
             p.event->Signal(system.Kernel());
         }
+        if (!p.trace.empty()) {
+            auto& trace = p.trace[task.instance];
+            ++trace.tasks;
+            ++trace.total_tasks;
+            trace.resets += task.reset;
+            trace.errors += result.IsFailure() ? 1 : 0;
+        }
         if (result.IsSuccess()) {
             ++successful;
             output_total += output_bytes;
@@ -588,6 +629,39 @@ Result IHardwareAudioCodecManagerSession::Execute(InBuffer<BufferAttr_HipcAutoSe
         ++p.logged_batches;
         LOG_INFO(Service_Audio, "hwacod completed tag={} tasks={} decoded={} errors={} pcm_bytes={} producer={}",
                  p.tag, tasks.size(), successful, failed, output_total, p.batch.State().write_index);
+    }
+    if (!p.trace.empty()) {
+        ++p.trace_batches;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - p.trace_start >= std::chrono::seconds{1}) {
+            std::string active;
+            u32 window_tasks{}, window_errors{};
+            for (size_t id = 0; id < p.trace.size(); ++id) {
+                auto& trace = p.trace[id];
+                if (trace.tasks == 0) {
+                    continue;
+                }
+                window_tasks += trace.tasks;
+                window_errors += trace.errors;
+                fmt::format_to(std::back_inserter(active), " {}:{}", id, trace.tasks);
+                if (trace.resets) {
+                    fmt::format_to(std::back_inserter(active), "r{}", trace.resets);
+                }
+                if (trace.errors) {
+                    fmt::format_to(std::back_inserter(active), "e{}", trace.errors);
+                }
+                trace.tasks = trace.resets = trace.errors = 0;
+            }
+            const auto& state = p.batch.State();
+            LOG_INFO(Service_Audio,
+                     "hwacod tag={} in {:.1f} s: {} batches, {} tasks, {} errors, {} live instances, "
+                     "{} completions not consumed; instance:tasks{}",
+                     p.tag, std::chrono::duration<double>(now - p.trace_start).count(),
+                     p.trace_batches, window_tasks, window_errors, state.live_instances,
+                     state.outstanding, active);
+            p.trace_batches = 0;
+            p.trace_start = now;
+        }
     }
     R_SUCCEED();
 }

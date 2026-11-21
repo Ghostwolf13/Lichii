@@ -53,6 +53,27 @@ TEST_CASE("Lichii ignores dev builds and malformed release tags", "[updater]") {
     CHECK_FALSE(UpdateChecker::SelectUpdate(invalid, "build-70", "windows-x86_64"));
 }
 
+TEST_CASE("Only builds with a release tag and platform compare against releases", "[updater]") {
+    CHECK(UpdateChecker::IsReleaseBuild("build-71", "windows-x86_64"));
+    CHECK(UpdateChecker::IsReleaseBuild("build-260", "linux-x86_64-pgo"));
+    CHECK_FALSE(UpdateChecker::IsReleaseBuild("build-71", ""));
+    const std::string tag =
+        GENERATE("", "nx2", "abc1234567-nx2", "build-", "build-0", "build-71junk");
+    CHECK_FALSE(UpdateChecker::IsReleaseBuild(tag, "windows-x86_64"));
+}
+
+TEST_CASE("A build newer than every release is never offered an older one", "[updater]") {
+    const auto releases = std::array{
+        MakeRelease("build-250", "lichii-windows-x86_64.zip"),
+        MakeRelease("build-249", "lichii-windows-x86_64.zip"),
+    };
+    CHECK_FALSE(UpdateChecker::SelectUpdate(releases, "build-260", "windows-x86_64"));
+    CHECK_FALSE(UpdateChecker::SelectUpdate(releases, "build-250", "windows-x86_64"));
+    const auto update = UpdateChecker::SelectUpdate(releases, "build-249", "windows-x86_64");
+    REQUIRE(update);
+    CHECK(update->tag == "build-250");
+}
+
 TEST_CASE("Lichii selects only the matching platform and PGO variant", "[updater]") {
     const std::string platform =
         GENERATE("windows-x86_64", "windows-x86_64-pgo", "linux-x86_64", "linux-x86_64-pgo",

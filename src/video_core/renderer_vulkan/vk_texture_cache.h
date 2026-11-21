@@ -74,6 +74,24 @@ struct ByteAddressedRange {
     return VkExtent2D{width / 2, height};
 }
 
+struct SamplerBinding {
+    struct Compatibility {
+        bool mag_linear : 1;
+        bool min_linear : 1;
+        bool mipmap_linear : 1;
+        bool anisotropy : 1;
+        bool compare : 1;
+        bool minmax : 1;
+        bool clamp_to_border : 1;
+        bool custom_border : 1;
+
+        bool operator==(const Compatibility&) const noexcept = default;
+    };
+
+    VkSampler handle{};
+    Compatibility compatibility{};
+};
+
 class TextureCacheRuntime {
 public:
     explicit TextureCacheRuntime(const Device& device_, Scheduler& scheduler_,
@@ -112,6 +130,10 @@ public:
     u64 GetDeviceMemorySlack() const;
 
     bool CanReportMemoryUsage() const;
+
+    /// The largest width and height a scaled image may take: the device's 2D image and
+    /// framebuffer limits (16384 on AMD).
+    u32 GetMaxScaledExtent() const noexcept;
 
     /// Images that did not fit the device memory budget so far (see MemoryAllocator).
     u32 MemoryPressureEvents() const noexcept {
@@ -243,6 +265,8 @@ public:
 
     void BarrierFeedbackLoop();
 
+    VkImageView ResolveColorFeedback(const ImageView& sampled, const ImageView& attachment);
+
     bool IsFormatDitherable(VideoCore::Surface::PixelFormat format);
     bool IsFormatScalable(VideoCore::Surface::PixelFormat format);
 
@@ -264,6 +288,9 @@ public:
                          std::array<f32, 2> motion_scale);
     std::unique_ptr<Fsr3Upscaler> fsr3_upscaler;
     bool fsr3_unsupported{};
+    /// The backend that last drew a DLSS replacement and why, so each change is logged once.
+    std::string_view last_upscale_backend;
+    std::string_view last_upscale_reason;
 
     /// The LOD bias Ocarina's FSR adds to mipmapped samplers this session (0 for other games or
     /// upscalers), resolved on first use.
@@ -271,6 +298,7 @@ public:
     std::optional<f32> ocarina_fsr_lod_bias;
     /// Set when the Ocarina upscaler fails during the session: samplers drop the bias again.
     bool ocarina_fsr_failed{};
+    SamplerBinding fallback_sampler{};
     /// The game DLSS network's health check (ProbeGameDlssOutput), created on first use.
     std::unique_ptr<DlssNetworkProbe> dlss_network_probe;
     std::optional<std::chrono::steady_clock::time_point> fsr3_last_evaluation;
@@ -360,6 +388,17 @@ public:
         vk::Buffer bridge;
     };
     std::deque<PendingByteAddressedShadow> pending_byte_addressed_shadows;
+
+    struct ColorFeedbackSnapshot {
+        vk::Image image;
+        vk::ImageView view;
+        VideoCommon::Extent3D size;
+        VkComponentMapping swizzle;
+        u64 tick{};
+        u32 unused_frames{};
+        bool used_this_frame{};
+    };
+    std::vector<ColorFeedbackSnapshot> color_feedback_snapshots;
 };
 
 class Framebuffer {
@@ -497,6 +536,11 @@ public:
     Image& operator=(Image&&) = default;
 
     u32 HostMipLevels() const noexcept;
+
+    /// The format a copy out of the host image yields: the guest format, or what a converted one
+    /// (ASTC re-compressed to BC1/BC3 or decoded to RGBA8, BCn decoded without host support) is
+    /// kept as.
+    [[nodiscard]] VideoCore::Surface::PixelFormat HostFormat() const;
 
     /// No memory was left to make it: the texture cache drops it instead of using it.
     [[nodiscard]] bool OutOfMemory() const noexcept {
@@ -832,6 +876,7 @@ public:
     CustomBorderColorBudget& operator=(CustomBorderColorBudget&& rhs) noexcept;
 
     bool TryAcquire(const Device& device, size_t count);
+    void Release(size_t count) noexcept;
 
 private:
     void Release() noexcept;
@@ -845,7 +890,7 @@ public:
     explicit Sampler(TextureCacheRuntime&, const Tegra::Texture::TSCEntry&);
 
     [[nodiscard]] VkSampler Handle() const noexcept {
-        return *variants.front().sampler;
+        return variants.front().binding.handle;
     }
 
     [[nodiscard]] VkSampler HandleFor(const ImageView& image_view, bool is_depth);
@@ -880,13 +925,14 @@ private:
     struct Variant {
         VariantKey key;
         vk::Sampler sampler;
+        SamplerBinding binding;
     };
 
     static constexpr size_t MAX_VARIANTS = 32;
 
     [[nodiscard]] VariantKey MakeKey(const ImageView& image_view, bool is_depth) const noexcept;
     [[nodiscard]] VkSampler Find(const VariantKey& key) const noexcept;
-    VkSampler Emplace(VariantKey key);
+    VkSampler Emplace(VariantKey key, const SamplerBinding* fallback = nullptr);
 
     CustomBorderColorBudget custom_border_color_budget;
     std::vector<Variant> variants;

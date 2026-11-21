@@ -55,8 +55,7 @@ bool ServiceManager::WaitForService(const std::string& name) {
             LOG_INFO(Service_SM, "Gave up waiting for {}: the services are closing", name);
             return false;
         }
-        // Checks again every 100 ms, or at once when Close runs.
-        waiters_changed.wait_for(l, std::chrono::milliseconds{100});
+        waiters_changed.wait(l);
     }
     return true;
 }
@@ -108,6 +107,9 @@ Result ServiceManager::RegisterService(Kernel::KServerPort** out_server_port, st
 
     service_ports.emplace(name, std::addressof(port->GetClientPort()));
     registered_services.emplace(name, handler);
+    if (service_waiters != 0) {
+        waiters_changed.notify_all();
+    }
     if (deferral_event) {
         deferral_event->Signal(kernel);
     }

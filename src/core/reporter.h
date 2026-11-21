@@ -28,7 +28,9 @@ class System;
 
 class Reporter {
 public:
-    explicit Reporter(System& system_);
+    enum class FSAccessLogPolicy { Disk, Disabled };
+
+    Reporter(System& system_, FSAccessLogPolicy fs_access_log_policy_);
     ~Reporter();
 
     // Used by fatal services
@@ -81,6 +83,7 @@ private:
     bool IsReportingEnabled() const;
 
     System& system;
+    const FSAccessLogPolicy fs_access_log_policy;
 };
 
 } // namespace Core

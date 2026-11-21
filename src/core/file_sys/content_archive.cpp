@@ -98,34 +98,18 @@ NCA::NCA(VirtualFile file_, const NCA* base_nca, bool allow_missing_base)
         reader->SetExternalDecryptionKey(titlekey.data(), titlekey.size());
     }
 
+    base_reader = base_nca ? base_nca->reader : nullptr;
     const s32 fs_count = reader->GetFsCount();
-    NcaFileSystemDriver fs(base_nca ? base_nca->reader : nullptr, reader);
-    std::vector<VirtualFile> filesystems(fs_count);
     for (s32 i = 0; i < fs_count; i++) {
         NcaFsHeaderReader header_reader;
-        if (Result rc = fs.OpenStorage(&filesystems[i], &header_reader, i); R_FAILED(rc)) {
+        if (!reader->HasFsInfo(i) || R_FAILED(header_reader.Initialize(*reader, i))) {
             status = Loader::ResultStatus::ErrorBadNCAHeader;
             return;
         }
 
-        if (header_reader.GetFsType() == NcaFsHeader::FsType::RomFs) {
-            files.push_back(filesystems[i]);
-            romfs = files.back();
-        }
-
-        if (header_reader.GetFsType() == NcaFsHeader::FsType::PartitionFs) {
-            auto npfs = std::make_shared<PartitionFilesystem>(filesystems[i]);
-            if (npfs->GetStatus() == Loader::ResultStatus::Success) {
-                dirs.push_back(npfs);
-                if (IsDirectoryExeFS(npfs)) {
-                    exefs = dirs.back();
-                } else if (IsDirectoryLogoPartition(npfs)) {
-                    logo = dirs.back();
-                } else {
-                    continue;
-                }
-            }
-        }
+        auto& section = sections.emplace_back();
+        section.index = i;
+        section.partition = header_reader.GetFsType() == NcaFsHeader::FsType::PartitionFs;
 
         // Decrypted updates keep their patch tables with encryption type None.
         const auto& patch_info = header_reader.GetPatchInfo();
@@ -148,9 +132,40 @@ Loader::ResultStatus NCA::GetStatus() const {
     return status;
 }
 
+void NCA::OpenSection(Section& section) const {
+    if (section.opened) {
+        return;
+    }
+    section.opened = true;
+    NcaFileSystemDriver fs(base_reader, reader);
+    NcaFsHeaderReader header_reader;
+    if (R_FAILED(fs.OpenStorage(&section.storage, &header_reader, section.index))) {
+        LOG_ERROR(Loader, "Cannot open section {} of {}", section.index, file->GetName());
+        section.storage = nullptr;
+        return;
+    }
+    if (section.partition) {
+        auto pfs = std::make_shared<PartitionFilesystem>(section.storage);
+        if (pfs->GetStatus() == Loader::ResultStatus::Success) {
+            section.partition_fs = std::move(pfs);
+        }
+    }
+}
+
 std::vector<VirtualFile> NCA::GetFiles() const {
     if (status != Loader::ResultStatus::Success) {
         return {};
+    }
+    std::scoped_lock lock{sections_mutex};
+    std::vector<VirtualFile> files;
+    for (auto& section : sections) {
+        if (section.partition) {
+            continue;
+        }
+        OpenSection(section);
+        if (section.storage) {
+            files.push_back(section.storage);
+        }
     }
     return files;
 }
@@ -158,6 +173,17 @@ std::vector<VirtualFile> NCA::GetFiles() const {
 std::vector<VirtualDir> NCA::GetSubdirectories() const {
     if (status != Loader::ResultStatus::Success) {
         return {};
+    }
+    std::scoped_lock lock{sections_mutex};
+    std::vector<VirtualDir> dirs;
+    for (auto& section : sections) {
+        if (!section.partition) {
+            continue;
+        }
+        OpenSection(section);
+        if (section.partition_fs) {
+            dirs.push_back(section.partition_fs);
+        }
     }
     return dirs;
 }
@@ -200,11 +226,32 @@ bool NCA::IsUpdate() const {
 }
 
 VirtualFile NCA::GetRomFS() const {
+    std::scoped_lock lock{sections_mutex};
+    VirtualFile romfs;
+    for (auto& section : sections) {
+        if (section.partition) {
+            continue;
+        }
+        OpenSection(section);
+        if (section.storage) {
+            romfs = section.storage;
+        }
+    }
     return romfs;
 }
 
 VirtualDir NCA::GetExeFS() const {
-    return exefs;
+    std::scoped_lock lock{sections_mutex};
+    for (auto& section : sections) {
+        if (!section.partition) {
+            continue;
+        }
+        OpenSection(section);
+        if (section.partition_fs && IsDirectoryExeFS(section.partition_fs)) {
+            return section.partition_fs;
+        }
+    }
+    return nullptr;
 }
 
 VirtualFile NCA::GetBaseFile() const {
@@ -212,7 +259,18 @@ VirtualFile NCA::GetBaseFile() const {
 }
 
 VirtualDir NCA::GetLogoPartition() const {
-    return logo;
+    std::scoped_lock lock{sections_mutex};
+    for (auto& section : sections) {
+        if (!section.partition) {
+            continue;
+        }
+        OpenSection(section);
+        if (section.partition_fs && !IsDirectoryExeFS(section.partition_fs) &&
+            IsDirectoryLogoPartition(section.partition_fs)) {
+            return section.partition_fs;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace FileSys

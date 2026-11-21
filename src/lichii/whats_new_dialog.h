@@ -3,29 +3,52 @@
 
 #pragma once
 
+#include <string_view>
+#include <QDate>
 #include <QDialog>
-#include "common/common_types.h"
+#include <QList>
 
-class QCheckBox;
+class QLabel;
+class QScrollArea;
+class QToolButton;
+class QVBoxLayout;
 
-/// The quick start shown once after an update that changes the interface, and from Help.
-class WhatsNewDialog : public QDialog {
+class WhatsNewDialog final : public QDialog {
     Q_OBJECT
 
 public:
-    /// Raise this when the dialog's content changes, so it shows once more after the update.
-    static constexpr u32 Version = 1;
+    enum class StartupAction { None, Remember, Show };
 
-    explicit WhatsNewDialog(QWidget* parent);
-    ~WhatsNewDialog() override;
+    explicit WhatsNewDialog(quint32 build, QDate build_date, bool include_pending, QWidget* parent);
 
-    [[nodiscard]] bool OpenConfigureRequested() const {
-        return open_configure;
-    }
+    [[nodiscard]] static quint32 ParseBuildTag(std::string_view tag);
+    [[nodiscard]] static StartupAction OnStartup(quint32 build, quint32 last_seen, bool first_start,
+                                                 bool launching_content, bool include_pending);
 
 private:
-    void done(int result) override;
+    struct Change {
+        QString icon;
+        QString title;
+        QString body;
+    };
 
-    QCheckBox* dont_show_again{};
-    bool open_configure = false;
+    struct Release {
+        quint32 build{};
+        QDate date;
+        QString summary;
+        QList<Change> changes;
+        bool preview{};
+    };
+
+    static QList<Release> LoadReleases(quint32 build, QDate date, bool include_pending);
+    void ShowRelease(qsizetype index);
+
+    const QList<Release> releases;
+    qsizetype current_index{};
+    QLabel* metadata{};
+    QLabel* summary{};
+    QScrollArea* scroll{};
+    QVBoxLayout* highlights{};
+    QToolButton* previous{};
+    QToolButton* next{};
 };

@@ -8,6 +8,7 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/nca_metadata.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/hle/service/am/process_creation.h"
@@ -110,6 +111,23 @@ std::unique_ptr<Process> CreateApplicationProcess(std::vector<u8>& out_control, 
         return process;
     }
     return nullptr;
+}
+
+bool IsSwitch2Application(Core::System& system, u64 program_id) {
+    auto& storage = system.GetContentProviderUnion();
+    // An installed update is opened without its base: only its RomFS needs one, not its ExeFS.
+    if (const auto update_raw = storage.GetEntryRaw(FileSys::GetUpdateTitleID(program_id),
+                                                    FileSys::ContentRecordType::Program)) {
+        const FileSys::NCA update{update_raw, nullptr, true};
+        const auto exefs =
+            update.GetStatus() == Loader::ResultStatus::Success ? update.GetExeFS() : nullptr;
+        if (const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr) {
+            FileSys::ProgramMetadata metadata;
+            return metadata.Load(npdm) == Loader::ResultStatus::Success && metadata.IsSwitch2();
+        }
+    }
+    const auto nca_raw = storage.GetEntryRaw(program_id, FileSys::ContentRecordType::Program);
+    return nca_raw != nullptr && Core::FindSwitch2Program(nca_raw, program_id, 0).has_value();
 }
 
 bool ReinitializeProcess(Core::System& system, Process& process, u64 program_id) {

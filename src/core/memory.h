@@ -24,12 +24,16 @@ struct PageTable;
 } // namespace Common
 
 namespace Core {
+class HvVm;
 class System;
 class GPUDirtyMemoryManager;
 } // namespace Core
 
 namespace Kernel {
 class KProcess;
+namespace Svc {
+enum class CreateProcessFlag : u32;
+}
 } // namespace Kernel
 
 namespace Tegra {
@@ -82,7 +86,12 @@ public:
      *
      * @param process The process to use the page table of.
      */
-    void SetCurrentPageTable(Kernel::KProcess& process);
+    void SetCurrentPageTable(Kernel::KProcess& process, Kernel::Svc::CreateProcessFlag flags = {});
+
+#ifdef HAS_HYPERVISOR
+    std::shared_ptr<Core::HvVm> GetHypervisor() const;
+    void ReleaseHypervisor();
+#endif
 
     /**
      * Maps an allocated buffer onto a region of the emulated process address space.
@@ -505,6 +514,10 @@ public:
     void SetGPUDirtyManagers(std::span<Core::GPUDirtyMemoryManager> managers);
 
     bool InvalidateNCE(Common::ProcessAddress vaddr, size_t size);
+#ifdef HAS_NATIVE_PAGE_PROTECTION
+    std::optional<u64> RecoverNceAccess(u64 fault_address, bool write,
+                                        std::optional<u64> prior_trap);
+#endif
 
     bool InvalidateSeparateHeap(void* fault_address);
 

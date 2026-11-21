@@ -21,14 +21,8 @@
 
 namespace Kernel {
 
-namespace {
-// EDEN_NX2_IDLE_STATS=1: every 10 s, each core logs how often it went idle, how many of those
-// periods its poll caught, and how long blocked periods took to wake after the interrupt.
-const bool g_idle_stats = std::getenv("EDEN_NX2_IDLE_STATS") != nullptr;
-} // Anonymous namespace
-
 PhysicalCore::PhysicalCore(KernelCore& kernel, std::size_t core_index)
-    : m_core_index{core_index}
+    : m_core_index{core_index}, m_idle_stats{std::getenv("EDEN_NX2_IDLE_STATS") != nullptr}
 {
     m_is_single_core = !kernel.IsMulticore();
 }
@@ -154,7 +148,11 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
         // Notify the debugger and go to sleep on data abort.
         if (data_abort) {
             if (system.DebuggerEnabled()) {
-                system.GetDebugger().NotifyThreadWatchpoint(thread, *interface->HaltedWatchpoint());
+                if (const auto* watchpoint = interface->HaltedWatchpoint()) {
+                    system.GetDebugger().NotifyThreadWatchpoint(thread, *watchpoint);
+                } else {
+                    system.GetDebugger().NotifyThreadStopped(thread);
+                }
             }
             thread->RequestSuspend(kernel, SuspendType::Debug);
             return;
@@ -275,7 +273,7 @@ void PhysicalCore::Idle(KernelCore& kernel) {
         m_idle_poll = Common::NextPollWindow(m_idle_poll, end - start, limit);
     }
 
-    if (!g_idle_stats) {
+    if (!m_idle_stats) {
         return;
     }
     if (m_stats_start == std::chrono::steady_clock::time_point{}) {
@@ -333,7 +331,7 @@ void PhysicalCore::Interrupt() {
     auto* arm_interface = m_arm_interface;
     auto* thread = m_current_thread;
 
-    if (g_idle_stats) {
+    if (m_idle_stats) {
         m_interrupt_time.store(std::chrono::steady_clock::now().time_since_epoch().count(),
                                std::memory_order_relaxed);
     }

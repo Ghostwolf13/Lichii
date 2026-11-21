@@ -32,6 +32,7 @@
 
 #ifdef HAS_NCE
 #include "core/arm/nce/patcher.h"
+#include "core/device_memory.h"
 #endif
 
 namespace Loader {
@@ -241,12 +242,13 @@ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
     const auto& code = codeset.CodeSegment();
 
     // NROs always have a 39-bit address space.
-    Settings::SetNceEnabled(true);
+    const u64 fastmem_base =
+        system.IsPoweredOn() ? 0 : system.DeviceMemory().PrepareNativeExecution(true);
 
     // Create NCE patcher
     Core::NCE::Patcher patch{};
 
-    if (Settings::IsNceEnabled()) {
+    if (fastmem_base != 0) {
         // Patch SVCs and MRS calls in the guest code
         patch.PatchText(program_image, code);
 
@@ -261,17 +263,9 @@ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
         // Add patch section size to the module size.
         image_size += patch_segment.size;
     }
+#else
+    constexpr u64 fastmem_base = 0;
 #endif
-
-    // Enable direct memory mapping in case of NCE.
-    const u64 fastmem_base = [&]() -> size_t {
-        if (Settings::IsNceEnabled()) {
-            auto& buffer = system.DeviceMemory().buffer;
-            buffer.EnableDirectMappedAddress();
-            return reinterpret_cast<u64>(buffer.VirtualBasePointer());
-        }
-        return 0;
-    }();
 
     // TODO: this is bad form of ASLR, it sucks
     std::uintptr_t aslr_offset = ((::Settings::values.rng_seed_enabled.GetValue()
@@ -287,7 +281,7 @@ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
     // Relocate code patch and copy to the program_image if running under NCE.
     // This needs to be after LoadFromMetadata so we can use the process entry point.
 #ifdef HAS_NCE
-    if (Settings::IsNceEnabled()) {
+    if (fastmem_base != 0) {
         patch.RelocateAndCopy(process.GetEntryPoint(), code, program_image,
                               &process.GetPostHandlers());
     }

@@ -54,6 +54,8 @@ private:
     mutable std::mutex database_mutex;
     PlayTimeDatabase database;
     u64 running_program_id{};
+    /// Set under save_mutex once this instance changes the database.
+    bool modified = false;
     std::jthread play_time_thread;
 };
 

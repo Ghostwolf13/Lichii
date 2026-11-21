@@ -7,6 +7,7 @@
 #include <array>
 #include <cinttypes>
 #include <cstring>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -15,6 +16,8 @@
 #include "common/game_presets.h"
 #include "common/hex_util.h"
 #include "common/logging.h"
+#include "common/npln_patch_catalog.h"
+#include "common/npln_patch_manifest.h"
 #include "common/lz4_compression.h"
 #include "common/zbic_compression.h"
 #include "common/settings.h"
@@ -97,17 +100,67 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         return 0;
     }();
 
-    auto const last_segment_it = &nso_header.segments[nso_header.segments.size() - 1];
+    // The image ends where the furthest segment ends. The header gives the segments in order, but
+    // it comes from the file: sizing the image by the last one let an earlier segment be copied
+    // past its end.
+    u64 segments_end = 0;
+    for (std::size_t i = 0; i < nso_header.segments.size(); ++i) {
+        const auto& segment = nso_header.segments[i];
+        segments_end = std::max<u64>(segments_end, u64{segment.location} + segment.size);
+        // A stored segment is copied from the bytes read for it.
+        if (!nso_header.IsSegmentCompressed(i) &&
+            segment.size > nso_header.segments_compressed_size[i]) {
+            LOG_ERROR(Loader, "{}: stored segment {} is larger than its data", nso_file.GetName(),
+                      i);
+            return std::nullopt;
+        }
+    }
+    // The whole image, the argument block and .bss included, is sized and aligned in u32 below:
+    // check its extent in 64 bits before allocating, so a segment near the top of the address
+    // space can neither wrap that arithmetic nor ask for gigabytes.
+    const bool pass_arguments =
+        should_pass_arguments && !Settings::values.program_args.GetValue().empty();
+    // A Split or PostData patch appends its section after the image when it is copied in, and
+    // the image size is narrowed to u32 after that: count the section too.
+    const size_t post_patch_size = [&]() -> size_t {
+#ifdef HAS_NCE
+        if (patches && load_into_process) {
+            auto* patch = &patches->operator[](patch_index);
+            if (patch->GetPatchMode() == Core::NCE::PatchMode::Split ||
+                patch->GetPatchMode() == Core::NCE::PatchMode::PostData) {
+                return patch->GetSectionSize();
+            }
+        }
+#endif
+        return 0;
+    }();
+    const u64 aligned_extent =
+        (u64{module_start} + segments_end + (pass_arguments ? NSO_ARGUMENT_DATA_ALLOCATION_SIZE : 0) +
+         nso_header.segments[2].bss_size + Core::Memory::LICHII_PAGEMASK) &
+        ~u64{Core::Memory::LICHII_PAGEMASK};
+    const u64 image_extent = aligned_extent + post_patch_size;
+    if (image_extent > std::numeric_limits<u32>::max()) {
+        LOG_ERROR(Loader, "{}: segments end at {:#x}, past a 32-bit image", nso_file.GetName(),
+                  image_extent);
+        return std::nullopt;
+    }
     // Build program image directly in codeset memory :)
     Kernel::CodeSet codeset;
-    codeset.memory.resize(module_start + last_segment_it->location + last_segment_it->size);
+    codeset.memory.resize(module_start + segments_end);
     {
         std::vector<u8> compressed_data(*std::ranges::max_element(nso_header.segments_compressed_size));
         std::vector<u8> decompressed_size(std::ranges::max_element(nso_header.segments, [](auto const& a, auto const& b) {
             return a.size < b.size;
         })->size);
         for (std::size_t i = 0; i < nso_header.segments.size(); ++i) {
-            nso_file.Read(compressed_data.data(), nso_header.segments_compressed_size[i], nso_header.segments[i].offset);
+            // A short read would leave the previous segment's bytes in the buffer, as below.
+            if (nso_file.Read(compressed_data.data(), nso_header.segments_compressed_size[i],
+                              nso_header.segments[i].offset) !=
+                nso_header.segments_compressed_size[i]) {
+                LOG_ERROR(Loader, "{}: segment {} is past the end of the file", nso_file.GetName(),
+                          i);
+                return std::nullopt;
+            }
             if (nso_header.IsSegmentCompressed(i)) {
                 const u32 segment_size = nso_header.segments[i].size;
                 if (nso_header.IsZBICCompressed()) {
@@ -137,7 +190,13 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                         compressed_data.data(),
                         nso_header.segments_compressed_size[i]
                     );
-                    ASSERT(r == int(segment_size));
+                    // As for ZBIC: a segment that does not decompress to its size would boot with
+                    // the previous segment's bytes in its place.
+                    if (r != int(segment_size)) {
+                        LOG_ERROR(Loader, "{}: segment {} decompressed to {} of {:#x} bytes",
+                                  nso_file.GetName(), i, r, segment_size);
+                        return std::nullopt;
+                    }
                 }
 
                 std::memcpy(
@@ -159,7 +218,7 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         }
     }
 
-    if (should_pass_arguments && !Settings::values.program_args.GetValue().empty()) {
+    if (pass_arguments) {
         const auto arg_data{Settings::values.program_args.GetValue()};
 
         codeset.DataSegment().size += NSO_ARGUMENT_DATA_ALLOCATION_SIZE;
@@ -180,6 +239,7 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
 
     // Apply patches if necessary
     const auto name = nso_file.GetName();
+    bool frame_rate_unlocked = false;
     if (pm && (pm->HasNSOPatch(nso_header.build_id, name) || Settings::values.dump_nso)) {
         std::span<u8> patchable_section(codeset.memory.data() + module_start, codeset.memory.size() - module_start);
         std::vector<u8> pi_header(sizeof(NSOHeader) + patchable_section.size());
@@ -187,9 +247,21 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         std::memcpy(pi_header.data() + sizeof(NSOHeader), patchable_section.data(),
                     patchable_section.size());
 
-        pi_header = pm->PatchNSO(pi_header, name);
+        pi_header = pm->PatchNSO(pi_header, name, &frame_rate_unlocked);
 
         std::copy(pi_header.begin() + sizeof(NSOHeader), pi_header.end(), patchable_section.data());
+    }
+
+    // The signed Nextendo patch fixed for this launch, applied after mods as citron-nextendo does.
+    static_assert(sizeof(NSOHeader) == Common::NplnPatchCatalog::NsoHeaderSize);
+    if (pm) {
+        const auto build_id = Common::HexToString(nso_header.build_id);
+        if (const auto applied = Common::NplnPatchCatalog::Apply(
+                pm->GetTitleID(), build_id, name,
+                std::span(codeset.memory).subspan(module_start))) {
+            LOG_INFO(Loader, "Nextendo: NPLN patch {} v{} applied to {} build {}", applied->id,
+                     applied->version, name, build_id);
+        }
     }
 
     // Mario Kart World selects a 1- or 2-vblank frame mode in its main loop. Force its native
@@ -457,6 +529,9 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         process.SetMkwFrameModeAddress(
             mkw_mode_word_offset != 0 ? load_base + module_start + mkw_mode_word_offset : 0);
     }
+    if (frame_rate_unlocked) {
+        process.SetFrameRateUnlocked(true);
+    }
     if (frame_interval_offset != 0) {
         process.SetFrameIntervalAddresses(load_base + module_start + frame_interval_offset,
                                           load_base + module_start + frame_interval_source_offset);
@@ -487,6 +562,17 @@ AppLoader_NSO::LoadResult AppLoader_NSO::Load(Kernel::KProcess& process, Core::S
 
 ResultStatus AppLoader_NSO::ReadNSOModules(Modules& out_modules) {
     out_modules = this->modules;
+    return ResultStatus::Success;
+}
+
+ResultStatus AppLoader_NSO::ReadMainBuildId(Core::System& system,
+                                            std::array<u8, 0x20>& build_id) {
+    NSOHeader header{};
+    if (!file || file->ReadObject(&header) != sizeof(header) ||
+        header.magic != Common::MakeMagic('N', 'S', 'O', '0')) {
+        return ResultStatus::ErrorLoadingNSO;
+    }
+    build_id = header.build_id;
     return ResultStatus::Success;
 }
 

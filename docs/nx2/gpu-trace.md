@@ -2,6 +2,12 @@
 
 A GPU trace (`.lxtrace`) holds what the emulated GPU consumed over a window, in the order it consumed it, after a snapshot of the GPU state at the window's start. It records guest inputs (command words, guest memory, engine registers, maps and presents), never host Vulkan calls, so a replay runs the shader translation, the caches and the Vulkan backend of the build that replays it.
 
+Traces can contain game code, shaders, textures, buffers and personal information. Do not publish
+game-derived traces or add them to the repository. Ask a maintainer for handling instructions
+before sharing the minimum necessary material, and share only what you have permission to
+disclose. A private transfer does not by itself establish permission to redistribute game data.
+Use synthetic traces for public examples and tests.
+
 ## Replay
 
 ```sh

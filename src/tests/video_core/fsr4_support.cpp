@@ -27,6 +27,16 @@ TEST_CASE("FSR 4 is offered on RDNA 2 and newer Radeons on AMD's driver", "[vide
     CHECK_FALSE(IsFsr4CapableGpu(0x8086, true, "Intel(R) Arc(TM) A770 Graphics"));
 }
 
+TEST_CASE("FSR 4 descriptor gate accepts enabled Vulkan 1.2 core buffer device address",
+          "[video_core][fsr4]") {
+    using VideoCommon::HasFsr4PortDescriptorFeatures;
+    // VK_KHR_buffer_device_address may be absent because Vulkan 1.2 provides the core feature.
+    CHECK(HasFsr4PortDescriptorFeatures(true, true, true));
+    CHECK_FALSE(HasFsr4PortDescriptorFeatures(false, true, true));
+    CHECK_FALSE(HasFsr4PortDescriptorFeatures(true, false, true));
+    CHECK_FALSE(HasFsr4PortDescriptorFeatures(true, true, false));
+}
+
 TEST_CASE("The fsr4-vk FSR 4 port runs on RDNA 2 and newer Radeons on RADV with its features",
           "[video_core][fsr4]") {
     using VideoCommon::CheckFsr4Port;

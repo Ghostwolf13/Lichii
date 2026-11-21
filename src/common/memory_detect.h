@@ -55,9 +55,12 @@ struct ProcessMemoryUsage {
 
 [[nodiscard]] ProcessMemoryUsage GetProcessMemoryUsage();
 
-/// Commit the system can still hand out, in bytes: its commit limit (RAM plus the page files)
-/// minus what is committed. No value where the host reports no such limit (anything but Windows).
-[[nodiscard]] std::optional<u64> GetSystemCommitRoom();
+/// Page faults this process has taken since it started, soft and hard, in every thread.
+[[nodiscard]] u64 GetProcessPageFaults();
+
+/// Commit this process can still take, in bytes: the system's remaining commit, or less under
+/// a job object's commit limit. No value if the query fails or the host is not Windows.
+[[nodiscard]] std::optional<u64> GetProcessCommitRoom();
 
 /// Physical memory the host can hand out now without paging anything out (0 when unknown).
 [[nodiscard]] u64 GetAvailablePhysicalMemory();

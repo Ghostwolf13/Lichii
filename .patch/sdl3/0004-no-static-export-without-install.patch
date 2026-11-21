@@ -1,0 +1,11 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -4170,7 +4170,7 @@
+   export(TARGETS SDL3-shared NAMESPACE "SDL3::" FILE "SDL3sharedTargets.cmake")
+ endif()
+ 
+-if(SDL_STATIC)
++if(SDL_STATIC AND SDL_INSTALL)
+   export(TARGETS SDL3-static NAMESPACE "SDL3::" FILE "SDL3staticTargets.cmake")
+ endif()
+ 

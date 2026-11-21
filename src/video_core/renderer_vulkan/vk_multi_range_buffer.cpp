@@ -172,19 +172,9 @@ void MultiRangeBufferCache::RetireEntry(Scheduler& scheduler, Entry& entry) {
     if (!entry.sparse_handle && !entry.gathered) {
         return;
     }
-    if (retired.size() == retired.capacity()) {
-        DrainRetired(scheduler);
-    }
-    if (retired.size() == retired.capacity()) {
-        u64 oldest = retired.front().tick;
-        for (const Retired& item : retired) {
-            if (item.tick < oldest) {
-                oldest = item.tick;
-            }
-        }
-        scheduler.Wait(oldest);
-        DrainRetired(scheduler);
-    }
+    // Grows past MAX_RETIRED instead of waiting for the oldest: this runs while a draw binds its
+    // buffers, and a wait on the current tick submits it, leaving the draw's earlier bindings in
+    // the submitted command buffer and its stamped buffers free before the draw reads them.
     retired.push_back(Retired{
         .handle = std::move(entry.sparse_handle),
         .gathered = std::move(entry.gathered),
@@ -207,6 +197,14 @@ void MultiRangeBufferCache::DrainRetired(Scheduler& scheduler) {
 }
 
 void MultiRangeBufferCache::TickFrame(Scheduler& scheduler) {
+    ++frame;
+    erase_if(entries, [&](auto& item) {
+        if (frame - item.second.last_used <= MAX_UNUSED_FRAMES) {
+            return false;
+        }
+        RetireEntry(scheduler, item.second);
+        return true;
+    });
     DrainRetired(scheduler);
 }
 
@@ -225,6 +223,7 @@ MultiRangeRef MultiRangeBufferCache::Get(const Device& device, Scheduler& schedu
     const auto it = entries.find(key);
     if (it != entries.end() && it->second.geometry == geometry && it->second.size == total) {
         Entry& entry = it->second;
+        entry.last_used = frame;
         if (entry.content != content) {
             entry.content = content;
             entry.dirty = true;
@@ -252,6 +251,7 @@ MultiRangeRef MultiRangeBufferCache::Get(const Device& device, Scheduler& schedu
     entry.geometry = geometry;
     entry.content = content;
     entry.size = total;
+    entry.last_used = frame;
     entry.owners.reserve(sources.size());
     for (const MultiRangeSource& source : sources) {
         entry.owners.push_back(source.handle);
@@ -329,6 +329,7 @@ void MultiRangeBufferCache::DropOwner(Scheduler& scheduler, VkBuffer owner) {
         RetireEntry(scheduler, entry);
         it = entries.erase(it);
     }
+    DrainRetired(scheduler);
 }
 
 void MultiRangeBufferCache::Invalidate(u64 key) {

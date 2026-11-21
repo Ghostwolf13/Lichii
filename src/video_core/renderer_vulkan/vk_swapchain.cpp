@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <limits>
 #include <mutex>
 #include <string_view>
@@ -263,9 +264,12 @@ bool Swapchain::Create(
         }
         vk::Check(result);
     }
-    Destroy();
-
-    CreateSwapchain(capabilities);
+    {
+        // The present wait thread may be waiting on the old swapchain (WaitForPresent).
+        const auto use_lock = LockForUse();
+        Destroy();
+        CreateSwapchain(capabilities);
+    }
     CreateSemaphores();
     is_suboptimal = false;
 
@@ -274,10 +278,23 @@ bool Swapchain::Create(
     return true;
 }
 
-bool Swapchain::AcquireNextImage(bool may_flush) {
-    const VkResult result = device.GetLogical().AcquireNextImageKHR(
-        *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
-        VK_NULL_HANDLE, &image_index);
+std::unique_lock<std::mutex> Swapchain::LockForUse() {
+    // WaitForPresent takes the lock again right after each of its waits: it lets this thread in
+    // first, so a present or an acquire waits for one of those waits to end at most.
+    use_requests.fetch_add(1, std::memory_order_acq_rel);
+    std::unique_lock lock{use_mutex};
+    use_requests.fetch_sub(1, std::memory_order_acq_rel);
+    use_cv.notify_one();
+    return lock;
+}
+
+bool Swapchain::AcquireNextImage(bool may_flush, u32 game_frame_presents) {
+    const VkResult result = [this] {
+        const auto use_lock = LockForUse();
+        return device.GetLogical().AcquireNextImageKHR(
+            *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
+            VK_NULL_HANDLE, &image_index);
+    }();
     switch (result) {
     case VK_SUCCESS:
         break;
@@ -299,22 +316,22 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
         return true;
     }
 
-    const auto wait_with_frame_pacing = [this, may_flush] {
+    const auto wait_with_frame_pacing = [this, may_flush, game_frame_presents] {
     switch (Settings::values.frame_pacing_mode.GetValue()) {
     case Settings::FramePacingMode::Target_Auto:
         scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
         break;
     case Settings::FramePacingMode::Target_30:
-        scheduler.Wait(resource_ticks[image_index], 30.0, may_flush);
+        scheduler.Wait(resource_ticks[image_index], 30.0, may_flush, game_frame_presents);
         break;
     case Settings::FramePacingMode::Target_60:
-        scheduler.Wait(resource_ticks[image_index], 60.0, may_flush);
+        scheduler.Wait(resource_ticks[image_index], 60.0, may_flush, game_frame_presents);
         break;
     case Settings::FramePacingMode::Target_90:
-        scheduler.Wait(resource_ticks[image_index], 90.0, may_flush);
+        scheduler.Wait(resource_ticks[image_index], 90.0, may_flush, game_frame_presents);
         break;
     case Settings::FramePacingMode::Target_120:
-        scheduler.Wait(resource_ticks[image_index], 120.0, may_flush);
+        scheduler.Wait(resource_ticks[image_index], 120.0, may_flush, game_frame_presents);
         break;
     }
     };
@@ -336,11 +353,28 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
     return false;
 }
 
-void Swapchain::Present(VkSemaphore render_semaphore) {
+bool Swapchain::Present(VkSemaphore render_semaphore, u64 present_id) {
     const auto present_queue{device.GetPresentQueue()};
+    const VkPresentIdKHR present_id_info{
+        .sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR,
+        .pNext = nullptr,
+        .swapchainCount = 1,
+        .pPresentIds = &present_id,
+    };
+    const VkPresentId2KHR present_id2_info{
+        .sType = VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR,
+        .pNext = nullptr,
+        .swapchainCount = 1,
+        .pPresentIds = &present_id,
+    };
+    const void* id_info = nullptr;
+    if (present_ids && present_id != 0) {
+        id_info = present_ids2 ? static_cast<const void*>(&present_id2_info)
+                               : static_cast<const void*>(&present_id_info);
+    }
     const VkPresentInfoKHR present_info{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .pNext = nullptr,
+        .pNext = id_info,
         .waitSemaphoreCount = render_semaphore ? 1U : 0U,
         .pWaitSemaphores = &render_semaphore,
         .swapchainCount = 1,
@@ -348,12 +382,16 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
         .pImageIndices = &image_index,
         .pResults = nullptr,
     };
+    const auto use_lock = LockForUse();
     std::scoped_lock lock{scheduler.submit_mutex};
+    bool accepted = false;
     switch (const VkResult result = present_queue.Present(present_info)) {
     case VK_SUCCESS:
+        accepted = true;
         break;
     case VK_SUBOPTIMAL_KHR:
         LOG_DEBUG(Render_Vulkan, "Suboptimal swapchain");
+        accepted = true;
         break;
     case VK_ERROR_OUT_OF_DATE_KHR:
         is_outdated = true;
@@ -369,6 +407,33 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
     if (frame_index >= image_count) {
         frame_index = 0;
     }
+    return accepted;
+}
+
+VkResult Swapchain::WaitForPresent(u64 wanted_generation, u64 present_id, u64 timeout_ns) {
+    std::unique_lock lock{use_mutex};
+    use_cv.wait(lock, [this] { return use_requests.load(std::memory_order_acquire) == 0; });
+    if (!swapchain || generation.load(std::memory_order_relaxed) != wanted_generation) {
+        return VK_ERROR_OUT_OF_DATE_KHR;
+    }
+    if (!present_ids || present_wait_stalled) {
+        return VK_ERROR_EXTENSION_NOT_PRESENT;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const VkResult result =
+        present_ids2 ? device.GetLogical().WaitForPresent2KHR(*swapchain, present_id, timeout_ns)
+                     : device.GetLogical().WaitForPresentKHR(*swapchain, present_id, timeout_ns);
+    // Presents and acquires wait for this lock, so a driver that ignores the timeout would stall
+    // them at every present: one such wait ends the present waits.
+    constexpr std::chrono::milliseconds Overrun{250};
+    if (std::chrono::steady_clock::now() - start > std::chrono::nanoseconds{timeout_ns} + Overrun) {
+        LOG_ERROR(Render_Vulkan,
+                  "A present wait of {} ns took over {} ms: the driver ignores the timeout, "
+                  "present waits are off",
+                  timeout_ns, Overrun.count());
+        present_wait_stalled = true;
+    }
+    return result;
 }
 
 void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
@@ -401,6 +466,13 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
 #endif
     present_mode =
         ChooseSwapPresentMode(has_imm, has_mailbox, has_fifo_relaxed, surface_format.format);
+    // Present ids only when asked for (RequestPresentIds), and not with DLSS-G loaded: Streamline
+    // makes the swapchain and paces its presents itself.
+    const bool with_ids = present_ids_requested && !FrameGenLoaded() &&
+                          !FrameGenPresents(surface_format.format);
+    present_ids2 = with_ids && !present_ids2_failed && SurfaceSupportsPresentWait2();
+    present_ids = present_ids2 || (with_ids && device.IsKhrPresentWaitEnabled());
+    present_ids_refused = present_ids_requested && !present_ids;
 
     u32 requested_image_count{capabilities.minImageCount + 1};
     // Ensure Triple buffering if possible.
@@ -469,12 +541,41 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
         format_list.pNext = std::exchange(swapchain_ci.pNext, &format_list);
         swapchain_ci.flags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
     }
+    if (present_ids2) {
+        swapchain_ci.flags |=
+            VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR | VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR;
+    }
+    const auto create = [this, &swapchain_ci] {
+        try {
+            swapchain = device.GetLogical().CreateSwapchainKHR(swapchain_ci);
+        } catch (const vk::Exception& exception) {
+            const VkResult result = exception.GetResult();
+            if (!present_ids2 || result == VK_ERROR_SURFACE_LOST_KHR ||
+                result == VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) {
+                throw;
+            }
+            // Keep presenting on a driver that refuses the second versions' swapchain: this
+            // surface gets the first versions, or no ids.
+            LOG_WARNING(Render_Vulkan,
+                        "No swapchain with VK_KHR_present_id2/VK_KHR_present_wait2 ({}), creating "
+                        "it without them",
+                        exception.what());
+            present_ids2_failed = true;
+            present_ids2 = false;
+            present_ids = device.IsKhrPresentWaitEnabled();
+            present_ids_refused = !present_ids;
+            swapchain_ci.flags &= ~static_cast<VkSwapchainCreateFlagsKHR>(
+                VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR |
+                VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR);
+            swapchain = device.GetLogical().CreateSwapchainKHR(swapchain_ci);
+        }
+    };
     // Request the size again to reduce the possibility of a TOCTOU race condition.
     const auto updated_capabilities = physical_device.GetSurfaceCapabilitiesKHR(VkSurfaceKHR(surface));
     swapchain_ci.imageExtent = ChooseSwapExtent(updated_capabilities, width, height);
     // Don't add code within this and the swapchain creation.
     try {
-        swapchain = device.GetLogical().CreateSwapchainKHR(swapchain_ci);
+        create();
     } catch ([[maybe_unused]] const vk::Exception& exception) {
         // A lost surface or a window still in use is transient: the present loop retries those.
         const VkResult result = exception.GetResult();
@@ -491,7 +592,7 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
         present_mode =
             ChooseSwapPresentMode(has_imm, has_mailbox, has_fifo_relaxed, surface_format.format);
         swapchain_ci.presentMode = present_mode;
-        swapchain = device.GetLogical().CreateSwapchainKHR(swapchain_ci);
+        create();
     }
 
     extent = swapchain_ci.imageExtent;
@@ -519,6 +620,7 @@ void Swapchain::CreateSemaphores() {
 }
 
 void Swapchain::Destroy() {
+    generation.fetch_add(1, std::memory_order_acq_rel);
     frame_index = 0;
     present_semaphores.clear();
     render_semaphores.clear();
@@ -548,6 +650,29 @@ void Swapchain::SetHdrMetadata(u16 peak_luminance, u16 reference_white) const {
     device.GetLogical().SetHdrMetadataEXT(*swapchain, metadata);
     LOG_INFO(Render_Vulkan, "HDR10 metadata: peak {} nits (reference white {} nits)",
              peak_luminance, reference_white);
+}
+
+bool Swapchain::SurfaceSupportsPresentWait2() const {
+    if (!device.IsKhrPresentWait2Enabled()) {
+        return false;
+    }
+    VkSurfaceCapabilitiesPresentWait2KHR wait_capabilities{
+        .sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR,
+        .pNext = nullptr,
+        .presentWait2Supported = VK_FALSE,
+    };
+    VkSurfaceCapabilitiesPresentId2KHR id_capabilities{
+        .sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_ID_2_KHR,
+        .pNext = &wait_capabilities,
+        .presentId2Supported = VK_FALSE,
+    };
+    VkSurfaceCapabilities2KHR capabilities{
+        .sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR,
+        .pNext = &id_capabilities,
+        .surfaceCapabilities = {},
+    };
+    return device.GetPhysical().GetSurfaceCapabilities2KHR(VkSurfaceKHR(surface), capabilities) &&
+           id_capabilities.presentId2Supported && wait_capabilities.presentWait2Supported;
 }
 
 bool Swapchain::NeedsPresentModeUpdate() const {

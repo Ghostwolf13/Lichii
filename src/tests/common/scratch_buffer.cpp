@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <new>
 #include <span>
+#include <utility>
 #include <catch2/catch_test_macros.hpp>
 #include "common/common_types.h"
 #include "common/scratch_buffer.h"
@@ -67,6 +69,33 @@ TEST_CASE("ScratchBuffer: resize_destructive Shrink", "[common]") {
     for (size_t i = 0; i < payload.size(); ++i) {
         REQUIRE(buf[i] == payload[i]);
     }
+}
+
+TEST_CASE("ScratchBuffer: failed destructive growth leaves a reusable buffer", "[common]") {
+    static bool fail_allocation{};
+    struct Element {
+        static void* operator new[](size_t size) {
+            if (std::exchange(fail_allocation, false)) {
+                throw std::bad_alloc{};
+            }
+            return ::operator new[](size);
+        }
+
+        u8 value;
+    };
+
+    ScratchBuffer<Element> buf(16);
+    fail_allocation = true;
+    REQUIRE_THROWS_AS(buf.resize_destructive(32), std::bad_alloc);
+    REQUIRE(buf.capacity() == 0U);
+    REQUIRE(buf.size() == 0U);
+    REQUIRE(buf.data() == nullptr);
+
+    buf.resize_destructive(32);
+    REQUIRE(buf.capacity() == 32U);
+    REQUIRE(buf.size() == 32U);
+    buf[31].value = 42;
+    REQUIRE(buf[31].value == 42);
 }
 
 TEST_CASE("ScratchBuffer: resize Grow u8", "[common]") {

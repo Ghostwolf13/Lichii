@@ -243,18 +243,8 @@ bool IsFastmemEnabled() {
 
 static bool is_nce_enabled = false;
 
-void SetNceEnabled(bool is_39bit) {
-    const bool is_nce_selected = values.cpu_backend.GetValue() == CpuBackend::Nce;
-    if (is_nce_selected && !IsFastmemEnabled()) {
-        LOG_WARNING(Common, "Fastmem is required to natively execute code in a performant manner, "
-                            "falling back to Dynarmic");
-    }
-    if (is_nce_selected && !is_39bit) {
-        LOG_WARNING(
-            Common,
-            "Program does not utilize 39-bit address space, unable to natively execute code");
-    }
-    is_nce_enabled = IsFastmemEnabled() && is_nce_selected && is_39bit;
+void SetNceEnabled(bool enabled) {
+    is_nce_enabled = enabled;
 }
 
 bool IsNceEnabled() {
@@ -279,6 +269,10 @@ void SetCurrentProgramIsSwitch2(bool is_switch2) {
 
 bool ReactiveFlushing() {
     return values.use_reactive_flushing.GetValue() || values.force_reactive_flushing;
+}
+
+bool SkipCpuInnerInvalidation() {
+    return values.skip_cpu_inner_invalidation.GetValue() && !values.keep_cpu_inner_invalidation;
 }
 
 bool CurrentProgramIsSwitch2() {

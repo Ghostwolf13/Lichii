@@ -164,12 +164,16 @@ static_assert(sizeof(TextureHandle) == 4, "TextureHandle has wrong size");
     }
 }
 
+[[nodiscard]] constexpr bool UsesHeaderByteOffsetHandles(bool native_tiling, u64 program_id) {
+    return native_tiling && program_id == 0x04008E001F098000ULL;
+}
+
 /// Some Switch 2 bindless handles (Switch Sports' scenery, read from a uniform register) hold
 /// the texture header's byte offset in the pool, index * 32, where the handle normally has the
-/// index. Read it as an offset only on Switch 2 (native tiling), when the plain index falls past
+/// index. Read it as an offset only for Switch Sports, when the plain index falls past
 /// the pool and the offset lands inside it, so handles that already resolve are left alone.
-[[nodiscard]] constexpr u32 TextureHeaderIndex(u32 index, u32 limit, bool switch2) {
-    if (switch2 && index > limit && index % 32 == 0 && index / 32 <= limit) {
+[[nodiscard]] constexpr u32 TextureHeaderIndex(u32 index, u32 limit, bool byte_offsets) {
+    if (byte_offsets && index > limit && index % 32 == 0 && index / 32 <= limit) {
         return index / 32;
     }
     return index;

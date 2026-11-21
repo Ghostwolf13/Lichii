@@ -44,6 +44,7 @@ void ChannelSetupCaches<P>::CreateChannel(struct Tegra::Control::ChannelState& c
         .ref_count = 1,
         .storage_id = address_spaces.size(),
         .gpu_memory = channel.memory_manager,
+        .owner = channel.memory_manager->weak_from_this(),
     };
     address_spaces.emplace(channel.memory_manager->GetID(), new_gpu_mem_ref);
     OnGPUASRegister(channel.memory_manager->GetID());

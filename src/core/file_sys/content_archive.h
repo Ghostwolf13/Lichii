@@ -7,6 +7,7 @@
 
 #include <array>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -90,13 +91,23 @@ public:
     VirtualDir GetLogoPartition() const;
 
 private:
-    std::vector<VirtualDir> dirs;
-    std::vector<VirtualFile> files;
+    /// A section's storage is opened on first use: reaching the end of a solid NCZ means decoding
+    /// everything before it.
+    struct Section {
+        s32 index{};
+        bool partition{};
+        bool opened{};
+        VirtualFile storage;
+        VirtualDir partition_fs;
+    };
 
-    VirtualFile romfs = nullptr;
-    VirtualDir exefs = nullptr;
-    VirtualDir logo = nullptr;
+    void OpenSection(Section& section) const;
+
+    mutable std::mutex sections_mutex;
+    mutable std::vector<Section> sections;
+
     VirtualFile file;
+    std::shared_ptr<NcaReader> base_reader;
 
     Loader::ResultStatus status{};
 

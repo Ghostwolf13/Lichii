@@ -60,6 +60,7 @@ public:
     ResultStatus ReadLogo(std::vector<u8>& buffer) override;
 
     ResultStatus ReadNSOModules(Modules& modules) override;
+    ResultStatus ReadMainBuildId(Core::System& system, std::array<u8, 0x20>& build_id) override;
 
 private:
     std::unique_ptr<FileSys::NSP> nsp;

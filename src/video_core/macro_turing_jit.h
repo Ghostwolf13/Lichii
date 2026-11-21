@@ -41,6 +41,7 @@ public:
         Word consumed;
         Word params_size;
         Word fail_pc;
+        Word last_pc;
         std::uint8_t end_next;
         std::uint8_t stopped;
         std::uint8_t cancel_end;
@@ -91,23 +92,25 @@ public:
     }
 
     /// Compiles `code` (3 words per instruction) when it differs from what was compiled.
-    void Prepare(std::span<const Word> code, std::uint64_t generation) {
+    void Prepare(std::span<const Word> code, std::uint64_t generation, bool trace_pc = false) {
+        auto& [program, compiled_generation] = programs[trace_pc];
         if (program && generation == compiled_generation) {
             return;
         }
-        program = std::make_unique<Program>(code);
+        program = std::make_unique<Program>(code, trace_pc);
         compiled_generation = generation;
     }
 
     template <typename Read, typename Emit>
     Result Execute(Word start, std::vector<Word>& parameters, std::span<Word> data_ram, Read read,
-                   Emit emit) {
+                   Emit emit, Word* last_pc = nullptr) {
         State state;
         state.regs.fill(0);
         state.carry = state.method = state.increment = 0;
         state.loop_count = state.loop_start = state.loop_end = 0;
         state.consumed = 0;
         state.fail_pc = 0;
+        state.last_pc = ~0U;
         state.end_next = state.stopped = state.cancel_end = 0;
         state.start = start;
         state.steps = 1000000;
@@ -119,7 +122,10 @@ public:
         state.user = &thunks;
         state.emit = &Thunks<Read, Emit>::CallEmit;
         state.read = &Thunks<Read, Emit>::CallRead;
-        const Word error = program->entry(&state);
+        const Word error = programs[last_pc != nullptr].program->entry(&state);
+        if (last_pc != nullptr) {
+            *last_pc = state.last_pc;
+        }
         if (error == None) {
             return {true, state.fail_pc, state.consumed, {}};
         }
@@ -144,8 +150,8 @@ private:
     };
 
     struct Program : Xbyak::CodeGenerator {
-        explicit Program(std::span<const Word> code)
-            : Xbyak::CodeGenerator(1 << 20, Xbyak::AutoGrow) {
+        explicit Program(std::span<const Word> code, bool trace_pc_)
+            : Xbyak::CodeGenerator(1 << 20, Xbyak::AutoGrow), trace_pc{trace_pc_} {
             Generate(code);
             ready();
             entry = getCode<Word (*)(State*)>();
@@ -187,6 +193,9 @@ private:
 
             for (Word pc = 0; pc < count; ++pc) {
                 L(labels[pc]);
+                if (trace_pc) {
+                    mov(dword[st + offsetof(State, last_pc)], pc);
+                }
                 Instruction(pc, count, decoded[pc]);
             }
 
@@ -208,6 +217,12 @@ private:
             ret();
             const auto fail_with = [&](Xbyak::Label& label, Word error) {
                 L(label);
+                if (trace_pc) {
+                    if (error != OutsideCode && error != StepLimit) {
+                        mov(eax, dword[st + offsetof(State, last_pc)]);
+                    }
+                    mov(dword[st + offsetof(State, fail_pc)], eax);
+                }
                 mov(eax, error);
                 jmp(leave, T_NEAR);
             };
@@ -444,6 +459,9 @@ private:
             } else if (pc + 1 < count) {
                 jmp(labels[pc + 1], T_NEAR);
             } else {
+                if (trace_pc) {
+                    mov(eax, count);
+                }
                 jmp(fail_outside, T_NEAR);
             }
         }
@@ -650,13 +668,17 @@ private:
 
         std::vector<Xbyak::Label> labels;
         std::vector<bool> loop_end, after_end;
+        const bool trace_pc;
         Xbyak::Label table, dispatch, success, leave;
         Xbyak::Label fail_underflow, fail_source, fail_destination, fail_extended, fail_merge,
             fail_loop, fail_dread, fail_dwrite, fail_output, fail_emit, fail_outside, fail_steps;
     };
 
-    std::unique_ptr<Program> program;
-    std::uint64_t compiled_generation{~std::uint64_t{0}};
+    struct Compiled {
+        std::unique_ptr<Program> program;
+        std::uint64_t generation{};
+    };
+    std::array<Compiled, 2> programs;
 };
 
 } // namespace Tegra

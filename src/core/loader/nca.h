@@ -53,10 +53,13 @@ public:
     ResultStatus ReadLogo(std::vector<u8>& buffer) override;
 
     ResultStatus ReadNSOModules(Modules& modules) override;
+    ResultStatus ReadMainBuildId(Core::System& system, std::array<u8, 0x20>& build_id) override;
 
     u64 GetProgramId() const;
 
 private:
+    FileSys::VirtualDir ResolveExeFS(Core::System& system) const;
+
     std::unique_ptr<FileSys::NCA> nca;
     u64 update_only_program_id{};
     std::unique_ptr<FileSys::NACP> nacp;

@@ -28,13 +28,28 @@ bool DecompressBLZ(std::vector<u8>& data) {
     std::memcpy(&init_index, data.data() + data_size + 0x4, sizeof(u32));
     std::memcpy(&additional_size, data.data() + data_size + 0x8, sizeof(u32));
 
+    // The footer's sizes come from the file: keep every index inside the section.
+    if (compressed_size > data.size() || init_index > compressed_size) {
+        return false;
+    }
+
+    // Added in 64 bits: two u32s from the file can wrap. BLZ turns at most 17 input bytes into
+    // 144 output bytes, so a valid stream never asks for more than nine times its size.
+    const u64 out_size = u64{compressed_size} + additional_size;
+    if (out_size > u64{compressed_size} * 9 + 144) {
+        return false;
+    }
+
     const auto start_offset = data.size() - compressed_size;
-    data.resize(compressed_size + additional_size + start_offset);
+    data.resize(out_size + start_offset);
 
     std::size_t index = compressed_size - init_index;
-    std::size_t out_index = compressed_size + additional_size;
+    std::size_t out_index = out_size;
 
     while (out_index > 0) {
+        if (index < 1) {
+            return false;
+        }
         --index;
         auto control = data[index + start_offset];
         for (size_t i = 0; i < 8; ++i) {
@@ -66,7 +81,7 @@ bool DecompressBLZ(std::vector<u8>& data) {
                         data[out_index + j + segment_offset + start_offset];
                 }
             } else {
-                if (out_index < 1) {
+                if (out_index < 1 || index < 1) {
                     return false;
                 }
                 --out_index;
@@ -103,8 +118,20 @@ KIP::KIP(const VirtualFile& file) : status(Loader::ResultStatus::Success) {
     for (std::size_t i = 0; i < header.sections.size(); ++i) {
         auto compressed = file->ReadBytes(header.sections[i].compressed_size, offset);
         offset += header.sections[i].compressed_size;
+        // A section the file does not hold in full is a truncated KIP: ReadBytes stops at the end
+        // of the file, which used to leave a stored section shorter than its header says.
+        if (compressed.size() != header.sections[i].compressed_size) {
+            status = Loader::ResultStatus::ErrorBadKIPHeader;
+            return;
+        }
 
         if (header.sections[i].compressed_size == 0 && header.sections[i].decompressed_size != 0) {
+            // Sections 3 to 5 (.bss and two unused ones) hold no file data and nothing reads
+            // them: the loader takes the .bss size from the header. Their sizes come from the
+            // file, so do not allocate them.
+            if (i >= 3) {
+                continue;
+            }
             decompressed_sections[i] = std::vector<u8>(header.sections[i].decompressed_size);
         } else if (header.sections[i].compressed_size == header.sections[i].decompressed_size) {
             decompressed_sections[i] = std::move(compressed);
@@ -186,6 +213,14 @@ u32 KIP::GetDataOffset() const {
     return header.sections[2].offset;
 }
 
+u64 KIP::GetSize() const {
+    u64 size = sizeof(KIPHeader);
+    for (const auto& section : header.sections) {
+        size += section.compressed_size;
+    }
+    return size;
+}
+
 u32 KIP::GetBSSSize() const {
     return header.sections[3].decompressed_size;
 }
@@ -210,14 +245,18 @@ INI::INI(const VirtualFile& file) : status(Loader::ResultStatus::Success) {
         return;
     }
 
+    // The KIPs follow the header back to back. A KIP that does not parse gives no reliable size,
+    // so the ones after it cannot be found.
     u64 offset = sizeof(INIHeader);
-    for (std::size_t i = 0; i < header.kip_count; ++i) {
+    for (std::size_t i = 0; i < header.kip_count && offset < file->GetSize(); ++i) {
         const auto kip_file =
             std::make_shared<OffsetVfsFile>(file, file->GetSize() - offset, offset);
         KIP kip(kip_file);
-        if (kip.GetStatus() == Loader::ResultStatus::Success) {
-            kips.push_back(std::move(kip));
+        if (kip.GetStatus() != Loader::ResultStatus::Success) {
+            break;
         }
+        offset += kip.GetSize();
+        kips.push_back(std::move(kip));
     }
 }
 

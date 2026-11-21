@@ -13,6 +13,7 @@
 
 #include "common/nx2_sampler.h"
 #include "common/thread.h"
+#include "tests/common/temp_dir.h"
 
 // A thread spins in generated code whose unwind data doesn't describe its stack, as the JIT's
 // doesn't inside a block. Unwinding through it reaches a frame that reads its stack through
@@ -59,6 +60,8 @@ TEST_CASE("Nx2Sampler ends a stack walk at generated code", "[common][nx2_sample
     functions[1].UnwindData = 0x108;
     REQUIRE(RtlAddFunctionTable(functions, 2, base));
 
+    // Made before the thread starts: this can throw, and a joinable thread must not be unwound.
+    const Tests::TempDir directory{"lichii-nx2-sampler-test"};
     std::atomic<unsigned char> stop{0};
     std::atomic<bool> started{false};
     std::thread thread{[&] {
@@ -69,14 +72,12 @@ TEST_CASE("Nx2Sampler ends a stack walk at generated code", "[common][nx2_sample
     while (!started) {
         std::this_thread::yield();
     }
-    const auto out = std::filesystem::temp_directory_path() / "nx2_sampler_test.txt";
+    const auto out = directory / "nx2_sampler_test.txt";
     const std::string report = Nx2Sampler::Sample("Nx2SamplerTest", 0.2, out.string());
     stop = 1;
     thread.join();
     RtlDeleteFunctionTable(functions);
     VirtualFree(memory, 0, MEM_RELEASE);
-    std::filesystem::remove(out);
-    std::filesystem::remove(out.string() + ".folded");
 
     CHECK(report.find("(jit)") != std::string::npos);
 }

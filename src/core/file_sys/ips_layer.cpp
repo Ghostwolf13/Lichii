@@ -201,7 +201,9 @@ void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
             // yes, @nsobid too -- NSO Build ID Specifier
             case 'n':
             case 'N':
-                nso_build_id = Common::HexStringToArray<0x20>(fmt::format("{:0<64}", line.substr(8)));
+                // A line shorter than "@nsobid-" names no build ID.
+                nso_build_id = Common::HexStringToArray<0x20>(
+                    fmt::format("{:0<64}", line.substr(std::min<size_t>(8, line.size()))));
                 break;
             // @stop
             case 's':
@@ -221,7 +223,10 @@ void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
             case 'f':
             case 'F': {
                 if (line.starts_with("@flag offset_shift")) {
-                    offset_shift = std::strtoll(line.data() + 19, nullptr, 0);  // Offset Shift Flag
+                    // Offset Shift Flag. The line is not null-terminated: copy the value so
+                    // strtoll stops at its end.
+                    const std::string shift{line.substr(std::min<size_t>(19, line.size()))};
+                    offset_shift = std::strtoll(shift.c_str(), nullptr, 0);
                 } else if (line.starts_with("@flag print_values")) {
                     //print_values = true; // Force printing of applied values
                 }

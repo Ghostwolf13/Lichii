@@ -58,6 +58,9 @@ public:
 
     void ApplyConfiguration();
 
+    /// Drop the controller edits that were not applied; the Controls tab changes them live.
+    void RestoreInputConfiguration();
+
 private slots:
     void OnLanguageChanged(const QString& locale);
 

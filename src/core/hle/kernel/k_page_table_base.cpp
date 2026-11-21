@@ -6,6 +6,9 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
+#ifdef HAS_NCE
+#include "core/device_memory.h"
+#endif
 #include "core/hle/kernel/k_address_space_info.h"
 #include "core/hle/kernel/k_page_table_base.h"
 #include "core/hle/kernel/k_scoped_resource_reservation.h"
@@ -109,6 +112,12 @@ Result FlushDataCache(AddressType addr, u64 size) {
 }
 
 constexpr Common::MemoryPermission ConvertToMemoryPermission(KMemoryPermission perm) {
+#ifdef HAS_HYPERVISOR
+    if (True(perm & KMemoryPermission::NotMapped)) {
+        return {};
+    }
+    perm &= KMemoryPermission::UserMask;
+#endif
     Common::MemoryPermission perms{};
     if (True(perm & KMemoryPermission::UserRead)) {
         perms |= Common::MemoryPermission::Read;
@@ -116,7 +125,7 @@ constexpr Common::MemoryPermission ConvertToMemoryPermission(KMemoryPermission p
     if (True(perm & KMemoryPermission::UserWrite)) {
         perms |= Common::MemoryPermission::Write;
     }
-#ifdef HAS_NCE
+#if defined(HAS_NCE) || defined(HAS_HYPERVISOR)
     if (True(perm & KMemoryPermission::UserExecute)) {
         perms |= Common::MemoryPermission::Execute;
     }
@@ -200,11 +209,27 @@ Result KPageTableBase::InitializeForKernel(bool is_64_bit, KVirtualAddress start
                                                m_memory_block_slab_manager));
 }
 
-Result KPageTableBase::InitializeForProcess(Svc::CreateProcessFlag as_type, bool enable_aslr, bool enable_das_merge, bool from_back, KMemoryManager::Pool pool, KProcessAddress code_address, size_t code_size, KSystemResource* system_resource, KResourceLimit* resource_limit, Core::Memory::Memory& memory, KProcessAddress aslr_space_start) {
+Result KPageTableBase::InitializeForProcess(Svc::CreateProcessFlag as_type, bool enable_aslr, bool enable_das_merge, bool from_back, KMemoryManager::Pool pool, KProcessAddress code_address, size_t code_size, KSystemResource* system_resource, KResourceLimit* resource_limit, Core::Memory::Memory& memory, KProcessAddress aslr_space_start, u64 switch2_program_id) {
     // Calculate region extents.
     const size_t as_width = GetAddressSpaceWidth(as_type);
     const KProcessAddress start = 0;
     const KProcessAddress end = (1ULL << as_width);
+    KProcessAddress placement_end = end;
+#ifdef HAS_NCE
+    m_uses_native_execution = aslr_space_start != 0;
+    if (m_uses_native_execution) {
+        const auto& buffer = m_system.DeviceMemory().buffer;
+        const auto base = GetInteger(aslr_space_start);
+        R_UNLESS(as_width == 39 && buffer.IsDirectMapped() &&
+                     base == reinterpret_cast<u64>(buffer.VirtualBasePointer()) &&
+                     base < GetInteger(end) && buffer.VirtualSize() <= GetInteger(end) - base,
+                 ResultInvalidMemoryRegion);
+        placement_end = aslr_space_start + buffer.VirtualSize();
+        R_UNLESS(code_address >= aslr_space_start && code_address < placement_end &&
+                     code_size <= GetInteger(placement_end) - GetInteger(code_address),
+                 ResultInvalidMemoryRegion);
+    }
+#endif
 
     // Validate the region.
     ASSERT(start <= code_address);
@@ -216,7 +241,8 @@ Result KPageTableBase::InitializeForProcess(Svc::CreateProcessFlag as_type, bool
         return KAddressSpaceInfo::GetAddressSpaceStart(m_address_space_width, type);
     };
     auto GetSpaceSize = [&](KAddressSpaceInfo::Type type) {
-        return KAddressSpaceInfo::GetAddressSpaceSize(m_address_space_width, type);
+        return KAddressSpaceInfo::GetAddressSpaceSize(m_address_space_width, type,
+                                                      switch2_program_id);
     };
 
     // Set our bit width and heap/alias sizes.
@@ -244,6 +270,11 @@ Result KPageTableBase::InitializeForProcess(Svc::CreateProcessFlag as_type, bool
         m_code_region_start = m_address_space_start + aslr_space_start +
                               GetSpaceStart(KAddressSpaceInfo::Type::Map39Bit);
         m_code_region_end = m_code_region_start + GetSpaceSize(KAddressSpaceInfo::Type::Map39Bit);
+#ifdef HAS_NCE
+        if (m_uses_native_execution) {
+            m_code_region_end = placement_end;
+        }
+#endif
         m_alias_code_region_start = m_code_region_start;
         m_alias_code_region_end = m_code_region_end;
         process_code_start = Common::AlignDown(GetInteger(code_address), RegionAlignment);
@@ -278,13 +309,19 @@ Result KPageTableBase::InitializeForProcess(Svc::CreateProcessFlag as_type, bool
     // Determine the region we can place our undetermineds in.
     KProcessAddress alloc_start;
     size_t alloc_size;
+#ifdef HAS_NCE
+    if (m_uses_native_execution) {
+        R_UNLESS(process_code_start >= m_code_region_start && process_code_end <= placement_end,
+                 ResultInvalidMemoryRegion);
+    }
+#endif
     if ((GetInteger(process_code_start) - GetInteger(m_code_region_start)) >=
-        (GetInteger(end) - GetInteger(process_code_end))) {
+        (GetInteger(placement_end) - GetInteger(process_code_end))) {
         alloc_start = m_code_region_start;
         alloc_size = GetInteger(process_code_start) - GetInteger(m_code_region_start);
     } else {
         alloc_start = process_code_end;
-        alloc_size = GetInteger(end) - GetInteger(process_code_end);
+        alloc_size = GetInteger(placement_end) - GetInteger(process_code_end);
     }
 
     // FW 18+: Apply extra region size calculations for already available region size
@@ -5752,6 +5789,9 @@ Result KPageTableBase::Operate(PageLinkedList* page_list, KProcessAddress virt_a
     case OperationType::Map: {
         ASSERT(virt_addr != 0);
         ASSERT(Common::IsAligned(GetInteger(virt_addr), PageSize));
+#ifdef HAS_NCE
+        R_UNLESS(this->ContainsNativeMapping(virt_addr, num_pages), ResultInvalidMemoryRegion);
+#endif
         m_memory->MapMemoryRegion(m_impl, virt_addr, num_pages * PageSize, phys_addr,
                                   ConvertToMemoryPermission(properties.perm), false);
 
@@ -5795,6 +5835,9 @@ Result KPageTableBase::Operate(PageLinkedList* page_list, KProcessAddress virt_a
     case OperationType::MapFirstGroup:
     case OperationType::MapFirstGroupPhysical: {
         const bool separate_heap = operation == OperationType::MapFirstGroupPhysical;
+#ifdef HAS_NCE
+        R_UNLESS(this->ContainsNativeMapping(virt_addr, num_pages), ResultInvalidMemoryRegion);
+#endif
 
         // We want to maintain a new reference to every page in the group.
         KScopedPageGroup spg(m_system.Kernel(), page_group, operation == OperationType::MapGroup);

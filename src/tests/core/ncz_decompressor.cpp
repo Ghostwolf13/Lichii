@@ -3,8 +3,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <future>
 #include <limits>
+#include <mutex>
+#include <thread>
+#include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 #define ZSTD_STATIC_LINKING_ONLY
@@ -38,9 +44,9 @@ TEST_CASE("NCZ discovery accepts solid headers without decoding payloads", "[ncz
     class CountingFile final : public FileSys::VectorVfsFile {
     public:
         using FileSys::VectorVfsFile::VectorVfsFile;
-        std::size_t Read(u8* data, std::size_t length, std::size_t offset) const override {
+        std::size_t Read(u8* buffer, std::size_t length, std::size_t offset) const override {
             bytes_read += length;
-            return FileSys::VectorVfsFile::Read(data, length, offset);
+            return FileSys::VectorVfsFile::Read(buffer, length, offset);
         }
         mutable std::size_t bytes_read{};
     };
@@ -95,6 +101,35 @@ TEST_CASE("NCZBLOCK playback remains supported", "[ncz]") {
         Put(bytes, Payload + 12, 0x7fffffff, 4);
         CHECK_FALSE(Core::Crypto::IsSupportedNCZ(
             std::make_shared<FileSys::VectorVfsFile>(std::move(bytes))));
+    }
+    SECTION("block count that does not match the decompressed size") {
+        // With 4 GiB blocks, 20000 bytes fit in one block; the second entry made the reader
+        // allocate a whole 4 GiB block for the first one.
+        bytes[Payload + 11] = 32;
+        CHECK_FALSE(Core::Crypto::IsSupportedNCZ(
+            std::make_shared<FileSys::VectorVfsFile>(std::move(bytes))));
+    }
+    SECTION("decompressed size that needs more blocks than the table holds") {
+        Put(bytes, Payload + 16, 40000);
+        CHECK_FALSE(Core::Crypto::IsSupportedNCZ(
+            std::make_shared<FileSys::VectorVfsFile>(std::move(bytes))));
+    }
+    SECTION("section that overflows or starts before the file") {
+        // Block mode used to skip the solid stream's section checks: these opened as files of
+        // about 2^63 bytes, or with a section before the header.
+        const std::array<std::pair<u64, u64>, 3> bad{{
+            {0x7FFFFFFFFFFFFFF0, 0x100},
+            {static_cast<u64>(-0x1000), 0x5000},
+            {Header, 0x7FFFFFFFFFFF0000},
+        }};
+        for (const auto& [offset, size] : bad) {
+            auto copy = bytes;
+            Put(copy, Header + 16, offset);
+            Put(copy, Header + 24, size);
+            auto source = std::make_shared<FileSys::VectorVfsFile>(std::move(copy));
+            CHECK_FALSE(Core::Crypto::IsSupportedNCZ(source));
+            CHECK(Core::Crypto::DecompressNCZ(source, "synthetic.nca") == nullptr);
+        }
     }
 }
 
@@ -269,14 +304,10 @@ TEST_CASE("Solid NCZ cache IO faults invalidate cached prefixes", "[ncz]") {
     struct Control {
         bool fail_read{};
         bool fail_write{};
-        bool destroyed{};
     };
     class FaultCache final : public Core::Crypto::NczCache {
     public:
         explicit FaultCache(std::shared_ptr<Control> control_) : control(std::move(control_)) {}
-        ~FaultCache() override {
-            control->destroyed = true;
-        }
         bool Write(std::span<const u8> bytes, u64 offset) override {
             if (control->fail_write) {
                 Core::Crypto::NczCache::Write(bytes.first(bytes.size() / 2), offset);
@@ -294,8 +325,9 @@ TEST_CASE("Solid NCZ cache IO faults invalidate cached prefixes", "[ncz]") {
     };
     auto control = std::make_shared<Control>();
     auto fixture = MakeSolid(0x300007);
-    auto file = Core::Crypto::DecompressNCZ(fixture.source, "synthetic.nca",
-                                            std::make_unique<FaultCache>(control));
+    auto owned = std::make_unique<FaultCache>(control);
+    const auto* cache = owned.get();
+    auto file = Core::Crypto::DecompressNCZ(fixture.source, "synthetic.nca", std::move(owned));
     REQUIRE(file);
     std::array<u8, 7> out{};
     REQUIRE(file->Read(out.data(), out.size(), Header) == out.size());
@@ -306,7 +338,7 @@ TEST_CASE("Solid NCZ cache IO faults invalidate cached prefixes", "[ncz]") {
         control->fail_read = true;
     }
     REQUIRE(file->Read(out.data(), out.size(), Header + 0x200000) == 0);
-    CHECK(control->destroyed);
+    CHECK_FALSE(cache->IsOpen());
     CHECK_FALSE(file->IsReadable());
     CHECK(file->Read(out.data(), out.size(), 0) == 0);
     CHECK(file->Read(out.data(), out.size(), Header) == 0);
@@ -384,9 +416,9 @@ TEST_CASE("A released solid NCZ reader resumes with identical bytes", "[ncz][res
     class StartCountingFile final : public FileSys::VectorVfsFile {
     public:
         using FileSys::VectorVfsFile::VectorVfsFile;
-        std::size_t Read(u8* data, std::size_t length, std::size_t offset) const override {
+        std::size_t Read(u8* buffer, std::size_t length, std::size_t offset) const override {
             starts += offset == Payload + 64;
-            return FileSys::VectorVfsFile::Read(data, length, offset);
+            return FileSys::VectorVfsFile::Read(buffer, length, offset);
         }
         mutable std::size_t starts{};
     };
@@ -438,6 +470,172 @@ TEST_CASE("A released solid NCZ reader resumes with identical bytes", "[ncz][res
     CheckRead(file, fixture.expected, Header + split - 9, 0x100);
     CHECK(counted->starts == opened + 2);
     CheckRead(file, fixture.expected, fixture.expected.size() - 7, 7);
+}
+
+TEST_CASE("A solid NCZ reader recovers once a full disk or the decoder budget clears",
+          "[ncz][resource]") {
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool full{};
+        bool hold{};
+        std::size_t held{};
+        std::size_t writes{};
+    };
+    // Fails every write while the disk is full, and holds payload writes (and so the decoder
+    // of the reader that makes them) while hold is set.
+    class GateCache final : public Core::Crypto::NczCache {
+    public:
+        explicit GateCache(std::shared_ptr<Gate> gate_) : gate(std::move(gate_)) {}
+        bool Write(std::span<const u8> bytes, u64 offset) override {
+            {
+                std::unique_lock lock{gate->mutex};
+                ++gate->writes;
+                if (offset >= Header && gate->hold) {
+                    ++gate->held;
+                    gate->changed.notify_all();
+                    gate->changed.wait(lock, [this] { return !gate->hold; });
+                }
+                if (gate->full)
+                    return false;
+            }
+            return Core::Crypto::NczCache::Write(bytes, offset);
+        }
+
+    private:
+        std::shared_ptr<Gate> gate;
+    };
+    auto gate = std::make_shared<Gate>();
+
+    SECTION("full disk") {
+        auto fixture = MakeSolid(0x300007);
+        auto file = Core::Crypto::DecompressNCZ(fixture.source, "synthetic.nca",
+                                                std::make_unique<GateCache>(gate));
+        REQUIRE(file);
+        CheckRead(file, fixture.expected, Header, 7);
+        gate->full = true;
+        std::array<u8, 7> out{};
+        REQUIRE(file->Read(out.data(), out.size(), Header + 0x200000) == 0);
+        // The first read after the failure tries again at once, later ones wait.
+        auto writes = gate->writes;
+        CHECK(file->Read(out.data(), out.size(), Header) == 0);
+        CHECK(gate->writes > writes);
+        writes = gate->writes;
+        CHECK(file->Read(out.data(), out.size(), Header) == 0);
+        CHECK(gate->writes == writes);
+        gate->full = false;
+        std::this_thread::sleep_for(std::chrono::milliseconds{300});
+        CHECK_FALSE(file->IsReadable());
+        CheckRead(file, fixture.expected, Header + 0x200000, 7);
+        CHECK(file->IsReadable());
+        CheckRead(file, fixture.expected, Header, 7);
+    }
+
+    SECTION("decoder budget held by decoding readers") {
+        auto fixture = MakeSolid(2 * 1024 * 1024);
+        auto source =
+            std::make_shared<FileSys::VectorVfsFile>(WideWindow(fixture.source->ReadAllBytes()));
+        // The budget holds three 128 MiB windows; these three hold them while they decode.
+        std::vector<FileSys::VirtualFile> busy;
+        for (std::size_t i = 0; i < 3; ++i) {
+            busy.push_back(Core::Crypto::DecompressNCZ(source, "synthetic.nca",
+                                                       std::make_unique<GateCache>(gate)));
+            REQUIRE(busy.back());
+        }
+        auto file = Core::Crypto::DecompressNCZ(source, "synthetic.nca");
+        REQUIRE(file);
+        gate->hold = true;
+        std::vector<std::future<std::size_t>> decoding;
+        struct Release {
+            Gate& gate;
+            void operator()() const {
+                std::scoped_lock lock{gate.mutex};
+                gate.hold = false;
+                gate.changed.notify_all();
+            }
+            ~Release() {
+                (*this)();
+            }
+        } release{*gate};
+        for (const auto& reader : busy) {
+            decoding.push_back(std::async(std::launch::async, [reader] {
+                std::array<u8, 1> out{};
+                return reader->Read(out.data(), out.size(), Header);
+            }));
+        }
+        {
+            std::unique_lock lock{gate->mutex};
+            REQUIRE(gate->changed.wait_for(lock, std::chrono::seconds{10},
+                                           [&] { return gate->held == busy.size(); }));
+        }
+        std::array<u8, 1> out{};
+        REQUIRE(file->Read(out.data(), out.size(), Header) == 0);
+        release();
+        for (auto& reader : decoding) {
+            CHECK(reader.get() == out.size());
+        }
+        CHECK_FALSE(file->IsReadable());
+        CheckRead(file, fixture.expected, Header, 1);
+        CHECK(file->IsReadable());
+        CheckRead(file, fixture.expected, fixture.expected.size() - 1000, 1000);
+    }
+}
+
+TEST_CASE("A solid NCZ reader gives up on a header it cannot read or cache", "[ncz][resource]") {
+    struct Disk {
+        std::atomic<bool> full{};
+        std::atomic<std::size_t> writes{};
+    };
+    class DiskCache final : public Core::Crypto::NczCache {
+    public:
+        explicit DiskCache(std::shared_ptr<Disk> disk_) : disk(std::move(disk_)) {}
+        bool Write(std::span<const u8> bytes, u64 offset) override {
+            ++disk->writes;
+            return !disk->full && Core::Crypto::NczCache::Write(bytes, offset);
+        }
+
+    private:
+        std::shared_ptr<Disk> disk;
+    };
+    auto disk = std::make_shared<Disk>();
+    auto fixture = MakeSolid(0x300007);
+    const auto bytes = fixture.source->ReadAllBytes();
+    auto file = Core::Crypto::DecompressNCZ(fixture.source, "synthetic.nca",
+                                            std::make_unique<DiskCache>(disk));
+    REQUIRE(file);
+    CheckRead(file, fixture.expected, Header, 7);
+    disk->full = true;
+    std::array<u8, 7> out{};
+    REQUIRE(file->Read(out.data(), out.size(), Header + 0x200000) == 0);
+    // When the reader would try again if it hadn't given up.
+    std::chrono::milliseconds next_try{};
+
+    SECTION("cache that keeps refusing the header") {
+        // Each try waits out the backoff of the one before: 0, 250, 500 and 1000 ms.
+        for (const auto wait : {0, 300, 600, 1100}) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{wait});
+            const auto writes = disk->writes.load();
+            CHECK(file->Read(out.data(), out.size(), 0) == 0);
+            CHECK(disk->writes == writes + 1);
+        }
+        next_try = std::chrono::milliseconds{2100};
+    }
+    SECTION("source shorter than the header") {
+        disk->full = false;
+        fixture.source->Resize(Header / 2);
+        CHECK(file->Read(out.data(), out.size(), 0) == 0);
+        fixture.source->Assign(bytes);
+        next_try = std::chrono::milliseconds{300};
+    }
+    disk->full = false;
+    std::this_thread::sleep_for(next_try);
+    const auto writes = disk->writes.load();
+    CHECK_FALSE(file->IsReadable());
+    CHECK(file->Read(out.data(), out.size(), 0) == 0);
+    CHECK(disk->writes == writes);
+    auto reopened = Core::Crypto::DecompressNCZ(fixture.source, "synthetic.nca");
+    REQUIRE(reopened);
+    CheckRead(reopened, fixture.expected, Header + 0x200000, 7);
 }
 
 #ifdef _WIN32

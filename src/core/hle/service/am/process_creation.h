@@ -29,6 +29,10 @@ namespace Service::AM {
 std::unique_ptr<Process> CreateProcess(Core::System& system, u64 program_id, u8 minimum_key_generation, u8 maximum_key_generation);
 std::unique_ptr<Process> CreateApplicationProcess(std::vector<u8>& out_control, std::unique_ptr<Loader::AppLoader>& out_loader, Loader::ResultStatus& out_load_result, Core::System& system, FileSys::VirtualFile file, u64 program_id, u64 program_index);
 
+/// Whether the installed application's program (its update's, if one is installed) is a Switch 2
+/// program.
+bool IsSwitch2Application(Core::System& system, u64 program_id);
+
 bool ReinitializeProcess(Core::System& system, Process& process, u64 program_id);
 
 } // namespace Service::AM

@@ -19,6 +19,9 @@
 
 #include "core/arm/dynarmic/arm_dynarmic_32.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
+#ifdef HAS_HYPERVISOR
+#include "core/arm/hypervisor/arm_hypervisor.h"
+#endif
 #ifdef HAS_NCE
 #include "core/arm/nce/arm_nce.h"
 #endif
@@ -178,6 +181,9 @@ void KProcess::Finalize(KernelCore& kernel) {
     for (auto& interface : m_arm_interfaces) {
         interface.reset();
     }
+#ifdef HAS_HYPERVISOR
+    m_memory.ReleaseHypervisor();
+#endif
     m_exclusive_monitor.reset();
 
     // Perform inherited finalization.
@@ -320,10 +326,13 @@ Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParamete
     }
     ON_RESULT_FAILURE_2 {
         m_page_table.Finalize();
+#ifdef HAS_HYPERVISOR
+        m_memory.ReleaseHypervisor();
+#endif
     };
 
     // Ensure our memory is initialized.
-    m_memory.SetCurrentPageTable(*this);
+    m_memory.SetCurrentPageTable(*this, params.flags);
     m_memory.SetGPUDirtyManagers(kernel.System().GetGPUDirtyMemoryManager());
 
     // Ensure we can insert the code region.
@@ -357,7 +366,8 @@ Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParamete
 
 Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParameter& params,
                             std::span<const u32> user_caps, KResourceLimit* res_limit,
-                            KMemoryManager::Pool pool, KProcessAddress aslr_space_start) {
+                            KMemoryManager::Pool pool, KProcessAddress aslr_space_start,
+                            u64 switch2_program_id) {
     ASSERT(res_limit != nullptr);
 
     // Set members.
@@ -418,14 +428,17 @@ Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParamete
             False(params.flags & Svc::CreateProcessFlag::DisableDeviceAddressSpaceMerge);
         R_TRY(m_page_table.Initialize(as_type, enable_aslr, enable_das_merge, !enable_aslr, pool,
                                       params.code_address, code_size, m_system_resource, res_limit,
-                                      m_memory, aslr_space_start));
+                                      m_memory, aslr_space_start, switch2_program_id));
     }
     ON_RESULT_FAILURE_2 {
         m_page_table.Finalize();
+#ifdef HAS_HYPERVISOR
+        m_memory.ReleaseHypervisor();
+#endif
     };
 
     // Ensure our memory is initialized.
-    m_memory.SetCurrentPageTable(*this);
+    m_memory.SetCurrentPageTable(*this, params.flags);
     m_memory.SetGPUDirtyManagers(kernel.System().GetGPUDirtyMemoryManager());
 
     // Ensure we can insert the code region.
@@ -1255,7 +1268,9 @@ Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMeta
     std::memcpy(params.name.data(), name.data(), sizeof(params.name));
 
     // Initialize for application process.
-    R_TRY(this->Initialize(kernel, params, metadata.GetKernelCapabilities(), res_limit, pool, aslr_space_start));
+    const bool is_switch2 = metadata.IsSwitch2();
+    R_TRY(this->Initialize(kernel, params, metadata.GetKernelCapabilities(), res_limit, pool,
+                           aslr_space_start, is_switch2 ? params.program_id : 0));
 
     // Assign remaining properties.
     m_ideal_core_id = metadata.GetMainThreadCore();
@@ -1263,7 +1278,7 @@ Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMeta
     // Switch 2 applications get more memory than a 64-bit heap region holds (nninitStartup sizes
     // its heap as total memory minus ~6.3 GiB), so count the alias region as well, bounded by the
     // pool through the resource limit.
-    if (metadata.IsSwitch2()) {
+    if (is_switch2) {
         m_is_switch2 = true;
         m_max_process_memory = m_page_table.GetHeapRegionSize() + m_page_table.GetAliasRegionSize();
     }
@@ -1289,7 +1304,7 @@ void KProcess::LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress 
 #ifdef HAS_NCE
     const auto& patch = code_set.PatchSegment();
     const auto& post_patch = code_set.PostPatchSegment();
-    if (this->IsApplication() && Settings::IsNceEnabled() && patch.size != 0) {
+    if (this->UsesNativeExecution() && patch.size != 0) {
         auto& buffer = kernel.System().DeviceMemory().buffer;
         const auto& code = code_set.CodeSegment();
         buffer.Protect(GetInteger(base_addr + code.addr), code.size,
@@ -1309,12 +1324,32 @@ void KProcess::LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress 
 #endif
 }
 
+#ifdef HAS_HYPERVISOR
+void KProcess::ReleaseHypervisor() {
+    if (m_memory.GetHypervisor()) {
+        for (auto& interface : m_arm_interfaces) {
+            interface.reset();
+        }
+        m_memory.ReleaseHypervisor();
+    }
+}
+#endif
+
 void KProcess::InitializeInterfaces(KernelCore& kernel) {
     m_exclusive_monitor =
         Core::MakeExclusiveMonitor(this->GetMemory(), Core::Hardware::NUM_CPU_CORES);
 
+#ifdef HAS_HYPERVISOR
+    if (auto vm = m_memory.GetHypervisor()) {
+        for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {
+            m_arm_interfaces[i] = std::make_unique<Core::ArmHypervisor>(vm, i);
+        }
+        return;
+    }
+#endif
+
 #ifdef HAS_NCE
-    if (this->IsApplication() && Settings::IsNceEnabled()) {
+    if (this->UsesNativeExecution()) {
         for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++)
             m_arm_interfaces[i] = std::make_unique<Core::ArmNce>(kernel.System(), true, i);
     } else

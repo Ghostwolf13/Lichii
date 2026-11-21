@@ -46,6 +46,11 @@ public:
 
     [[nodiscard]] bool Exists(const std::string& section, const std::string& key) const;
 
+    /// Saves one setting in a game's config (custom/<config_name>.ini) as the game's own value,
+    /// leaving the rest of that file and the loaded settings as they are.
+    static void SaveGameValue(const std::string& config_name, const Settings::BasicSetting& setting,
+                              const std::string& value);
+
 protected:
     explicit Config(ConfigType config_type = ConfigType::GlobalConfig);
 

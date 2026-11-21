@@ -19,6 +19,7 @@ This contains documentation created by developers, build instructions, guideline
 - **[The NVIDIA SM86 (Maxwell) GPU](./NvidiaGpu.md)**
 - **[AMD GPUs and Switch 2 titles](./nx2/amd.md)**
 - **[Driver Bugs](./DriverBugs.md)**
+- **[Testing against a local server](./nx2/host-redirect.md)**
 - **[Building Older Commits](./build/OlderCommits.md)**
 - Subsystems:
   - **[Design Overview](./DesignOverview.md)**

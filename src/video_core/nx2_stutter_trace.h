@@ -143,6 +143,16 @@ struct Totals {
     /// Sites run on any thread: added atomically.
     std::array<std::atomic<u64>, SiteCount> site_ticks{};
     std::array<std::atomic<u64>, SiteCount> site_counts{};
+    /// The guest CPU JIT on every core (counted by the arm64 backend): added atomically.
+    std::atomic<u64> jit_compile_ns{};
+    std::atomic<u64> jit_blocks{};
+    std::atomic<u64> jit_clears{};
+    std::atomic<u64> jit_full_clears{};
+    std::atomic<u64> jit_invalidated{};
+    std::atomic<u64> jit_invalidated_bytes{};
+    std::atomic<u64> jit_fastmem_recompiles{};
+    /// Each core's code cache in use, as last reported.
+    std::array<std::atomic<u64>, 8> jit_code_bytes{};
 };
 
 inline Totals g_totals;
@@ -284,6 +294,30 @@ struct Attribution {
 
 /// Called by the renderer for each presented frame, by one thread at a time.
 void OnPresent();
+
+struct JitDelta {
+    u64 compile_ns{};
+    u64 blocks{};
+    u64 clears{};
+    u64 full_clears{};
+    u64 invalidated{};
+    u64 invalidated_bytes{};
+    u64 fastmem_recompiles{};
+};
+
+/// Called by the CPU cores with what their JIT did since their last call, and its code cache use.
+inline void AddJit(size_t core, const JitDelta& delta, u64 code_bytes) {
+    g_totals.jit_compile_ns.fetch_add(delta.compile_ns, std::memory_order_relaxed);
+    g_totals.jit_blocks.fetch_add(delta.blocks, std::memory_order_relaxed);
+    g_totals.jit_clears.fetch_add(delta.clears, std::memory_order_relaxed);
+    g_totals.jit_full_clears.fetch_add(delta.full_clears, std::memory_order_relaxed);
+    g_totals.jit_invalidated.fetch_add(delta.invalidated, std::memory_order_relaxed);
+    g_totals.jit_invalidated_bytes.fetch_add(delta.invalidated_bytes, std::memory_order_relaxed);
+    g_totals.jit_fastmem_recompiles.fetch_add(delta.fastmem_recompiles, std::memory_order_relaxed);
+    if (core < g_totals.jit_code_bytes.size()) {
+        g_totals.jit_code_bytes[core].store(code_bytes, std::memory_order_relaxed);
+    }
+}
 
 /// Logs a boot phase with the time and the process memory. Reads the environment itself: the
 /// boot starts before the video core applies nx2_switches.txt.

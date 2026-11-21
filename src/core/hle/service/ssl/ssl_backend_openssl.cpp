@@ -13,6 +13,7 @@
 
 #include "common/fs/file.h"
 #include "common/hex_util.h"
+#include "common/net/ca_store.h"
 #include "common/nextendo.h"
 #include "common/string_util.h"
 
@@ -21,10 +22,6 @@
 #include "core/internal_network/local_redirect.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
-
-#ifdef LICHII_BUNDLED_OPENSSL
-#include <openssl/cert.h>
-#endif
 
 using namespace Common::FS;
 
@@ -145,6 +142,10 @@ X509_STORE* TestCaStore(const std::vector<u8>& der_data) {
         X509_STORE_free(roots);
         roots = nullptr;
     }
+    if (const auto bundle = Common::Net::FindSystemCaBundle();
+        roots != nullptr && !bundle.empty()) {
+        X509_STORE_load_file(roots, bundle.c_str());
+    }
     const unsigned char* der = der_data.data();
     X509* const ca = d2i_X509(nullptr, &der, static_cast<long>(der_data.size()));
     if (roots != nullptr && ca != nullptr && X509_STORE_add_cert(roots, ca) == 1) {
@@ -212,7 +213,7 @@ public:
         // address itself; Nextendo needs the real name for SNI (citron-nextendo).
         std::string host = hostname_in;
         if (Common::Nextendo::OnlinePlayActive()) {
-            host = Sockets::Nextendo::ExpandNsdHost(std::move(host));
+            host = Sockets::Nextendo::ResolveFqdn(std::move(host));
         }
         if (Common::Nextendo::OnlinePlayActive() && socket) {
             const auto [peer, err] = socket->GetPeerName();
@@ -264,7 +265,7 @@ public:
         }
     }
 
-    Result DoHandshake() override {
+    Result DoHandshake(std::span<const u8> alpn) override {
         // A guest that connects to a redirected Nextendo address without a host name still
         // needs SNI, because Nextendo routes its :443 servers by name (citron-nextendo).
         if (socket && !SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name)) {
@@ -276,6 +277,13 @@ public:
                     SSL_set_tlsext_host_name(ssl, host.c_str());
                 }
             }
+        }
+
+        const char* const servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+        if (const auto wire = Sockets::Nextendo::AlpnProtocols(servername ? servername : "", alpn);
+            !wire.empty()) {
+            LOG_INFO(Service_SSL, "Nextendo: offering the guest's ALPN to NPLN host {}", servername);
+            SSL_set_alpn_protos(ssl, wire.data(), static_cast<unsigned>(wire.size()));
         }
 
         SSL_set_verify_result(ssl, X509_V_OK);
@@ -307,10 +315,8 @@ public:
     }
 
     Result Peek(size_t* out_size, std::span<u8> data) override {
-        auto const n = (std::min)(data.size(), *out_size);
-        const int ret = SSL_peek(ssl, data.data(), int(n));
-        *out_size = n;
-        return HandleReturn("SSL_write_ex", out_size, ret);
+        const int ret = SSL_peek_ex(ssl, data.data(), data.size(), out_size);
+        return HandleReturn("SSL_peek_ex", out_size, ret);
     }
 
     Result Write(size_t* out_size, std::span<const u8> data) override {
@@ -531,6 +537,10 @@ void OneTimeInit() {
         LOG_ERROR(Service_SSL, "SSL_CTX_set_default_verify_paths failed");
         CheckOpenSSLErrors();
         return;
+    }
+
+    if (const auto bundle = Common::Net::FindSystemCaBundle(); !bundle.empty()) {
+        SSL_CTX_load_verify_locations(ssl_ctx, bundle.c_str(), nullptr);
     }
 
     OneTimeInitLogFile();

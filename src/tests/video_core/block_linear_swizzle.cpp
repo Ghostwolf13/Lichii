@@ -258,3 +258,23 @@ TEST_CASE("Block linear unswizzle microbenchmark", "[.block_linear_swizzle_bench
                     LinearBytes(layout) * iterations / seconds / 1e9);
     }
 }
+
+TEST_CASE("Block linear swizzle microbenchmark", "[.block_linear_swizzle_benchmark]") {
+    // A render target written back to guest memory: 2560x1440, 8 bytes a pixel, 16-GOB blocks.
+    const Layout layout{2560, 1440, 1, 8, 4, 0, 0};
+    const std::vector<u8> linear = RandomBytes(LinearBytes(layout), 3);
+    std::vector<u8> guest(GuestBytes(layout));
+    for (const bool native : {false, true}) {
+        constexpr int iterations = 20;
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < iterations; ++i) {
+            SwizzleTexture(guest, linear, layout.bpp, layout.width, layout.height, 1,
+                           layout.block_height, 0, 0, native);
+        }
+        const double seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        std::printf("2560x1440 RGBA16F swizzle%s: %.3f ms, %.2f GB/s\n",
+                    native ? " (native tiling)" : "", seconds * 1e3 / iterations,
+                    LinearBytes(layout) * iterations / seconds / 1e9);
+    }
+}

@@ -1,0 +1,40 @@
+{
+  "summary": "A third GPU thread, better Switch 2 Edition support, and game fixes.",
+  "changes": [
+    {
+      "icon": "cpu",
+      "title": "A third GPU thread",
+      "body": "Eligible Switch 2 Vulkan draws use a third recording thread."
+    },
+    {
+      "icon": "clock",
+      "title": "Ocarina of Time above 60 FPS",
+      "body": "FPS Unlock fixes Epona's fence jump, the day/night clock and the Deku Tree webs. The game no longer freezes after closing the R1 menu."
+    },
+    {
+      "icon": "apps",
+      "title": "Switch 2 games in HOME and better Edition support",
+      "body": "Launch games from HOME without installing them. Lichii better detects and launches Switch 2 Editions, applies matching upgrade packs, and keeps update information in NUPs."
+    },
+    {
+      "icon": "download",
+      "title": "Precompile All Shaders",
+      "body": "Turn it on for individual games in their right-click menu. Precompilation can now find compute shaders in asset packs such as Kirby Air Riders' packs."
+    },
+    {
+      "icon": "bug",
+      "title": "Xenoblade DE and Yoshi fixes",
+      "body": "Fixes Xenoblade DE's title-screen textures and docked/handheld crash. Yoshi no longer crashes when Vulkan rejects a texture-buffer view."
+    },
+    {
+      "icon": "globe",
+      "title": "Multiplayer room connections",
+      "body": "The room proxy keeps the right player address and port and drops packets left over from earlier connections."
+    },
+    {
+      "icon": "sparkles",
+      "title": "What's New in Lichii",
+      "body": "See the highlights after an update or reopen them anytime from Help, even offline."
+    }
+  ]
+}

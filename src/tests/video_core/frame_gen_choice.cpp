@@ -22,7 +22,8 @@ constexpr DlssgSession OCARINA{
 
 } // Anonymous namespace
 
-TEST_CASE("DLSS Frame Generation runs only for a game with inputs, else FSR3", "[video_core]") {
+TEST_CASE("DLSS Frame Generation runs only for a game with inputs, else optical flow",
+          "[video_core]") {
     REQUIRE(BlockedDlssg(OCARINA) == DlssgBlock::None);
     REQUIRE(ActiveFrameGenType(FrameGenType::NvidiaDlssG, DlssgBlock::None) ==
             FrameGenType::NvidiaDlssG);
@@ -46,8 +47,9 @@ TEST_CASE("DLSS Frame Generation runs only for a game with inputs, else FSR3", "
 
     for (const DlssgBlock block : {DlssgBlock::NoStreamline, DlssgBlock::DlssOff,
                                    DlssgBlock::NoGameInputs, DlssgBlock::NotLoaded}) {
-        REQUIRE(ActiveFrameGenType(FrameGenType::NvidiaDlssG, block) == FrameGenType::Fsr3);
+        REQUIRE(ActiveFrameGenType(FrameGenType::NvidiaDlssG, block) == FrameGenType::OpticalFlow);
     }
     REQUIRE(ActiveFrameGenType(FrameGenType::Lsfg, DlssgBlock::NotLoaded) == FrameGenType::Lsfg);
-    REQUIRE(ActiveFrameGenType(FrameGenType::Fsr3, DlssgBlock::None) == FrameGenType::Fsr3);
+    REQUIRE(ActiveFrameGenType(FrameGenType::OpticalFlow, DlssgBlock::None) ==
+            FrameGenType::OpticalFlow);
 }

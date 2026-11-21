@@ -51,7 +51,7 @@ namespace Network {
 
 #ifdef _WIN32
 
-std::vector<Network::NetworkInterface> GetAvailableNetworkInterfaces() {
+std::vector<Network::NetworkInterface> GetAvailableNetworkInterfaces(bool include_secondary_ipv4) {
 
     ULONG buf_size = 0;
     if (GetAdaptersAddresses(
@@ -75,32 +75,32 @@ std::vector<Network::NetworkInterface> GetAvailableNetworkInterfaces() {
 
     for (auto* a = addrs; a; a = a->Next) {
 
-        if (a->OperStatus != IfOperStatusUp || !a->FirstUnicastAddress ||
-            !a->FirstUnicastAddress->Address.lpSockaddr)
+        if (a->OperStatus != IfOperStatusUp)
             continue;
-
-        const in_addr ip =
-            reinterpret_cast<sockaddr_in*>(a->FirstUnicastAddress->Address.lpSockaddr)->sin_addr;
-
-        ULONG mask_raw = 0;
-        if (ConvertLengthToIpv4Mask(a->FirstUnicastAddress->OnLinkPrefixLength, &mask_raw) !=
-            NO_ERROR)
-            continue;
-
-        in_addr mask{.S_un{.S_addr{mask_raw}}};
 
         in_addr gw{.S_un{.S_addr{0}}};
-        if (a->FirstGatewayAddress && a->FirstGatewayAddress->Address.lpSockaddr)
+        if (a->FirstGatewayAddress && a->FirstGatewayAddress->Address.lpSockaddr &&
+            a->FirstGatewayAddress->Address.lpSockaddr->sa_family == AF_INET)
             gw = reinterpret_cast<sockaddr_in*>(a->FirstGatewayAddress->Address.lpSockaddr)
                      ->sin_addr;
 
-        result.emplace_back(Network::NetworkInterface{
-            .name = Common::UTF16ToUTF8(std::wstring{a->FriendlyName}),
-            .ip_address = ip,
-            .subnet_mask = mask,
-            .gateway = gw,
-            .kind = (a->IfType == IF_TYPE_IEEE80211 ? HostAdapterKind::Wifi : HostAdapterKind::Ethernet)
-        });
+        for (auto* unicast = a->FirstUnicastAddress; unicast;
+             unicast = include_secondary_ipv4 ? unicast->Next : nullptr) {
+            const auto* address = unicast->Address.lpSockaddr;
+            if (!address || address->sa_family != AF_INET)
+                continue;
+            ULONG mask_raw = 0;
+            if (ConvertLengthToIpv4Mask(unicast->OnLinkPrefixLength, &mask_raw) != NO_ERROR)
+                continue;
+            result.emplace_back(Network::NetworkInterface{
+                .name = Common::UTF16ToUTF8(std::wstring{a->FriendlyName}),
+                .ip_address = reinterpret_cast<const sockaddr_in*>(address)->sin_addr,
+                .subnet_mask = {.S_un{.S_addr{mask_raw}}},
+                .gateway = gw,
+                .kind = a->IfType == IF_TYPE_IEEE80211 ? HostAdapterKind::Wifi
+                                                        : HostAdapterKind::Ethernet,
+            });
+        }
     }
 
     return result;
@@ -150,7 +150,7 @@ static in_addr ToInAddr(const struct sockaddr* addr) {
 }
 #endif
 
-std::vector<Network::NetworkInterface> GetAvailableNetworkInterfaces() {
+std::vector<Network::NetworkInterface> GetAvailableNetworkInterfaces(bool) {
 #if defined(__ANDROID__) || defined(__linux__) || defined(__APPLE__)
     struct ifaddrs* ifaddr = nullptr;
     if (getifaddrs(&ifaddr) != 0) {

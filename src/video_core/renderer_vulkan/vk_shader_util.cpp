@@ -19,4 +19,15 @@ vk::ShaderModule BuildShader(const Device& device, std::span<const u32> code) {
     });
 }
 
+vk::ShaderModule BuildGuestShader(const Device& device, std::span<const u32> code, u64 hash) {
+    vk::ShaderModule module{device.HasRadvHangReport()
+                                ? BuildShader(device, NameSpirvProgram(code, hash))
+                                : BuildShader(device, code)};
+    if (device.HasDebuggingToolAttached()) {
+        const std::string name{fmt::format("Shader {:016x}", hash)};
+        module.SetObjectNameEXT(name.c_str());
+    }
+    return module;
+}
+
 } // namespace Vulkan

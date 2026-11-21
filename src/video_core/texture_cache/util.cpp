@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
+#include <latch>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -21,11 +23,11 @@
 #include "common/bit_util.h"
 #include "common/common_types.h"
 #include "common/div_ceil.h"
+#include "common/literals.h"
 #include "common/scratch_buffer.h"
 #include "common/settings.h"
 #include "video_core/compatible_formats.h"
 #include "video_core/engines/maxwell_3d.h"
-#include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/surface.h"
@@ -39,6 +41,7 @@
 #include "video_core/textures/bcn.h"
 #include "video_core/textures/decoders.h"
 #include "video_core/textures/unswizzle_worker.h"
+#include "video_core/textures/workers.h"
 
 namespace VideoCommon {
 
@@ -531,10 +534,11 @@ void SwizzlePitchLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr
 
 void SwizzleBlockLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr,
                              const ImageInfo& info, const BufferImageCopy& copy,
-                             std::span<const u8> input, Common::ScratchBuffer<u8>& tmp_buffer) {
+                             std::span<const u8> input, const LevelInfo& level_info,
+                             const LevelArray& sizes, size_t layer_stride, u8* direct,
+                             Common::ScratchBuffer<u8>& tmp_buffer) {
     const Extent3D size = info.size;
-    const LevelInfo level_info = MakeLevelInfo(info);
-    const Extent2D tile_size = DefaultBlockSize(info.format);
+    const Extent2D tile_size = level_info.tile_size;
     const u32 bytes_per_block = BytesPerBlock(info.format);
 
     const s32 level = copy.image_subresource.base_level;
@@ -553,23 +557,24 @@ void SwizzleBlockLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr
 
     size_t host_offset = copy.buffer_offset;
 
-    const u32 num_levels = info.resources.levels;
-    const std::array sizes = CalculateLevelSizes(level_info, num_levels);
     size_t guest_offset = CalculateLevelBytes(sizes, level);
-    const size_t layer_stride =
-        AlignLayerSize(CalculateLevelBytes(sizes, num_levels), size, level_info.block,
-                       tile_size.height, info.tile_width_spacing);
     const size_t subresource_size = sizes[level];
 
     for (s32 layer = 0; layer < info.resources.layers; ++layer) {
         const std::span<const u8> src = input.subspan(host_offset);
-        {
-            Tegra::Memory::GpuGuestMemoryScoped<u8,
-                                                Tegra::Memory::GuestMemoryFlags::UnsafeReadWrite>
-                dst(gpu_memory, gpu_addr + guest_offset, subresource_size, &tmp_buffer);
-
-            SwizzleTexture(dst, src, bytes_per_block, num_tiles.width, num_tiles.height,
-                           num_tiles.depth, block.height, block.depth, 1, gpu_memory.UsesNativeTiling());
+        u8* dst = direct ? direct + guest_offset
+                         : gpu_memory.GetSpan(gpu_addr + guest_offset, subresource_size);
+        const bool copied = dst == nullptr;
+        if (copied) {
+            tmp_buffer.resize_destructive(subresource_size);
+            dst = tmp_buffer.data();
+            gpu_memory.ReadBlockUnsafe(gpu_addr + guest_offset, dst, subresource_size);
+        }
+        SwizzleTexture(std::span{dst, subresource_size}, src, bytes_per_block, num_tiles.width,
+                       num_tiles.height, num_tiles.depth, block.height, block.depth, 1,
+                       info.native_tiling);
+        if (copied) {
+            gpu_memory.WriteBlockUnsafe(gpu_addr + guest_offset, dst, subresource_size);
         }
 
         host_offset += host_bytes_per_layer;
@@ -852,6 +857,70 @@ bool IsValidEntry(const Tegra::MemoryManager& gpu_memory, const TICEntry& config
     return gpu_memory.GpuToCpuAddress(address, guest_size_bytes).has_value();
 }
 
+void PrefaultGuestMemory(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, size_t size) {
+    using namespace Common::Literals;
+    // Guest memory is one section mapped twice, and Windows faults once per 4 KiB the first time
+    // these reads go through the backing to a page the guest wrote through its own view, or one
+    // trimmed or hinted cold since: 1.3-1.8 us a page, so Star Fox's cutscene bursts untiled at
+    // 1.7 GB/s. Faults on several threads resolve in parallel (1.6-1.75x on 3 threads). Linux maps
+    // 16 pages per such fault, where touching them first gained nothing.
+#ifdef _WIN32
+    constexpr bool PrefaultPays = true;
+#else
+    constexpr bool PrefaultPays = false;
+#endif
+    constexpr size_t PageSize = 4_KiB;
+    constexpr size_t MinBytes = 1_MiB;
+    if (!PrefaultPays || size < MinBytes) {
+        return;
+    }
+    std::vector<const u8*> pages;
+    if (const u8* const span = gpu_memory.GetSpan(gpu_addr, size)) {
+        const auto begin = Common::AlignDown(reinterpret_cast<uintptr_t>(span), PageSize);
+        const auto end = reinterpret_cast<uintptr_t>(span) + size;
+        pages.reserve(Common::DivCeil(end - begin, PageSize));
+        for (uintptr_t page = begin; page < end; page += PageSize) {
+            pages.push_back(reinterpret_cast<const u8*>(page));
+        }
+    } else {
+        pages.reserve(Common::DivCeil(size, PageSize) + 1);
+        for (GPUVAddr page = gpu_addr; page < gpu_addr + size;
+             page = Common::AlignDown(page, PageSize) + PageSize) {
+            if (const u8* const pointer = gpu_memory.GetPointer(page)) {
+                pages.push_back(pointer);
+            }
+        }
+    }
+    constexpr size_t Batch = 64;
+    constexpr size_t MaxHelpers = 7;
+    std::atomic<size_t> cursor{0};
+    const auto touch = [&] {
+        for (;;) {
+            const size_t first = cursor.fetch_add(Batch, std::memory_order_relaxed);
+            if (first >= pages.size()) {
+                return;
+            }
+            const size_t last = (std::min)(first + Batch, pages.size());
+            for (size_t i = first; i < last; ++i) {
+                static_cast<void>(*static_cast<const volatile u8*>(pages[i]));
+            }
+        }
+    };
+    std::latch helpers{static_cast<std::ptrdiff_t>(MaxHelpers)};
+    size_t queued = 0;
+    auto& workers = Tegra::Texture::GetThreadWorkers();
+    while (queued < MaxHelpers && (queued + 1) * Batch * 2 <= pages.size() &&
+           workers.TryQueueWork([&] {
+               touch();
+               helpers.count_down();
+           })) {
+        ++queued;
+    }
+    helpers.count_down(static_cast<std::ptrdiff_t>(MaxHelpers - queued));
+    touch();
+    helpers.wait();
+}
+
 boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(
     Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
     std::span<const u8> input, std::span<u8> output, Tegra::Texture::UnswizzleWorker* worker) {
@@ -924,10 +993,10 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(
                 !worker->TryUnswizzle(
                     dst.first(host_bytes_per_layer), src.first(level_sizes[level]), 1U << bpp_log2,
                     num_tiles.width, num_tiles.height, num_tiles.depth, block.height, block.depth,
-                    stride_alignment, gpu_memory.UsesNativeTiling(), Nx2Perf::Verify())) {
+                    stride_alignment, info.native_tiling, Nx2Perf::Verify())) {
                 UnswizzleTexture(dst, src, 1U << bpp_log2, num_tiles.width, num_tiles.height,
                                  num_tiles.depth, block.height, block.depth, stride_alignment,
-                                 gpu_memory.UsesNativeTiling());
+                                 info.native_tiling);
             }
             guest_layer_offset += layer_stride;
             host_offset += host_bytes_per_layer;
@@ -1117,7 +1186,7 @@ std::vector<BufferImageCopy> UnswizzleImageRects(Tegra::MemoryManager& gpu_memor
             gpu_memory.ReadBlockUnsafe(row_addr, swizzled.data(), row_bytes);
             UnswizzleTexture(output.subspan(output_offset, bytes), swizzled, 1U << bpp_log2, width,
                              texel_rows, 1, level.block_height, 0, 0,
-                             gpu_memory.UsesNativeTiling());
+                             info.native_tiling);
             const u32 row_y = row * level.block_rows;
             const u32 y0 = (std::max)(rect.y, row_y);
             const u32 y1 = (std::min)(rect.y + rect.height, row_y + texel_rows);
@@ -1152,6 +1221,7 @@ UnswizzlePlan PlanUnswizzleImageRows(
     }
     const u32 bpp_log2 = BytesPerBlockLog2(info.format);
     plan.bpp_log2 = bpp_log2;
+    plan.native_tiling = info.native_tiling;
     const Extent2D tile_size = DefaultBlockSize(info.format);
     const LevelInfo level_info = MakeLevelInfo(info);
     const s32 num_levels = info.resources.levels;
@@ -1273,7 +1343,7 @@ void ExecuteUnswizzlePlan(Tegra::MemoryManager& gpu_memory, const UnswizzlePlan&
         Tegra::Texture::UnswizzleTexture(output.subspan(r.host_offset, r.host_bytes),
                                          run, 1U << plan.bpp_log2, r.run_tiles, r.tile_rows, 1,
                                          r.block.height, r.block.depth, r.run_alignment,
-                                         gpu_memory.UsesNativeTiling());
+                                         plan.native_tiling);
     }
 }
 
@@ -1522,23 +1592,66 @@ void SwizzleImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const Ima
                   std::span<const BufferImageCopy> copies, std::span<const u8> memory,
                   Common::ScratchBuffer<u8>& tmp_buffer) {
     const bool is_pitch_linear = info.type == ImageType::Linear;
-    for (const BufferImageCopy& copy : copies) {
-        const u32 levels =
-            info.num_samples > 1
-                ? 1
-                : HostMipLevelCount(info.size.width, info.size.height, info.size.depth,
-                                    static_cast<u32>(info.resources.levels));
-        if (!IsHostMipLevel(copy.image_subresource.base_level, levels)) {
-            // The host did not download this tail level. Preserve the guest bytes.
-            continue;
+    const u32 levels = info.num_samples > 1
+                           ? 1
+                           : HostMipLevelCount(info.size.width, info.size.height, info.size.depth,
+                                               static_cast<u32>(info.resources.levels));
+    if (is_pitch_linear) {
+        for (const BufferImageCopy& copy : copies) {
+            if (IsHostMipLevel(copy.image_subresource.base_level, levels)) {
+                SwizzlePitchLinearImage(gpu_memory, gpu_addr, info, copy, memory);
+            }
         }
+        return;
+    }
+    if (copies.empty() || info.resources.layers <= 0) {
+        return;
+    }
 
-        if (is_pitch_linear) {
-            SwizzlePitchLinearImage(gpu_memory, gpu_addr, info, copy, memory);
-        } else {
-            SwizzleBlockLinearImage(gpu_memory, gpu_addr, info, copy, memory, tmp_buffer);
+    const LevelInfo level_info = MakeLevelInfo(info);
+    const LevelArray sizes = CalculateLevelSizes(level_info, info.resources.levels);
+    const size_t layer_size = CalculateLevelBytes(sizes, info.resources.levels);
+    const size_t layer_stride = AlignLayerSize(layer_size, info.size, level_info.block,
+                                               level_info.tile_size.height, info.tile_width_spacing);
+    const size_t mapped_size = static_cast<size_t>(info.resources.layers - 1) * layer_stride +
+                               layer_size;
+    u8* const direct = gpu_memory.GetSpan(gpu_addr, mapped_size);
+    if (direct == nullptr) {
+        size_t scratch_size = tmp_buffer.capacity();
+        for (const BufferImageCopy& copy : copies) {
+            const s32 level = copy.image_subresource.base_level;
+            if (!IsHostMipLevel(level, levels) || sizes[level] <= scratch_size) {
+                continue;
+            }
+            GPUVAddr layer_addr = gpu_addr + CalculateLevelBytes(sizes, level);
+            for (s32 layer = 0; layer < info.resources.layers; ++layer, layer_addr += layer_stride) {
+                if (!gpu_memory.GetSpan(layer_addr, sizes[level])) {
+                    scratch_size = sizes[level];
+                    break;
+                }
+            }
+        }
+        if (scratch_size > tmp_buffer.capacity()) {
+            tmp_buffer.resize_destructive(scratch_size);
         }
     }
+    for (const BufferImageCopy& copy : copies) {
+        // Leave guest bytes alone for tail levels the host did not download.
+        if (IsHostMipLevel(copy.image_subresource.base_level, levels)) {
+            SwizzleBlockLinearImage(gpu_memory, gpu_addr, info, copy, memory, level_info, sizes,
+                                    layer_stride, direct, tmp_buffer);
+        }
+    }
+}
+
+bool ScaledImageFits(const ImageInfo& info, const Settings::ResolutionScalingInfo& resolution,
+                     u32 max_extent) noexcept {
+    const auto [samples_x, samples_y] = SamplesLog2(info.num_samples);
+    const u32 width = resolution.ScaleUp(info.size.width) >> samples_x;
+    const u32 height =
+        (info.type == ImageType::e2D ? resolution.ScaleUp(info.size.height) : info.size.height) >>
+        samples_y;
+    return width <= max_extent && height <= max_extent;
 }
 
 bool IsBlockLinearSizeCompatible(const ImageInfo& lhs, const ImageInfo& rhs, u32 lhs_level,
@@ -1554,6 +1667,15 @@ bool IsBlockLinearSizeCompatible(const ImageInfo& lhs, const ImageInfo& rhs, u32
         const Extent3D rhs_size = BlockLinearAlignedSize(rhs, rhs_level);
         return lhs_size.width == rhs_size.width && lhs_size.height == rhs_size.height;
     }
+}
+
+bool IsPaddedSquare(const ImageInfo& info) noexcept {
+    if (info.type != ImageType::e2D || info.num_samples != 1 || info.size.width <= info.size.height) {
+        return false;
+    }
+    ImageInfo square = info;
+    square.size.width = info.size.height;
+    return IsBlockLinearSizeCompatible(info, square, 0, 0, false);
 }
 
 bool IsBlockLinearSizeCompatibleBPPRelaxed(const ImageInfo& lhs, const ImageInfo& rhs,

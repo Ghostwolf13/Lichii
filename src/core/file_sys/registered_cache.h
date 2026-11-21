@@ -7,6 +7,7 @@
 
 #include <array>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -51,6 +52,8 @@ struct ContentProviderEntry {
 
     std::string DebugInfo() const;
 };
+
+using GameListApplicationPaths = std::map<u64, std::string>;
 
 struct ExternalUpdateEntry {
     u64 title_id;
@@ -259,6 +262,8 @@ private:
 
 class ManualContentProvider : public ContentProvider {
 public:
+    explicit ManualContentProvider(
+        std::function<std::vector<u8>(u64)> read_application_icon = {});
     ~ManualContentProvider() override;
 
     void AddEntry(TitleType title_type, ContentRecordType content_type, u64 title_id,
@@ -268,6 +273,12 @@ public:
     bool AddEntriesFromContainer(VirtualFile file, bool only_content = false,
                                  std::optional<u64> base_program_id = std::nullopt);
     void ClearAllEntries();
+
+    /// Publish the paths from the last completed game-list scan, independently of NCA entries.
+    void ReplaceApplicationPaths(GameListApplicationPaths paths);
+    std::optional<std::string> GetApplicationPath(u64 program_id) const;
+    std::vector<u8> ReadApplicationIcon(u64 program_id) const;
+    std::vector<u64> ListApplicationFiles() const;
 
     void Refresh() override;
     bool HasEntry(u64 title_id, ContentRecordType type) const override;
@@ -285,6 +296,8 @@ public:
 private:
     std::map<std::tuple<TitleType, ContentRecordType, u64>, VirtualFile> entries;
     std::vector<ExternalUpdateEntry> multi_version_entries;
+    GameListApplicationPaths application_paths;
+    const std::function<std::vector<u8>(u64)> read_application_icon;
 };
 
 class ExternalContentProvider : public ContentProvider {

@@ -13,6 +13,8 @@
 
 namespace Service {
 
+class SystemDataView;
+
 namespace FileSystem {
 class FileSystemController;
 } // namespace FileSystem
@@ -56,7 +58,8 @@ void EncryptSharedFont(const std::vector<u32>& input, std::vector<u8>& output, s
 
 class IPlatformServiceManager final : public ServiceFramework<IPlatformServiceManager> {
 public:
-    explicit IPlatformServiceManager(Core::System& system_, const char* service_name_);
+    explicit IPlatformServiceManager(Core::System& system_, const char* service_name_,
+                                     const SystemDataView* isolated_system_data = nullptr);
     ~IPlatformServiceManager() override;
 
 private:
@@ -75,6 +78,7 @@ private:
     void RequestLoadNxFont(HLERequestContext& ctx);
     void GetBuiltInFontSharedMemory(HLERequestContext& ctx);
     void GetBuiltInFontData(HLERequestContext& ctx);
+    void GetBuiltInFontDataSet(HLERequestContext& ctx);
 
     struct Impl;
     std::unique_ptr<Impl> impl;

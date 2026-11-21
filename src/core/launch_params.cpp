@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <regex>
+#include <algorithm>
 #include <cctype>
+#include <regex>
+#include <string_view>
 
 #include "common/assert.h"
 #include "common/logging.h"
@@ -138,9 +140,19 @@ LaunchParams ParseLaunchParams(Core::System& system, int argc, char *argv[], wch
                 break;
             case 'u': {
                 // Launch game with a specific user
-                bool argument_ok = isdigit(optarg[0]) != 0;
-                p.selected_user = atoi(optarg);
-                if (!argument_ok) {
+                // Only an all-digit argument is an index: a name may start with a digit.
+                const std::string_view argument{optarg};
+                bool argument_ok = !argument.empty() && std::ranges::all_of(argument, [](char c) {
+                    return isdigit(static_cast<unsigned char>(c)) != 0;
+                });
+                // A later -u replaces an earlier one, a name included, and a name that isn't found
+                // leaves no index behind.
+                p.selected_user.reset();
+                p.selected_user_name.clear();
+                if (argument_ok) {
+                    p.selected_user = atoi(optarg);
+                } else {
+                    p.selected_user_name = optarg;
                     // try to look it up by username, only finds the first username that matches.
                     auto const user_idx = system.GetProfileManager().GetUserIndex(optarg);
                     if (user_idx != std::nullopt) {

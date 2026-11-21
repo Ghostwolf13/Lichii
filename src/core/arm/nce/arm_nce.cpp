@@ -5,6 +5,7 @@
 
 #include <cinttypes>
 #include <memory>
+#include <utility>
 
 #include "common/settings.h"
 #include "common/signal_chain.h"
@@ -28,22 +29,84 @@ struct sigaction g_orig_bus_action;
 struct sigaction g_orig_segv_action;
 struct sigaction g_orig_ill_action;
 
+void ForwardHostSignal(int sig, void* raw_info, void* raw_context,
+                       const struct sigaction& action) {
+    auto* const info = static_cast<siginfo_t*>(raw_info);
+    const bool sent = info->si_code <= 0;
+    if (action.sa_handler == SIG_IGN && sent) {
+        return;
+    }
+    if (action.sa_handler == SIG_DFL || action.sa_handler == SIG_IGN) {
+        Common::SigAction(sig, &action, nullptr);
+        if (sent) {
+            raise(sig);
+        }
+        return;
+    }
+    if (action.sa_flags & SA_SIGINFO) {
+        action.sa_sigaction(sig, info, raw_context);
+    } else {
+        action.sa_handler(sig);
+    }
+}
+
 // Verify assembly offsets.
 using NativeExecutionParameters = Kernel::KThread::NativeExecutionParameters;
 static_assert(offsetof(NativeExecutionParameters, native_context) == TpidrEl0NativeContext);
 static_assert(offsetof(NativeExecutionParameters, lock) == TpidrEl0Lock);
 static_assert(offsetof(NativeExecutionParameters, magic) == TpidrEl0TlsMagic);
 
-fpsimd_context* GetFloatingPointState(mcontext_t& host_ctx) {
-    _aarch64_ctx* header = reinterpret_cast<_aarch64_ctx*>(&host_ctx.__reserved);
-    while (header->magic != FPSIMD_MAGIC) {
-        header = reinterpret_cast<_aarch64_ctx*>(reinterpret_cast<char*>(header) + header->size);
+template <typename Record>
+Record* FindSignalRecord(mcontext_t& host_ctx, u32 magic) {
+    auto* const base = reinterpret_cast<u8*>(&host_ctx.__reserved);
+    size_t offset = 0;
+    while (offset + sizeof(_aarch64_ctx) <= sizeof(host_ctx.__reserved)) {
+        auto* const header = reinterpret_cast<_aarch64_ctx*>(base + offset);
+        if (header->size < sizeof(_aarch64_ctx) || header->size % 16 != 0 ||
+            header->size > sizeof(host_ctx.__reserved) - offset) {
+            return nullptr;
+        }
+        if (header->magic == magic) {
+            return header->size >= sizeof(Record) ? reinterpret_cast<Record*>(header) : nullptr;
+        }
+        offset += header->size;
     }
-    return reinterpret_cast<fpsimd_context*>(header);
+    return nullptr;
+}
+
+fpsimd_context* GetFloatingPointState(mcontext_t& host_ctx) {
+    return FindSignalRecord<fpsimd_context>(host_ctx, FPSIMD_MAGIC);
 }
 
 using namespace Common::Literals;
 constexpr u32 StackSize = 128_KiB;
+
+struct NativeSignalStack {
+    bool Install() {
+        if (storage) {
+            return true;
+        }
+        auto bytes = std::make_unique<u8[]>(StackSize);
+        stack_t stack{};
+        stack.ss_sp = bytes.get();
+        stack.ss_size = StackSize;
+        if (sigaltstack(&stack, &previous) != 0) {
+            LOG_ERROR(Core_ARM, "Could not install native CPU signal stack");
+            return false;
+        }
+        storage = std::move(bytes);
+        return true;
+    }
+
+    ~NativeSignalStack() {
+        if (storage) {
+            sigaltstack(&previous, nullptr);
+        }
+    }
+
+    stack_t previous{};
+    std::unique_ptr<u8[]> storage;
+};
 
 } // namespace
 
@@ -63,6 +126,8 @@ void* ArmNce::RestoreGuestContext(void* raw_context) {
                 sizeof(guest_ctx->host_ctx.host_saved_vregs));
     std::memcpy(guest_ctx->host_ctx.host_saved_regs.data(), &host_ctx.regs[19],
                 sizeof(guest_ctx->host_ctx.host_saved_regs));
+    guest_ctx->host_ctx.host_fpcr = fpctx->fpcr;
+    guest_ctx->host_ctx.host_fpsr = fpctx->fpsr;
 
     // Save stack pointer.
     guest_ctx->host_ctx.host_sp = host_ctx.sp;
@@ -104,12 +169,15 @@ void ArmNce::SaveGuestContext(GuestContext* guest_ctx, void* raw_context) {
                 sizeof(guest_ctx->host_ctx.host_saved_regs));
     std::memcpy(&fpctx->vregs[8], guest_ctx->host_ctx.host_saved_vregs.data(),
                 sizeof(guest_ctx->host_ctx.host_saved_vregs));
+    fpctx->fpcr = guest_ctx->host_ctx.host_fpcr;
+    fpctx->fpsr = guest_ctx->host_ctx.host_fpsr;
 
     // Return from the call on exit by setting pc to x30.
     host_ctx.pc = guest_ctx->host_ctx.host_saved_regs[11];
 
     // Clear esr_el1 and return it.
     host_ctx.regs[0] = guest_ctx->esr_el1.exchange(0);
+    asm volatile("clrex" ::: "memory");
 }
 
 bool ArmNce::HandleFailedGuestFault(GuestContext* guest_ctx, void* raw_info, void* raw_context) {
@@ -119,15 +187,17 @@ bool ArmNce::HandleFailedGuestFault(GuestContext* guest_ctx, void* raw_info, voi
     // We can't handle the access, so determine why we crashed.
     const bool is_prefetch_abort = host_ctx.pc == reinterpret_cast<u64>(info->si_addr);
 
+#ifdef __ANDROID__
     // For data aborts, skip the instruction and return to guest code.
     // This will allow games to continue in many scenarios where they would otherwise crash.
     if (!is_prefetch_abort) {
         host_ctx.pc += 4;
         return true;
     }
+#endif
 
-    // This is a prefetch abort.
-    guest_ctx->esr_el1.fetch_or(static_cast<u64>(HaltReason::PrefetchAbort));
+    guest_ctx->esr_el1.fetch_or(
+        static_cast<u64>(is_prefetch_abort ? HaltReason::PrefetchAbort : HaltReason::DataAbort));
 
     // Forcibly mark the context as locked. We are still running.
     // We may race with SignalInterrupt here:
@@ -143,6 +213,14 @@ bool ArmNce::HandleFailedGuestFault(GuestContext* guest_ctx, void* raw_info, voi
 }
 
 bool ArmNce::HandleGuestAlignmentFault(GuestContext* guest_ctx, void* raw_info, void* raw_context) {
+    const int code = static_cast<siginfo_t*>(raw_info)->si_code;
+    if (code <= 0) {
+        HandleHostAlignmentFault(GuestAlignmentFaultSignal, raw_info, raw_context);
+        return true;
+    }
+    if (code != BUS_ADRALN) {
+        return HandleFailedGuestFault(guest_ctx, raw_info, raw_context);
+    }
     auto& host_ctx = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
     auto* fpctx = GetFloatingPointState(host_ctx);
     auto& memory = guest_ctx->parent->m_running_thread->GetOwnerProcess()->GetMemory();
@@ -160,7 +238,25 @@ bool ArmNce::HandleGuestAlignmentFault(GuestContext* guest_ctx, void* raw_info, 
 
 bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, void* raw_context) {
     auto* info = static_cast<siginfo_t*>(raw_info);
+    if (info->si_code <= 0) {
+        HandleHostAccessFault(GuestAccessFaultSignal, raw_info, raw_context);
+        return true;
+    }
 
+#ifndef __ANDROID__
+    auto& host_ctx = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
+    const auto* record = FindSignalRecord<esr_context>(host_ctx, ESR_MAGIC);
+    if (info->si_code == SEGV_ACCERR && record && (record->esr >> 26) == 0x24 &&
+        (record->esr & (u64{1} << 8)) == 0) {
+        auto* const cpu = guest_ctx->parent;
+        cpu->m_access_fault = AccessFault{reinterpret_cast<u64>(info->si_addr), host_ctx.pc,
+                                          (record->esr & (u64{1} << 6)) ? Access::Write
+                                                                         : Access::Read};
+        cpu->m_running_thread->GetNativeExecutionParameters().lock.store(SpinLockLocked);
+        SaveGuestContext(guest_ctx, raw_context);
+        return false;
+    }
+#else
     // Try to handle an invalid access.
     // TODO: handle accesses which split a page?
     const Common::ProcessAddress addr =
@@ -170,6 +266,7 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
         // We handled the access successfully and are returning to guest code.
         return true;
     }
+#endif
 
     // We couldn't handle the access.
     return HandleFailedGuestFault(guest_ctx, raw_info, raw_context);
@@ -196,44 +293,15 @@ bool ArmNce::HandleGuestIllegalInstruction(GuestContext* guest_ctx, void* raw_in
 }
 
 void ArmNce::HandleHostAlignmentFault(int sig, void* raw_info, void* raw_context) {
-    return g_orig_bus_action.sa_sigaction(sig, static_cast<siginfo_t*>(raw_info), raw_context);
+    ForwardHostSignal(sig, raw_info, raw_context, g_orig_bus_action);
 }
 
 void ArmNce::HandleHostAccessFault(int sig, void* raw_info, void* raw_context) {
-    return g_orig_segv_action.sa_sigaction(sig, static_cast<siginfo_t*>(raw_info), raw_context);
+    ForwardHostSignal(sig, raw_info, raw_context, g_orig_segv_action);
 }
 
-// Only SA_SIGINFO is looked at in the previous action's flags; SA_RESETHAND and SA_NODEFER are not
-// emulated. A library that installs its own SIGILL handler after NCE does replaces this one, and
-// guest SIGILLs then reach that handler instead.
 void ArmNce::HandleHostIllegalInstruction(int sig, void* raw_info, void* raw_context) {
-    auto* const info = static_cast<siginfo_t*>(raw_info);
-    if (g_orig_ill_action.sa_flags & SA_SIGINFO) {
-        return g_orig_ill_action.sa_sigaction(sig, info, raw_context);
-    }
-
-    // si_code <= 0 means the signal was sent (kill, tgkill, raise) rather than raised by a faulting
-    // instruction, so returning does not deliver it again.
-    const bool sent = info->si_code <= 0;
-    if (g_orig_ill_action.sa_handler == SIG_IGN) {
-        if (sent) {
-            // Drop it, but keep this handler installed for guest SIGILLs.
-            return;
-        }
-        // The kernel kills on a faulting instruction whose SIGILL is ignored.
-        Common::SigAction(sig, &g_orig_ill_action, nullptr);
-        return;
-    }
-    if (g_orig_ill_action.sa_handler == SIG_DFL) {
-        Common::SigAction(sig, &g_orig_ill_action, nullptr);
-        if (sent) {
-            // Pending until this handler returns, then the default action runs.
-            raise(sig);
-        }
-        // Otherwise the instruction faults again on return.
-        return;
-    }
-    g_orig_ill_action.sa_handler(sig);
+    ForwardHostSignal(sig, raw_info, raw_context, g_orig_ill_action);
 }
 
 void ArmNce::LockThread(Kernel::KThread* thread) {
@@ -242,14 +310,13 @@ void ArmNce::LockThread(Kernel::KThread* thread) {
 }
 
 void ArmNce::UnlockThread(Kernel::KThread* thread) {
-    auto* thread_params = &thread->GetNativeExecutionParameters();
-    m_guest_ctx.tpidr_el0 = thread_params->tpidr_el0;
-    m_guest_ctx.tpidrro_el0 = thread_params->tpidrro_el0;
-    thread_params->native_context = nullptr;
-    UnlockThreadParameters(thread_params);
+    UnlockThreadParameters(&thread->GetNativeExecutionParameters());
 }
 
 HaltReason ArmNce::RunThread(Kernel::KThread* thread) {
+    if (!m_signals_ready) {
+        return HaltReason::PrefetchAbort;
+    }
     // Check if we're already interrupted.
     // If we are, we can just return immediately.
     HaltReason hr = static_cast<HaltReason>(m_guest_ctx.esr_el1.exchange(0));
@@ -288,16 +355,31 @@ HaltReason ArmNce::RunThread(Kernel::KThread* thread) {
     // Critical section for thread cleanup
     std::atomic_thread_fence(std::memory_order_acquire);
 
-    // Cache values before releasing thread
-    const u64 final_tpidr_el0 = thread_params->tpidr_el0;
+    m_guest_ctx.tpidr_el0 = thread_params->tpidr_el0;
 
     // Minimize critical section
     thread_params->is_running = false;
     thread_params->native_context = nullptr;
     m_running_thread = nullptr;
 
-    // Non-critical updates can happen after releasing the thread
-    m_guest_ctx.tpidr_el0 = final_tpidr_el0;
+#ifndef __ANDROID__
+    const auto fault = std::exchange(m_access_fault, {});
+    const auto previous = std::exchange(m_last_access_retry, {});
+    if (fault) {
+        const auto prior_trap =
+            previous && previous->first == *fault ? std::optional{previous->second} : std::nullopt;
+        const auto trap = process->GetMemory().RecoverNceAccess(
+            fault->address, fault->access == Access::Write, prior_trap);
+        if (trap) {
+            m_last_access_retry.emplace(*fault, *trap);
+        } else {
+            LOG_ERROR(Core_ARM, "Unrecoverable native guest memory {} at {:#x}, PC {:#x}",
+                      fault->access == Access::Write ? "write" : "read",
+                      fault->address, m_guest_ctx.pc);
+            hr |= HaltReason::DataAbort;
+        }
+    }
+#endif
 
     // Return the halt reason.
     return hr;
@@ -331,23 +413,16 @@ ArmNce::ArmNce(System& system, bool uses_wall_clock, std::size_t core_index)
 ArmNce::~ArmNce() = default;
 
 void ArmNce::Initialize() {
-    if (m_thread_id == -1) {
-        m_thread_id = gettid();
+    if (m_signals_ready) {
+        return;
+    }
+    m_thread_id = gettid();
+    thread_local NativeSignalStack signal_stack;
+    if (!signal_stack.Install()) {
+        return;
     }
 
-    // Configure signal stack.
-    if (!m_stack) {
-        m_stack = std::make_unique<u8[]>(StackSize);
-
-        stack_t ss{};
-        ss.ss_sp = m_stack.get();
-        ss.ss_size = StackSize;
-        sigaltstack(&ss, nullptr);
-    }
-
-    // Set up signals.
-    static std::once_flag flag;
-    std::call_once(flag, [] {
+    static const bool installed = [] {
         using HandlerType = decltype(sigaction::sa_sigaction);
 
         sigset_t signal_mask;
@@ -358,43 +433,48 @@ void ArmNce::Initialize() {
         sigaddset(&signal_mask, GuestAccessFaultSignal);
         sigaddset(&signal_mask, GuestIllegalInstructionSignal);
 
-        struct sigaction return_to_run_code_action {};
-        return_to_run_code_action.sa_flags = SA_SIGINFO | SA_ONSTACK;
-        return_to_run_code_action.sa_sigaction = reinterpret_cast<HandlerType>(
-            &ArmNce::ReturnToRunCodeByExceptionLevelChangeSignalHandler);
-        return_to_run_code_action.sa_mask = signal_mask;
-        Common::SigAction(ReturnToRunCodeByExceptionLevelChangeSignal, &return_to_run_code_action,
-                          nullptr);
-
-        struct sigaction break_from_run_code_action {};
-        break_from_run_code_action.sa_flags = SA_SIGINFO | SA_ONSTACK;
-        break_from_run_code_action.sa_sigaction =
-            reinterpret_cast<HandlerType>(&ArmNce::BreakFromRunCodeSignalHandler);
-        break_from_run_code_action.sa_mask = signal_mask;
-        Common::SigAction(BreakFromRunCodeSignal, &break_from_run_code_action, nullptr);
-
-        struct sigaction alignment_fault_action {};
-        alignment_fault_action.sa_flags = SA_SIGINFO | SA_ONSTACK;
-        alignment_fault_action.sa_sigaction =
-            reinterpret_cast<HandlerType>(&ArmNce::GuestAlignmentFaultSignalHandler);
-        alignment_fault_action.sa_mask = signal_mask;
-        Common::SigAction(GuestAlignmentFaultSignal, &alignment_fault_action, nullptr);
-
-        struct sigaction access_fault_action {};
-        access_fault_action.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
-        access_fault_action.sa_sigaction =
-            reinterpret_cast<HandlerType>(&ArmNce::GuestAccessFaultSignalHandler);
-        access_fault_action.sa_mask = signal_mask;
-        Common::SigAction(GuestAccessFaultSignal, &access_fault_action, &g_orig_segv_action);
-
-        struct sigaction illegal_instruction_action {};
-        illegal_instruction_action.sa_flags = SA_SIGINFO | SA_ONSTACK;
-        illegal_instruction_action.sa_sigaction =
-            reinterpret_cast<HandlerType>(&ArmNce::GuestIllegalInstructionSignalHandler);
-        illegal_instruction_action.sa_mask = signal_mask;
-        Common::SigAction(GuestIllegalInstructionSignal, &illegal_instruction_action,
-                          &g_orig_ill_action);
-    });
+        struct Handler {
+            int signal;
+            void (*callback)(int, void*, void*);
+            struct sigaction* previous;
+        };
+        const std::array handlers{
+            Handler{ReturnToRunCodeByExceptionLevelChangeSignal,
+                    &ArmNce::ReturnToRunCodeByExceptionLevelChangeSignalHandler, nullptr},
+            Handler{BreakFromRunCodeSignal, &ArmNce::BreakFromRunCodeSignalHandler, nullptr},
+            Handler{GuestAlignmentFaultSignal, &ArmNce::GuestAlignmentFaultSignalHandler,
+                    &g_orig_bus_action},
+            Handler{GuestAccessFaultSignal, &ArmNce::GuestAccessFaultSignalHandler,
+                    &g_orig_segv_action},
+            Handler{GuestIllegalInstructionSignal, &ArmNce::GuestIllegalInstructionSignalHandler,
+                    &g_orig_ill_action},
+        };
+        std::array<struct sigaction, handlers.size()> previous{};
+        for (size_t i = 0; i < handlers.size(); ++i) {
+            const auto& handler = handlers[i];
+            struct sigaction action {};
+            action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+            if (handler.signal == GuestAccessFaultSignal) {
+                action.sa_flags |= SA_RESTART;
+            }
+            action.sa_sigaction = reinterpret_cast<HandlerType>(handler.callback);
+            action.sa_mask = signal_mask;
+            auto* const old = handler.previous != nullptr ? handler.previous : &previous[i];
+            if (Common::SigAction(handler.signal, &action, old) != 0) {
+                LOG_ERROR(Core_ARM, "Could not install native CPU signal handler {}", handler.signal);
+                while (i > 0) {
+                    --i;
+                    const auto& earlier = handlers[i];
+                    Common::SigAction(earlier.signal,
+                                      earlier.previous != nullptr ? earlier.previous : &previous[i],
+                                      nullptr);
+                }
+                return false;
+            }
+        }
+        return true;
+    }();
+    m_signals_ready = installed;
 }
 
 void ArmNce::SetTpidrroEl0(u64 value) {

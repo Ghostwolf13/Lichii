@@ -6,6 +6,8 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <vector>
@@ -53,14 +55,49 @@ public:
     /// Acquires the next image in the swapchain, waits as needed. Returns true when no image was
     /// acquired (out of date) and the swapchain has to be recreated first.
     /// `may_flush`: false on the async present thread (see Scheduler::Wait).
-    bool AcquireNextImage(bool may_flush = true);
+    /// `game_frame_presents`: how many presents show this game frame, its generated frames
+    /// included; Frame Pacing Mode targets game frames.
+    bool AcquireNextImage(bool may_flush = true, u32 game_frame_presents = 1);
 
-    /// Presents the rendered image to the swapchain.
-    void Present(VkSemaphore render_semaphore);
+    /// Presents the rendered image to the swapchain. A non-zero `present_id` is chained as the
+    /// present's id when the swapchain has ids (HasPresentIds). Returns whether the present was
+    /// accepted (VK_SUCCESS or VK_SUBOPTIMAL_KHR): only then can its id be waited for.
+    bool Present(VkSemaphore render_semaphore, u64 present_id = 0);
+
+    /// Asks for presents that carry ids and can be waited for. A swapchain made without them is
+    /// recreated for it once (NeedsRecreation); nothing is recreated to drop them.
+    void RequestPresentIds(bool requested) {
+        present_ids_requested = requested;
+    }
+
+    /// Presents of this swapchain carry ids and can be waited for (VK_KHR_present_id2 and
+    /// VK_KHR_present_wait2 where the surface supports them, else the first versions).
+    bool HasPresentIds() const {
+        return present_ids;
+    }
+
+    /// A present waits in the swapchain's queue for the display (every mode but MAILBOX, which
+    /// replaces the waiting present), so the presenter can hold the next one until it is shown.
+    bool WaitsForDisplay() const {
+        return present_ids && present_mode != VK_PRESENT_MODE_MAILBOX_KHR;
+    }
+
+    /// vkWaitForPresentKHR (or vkWaitForPresent2KHR) on the swapchain of `generation`, for the
+    /// present wait thread. Vulkan allows no other use of a swapchain during that wait, so it
+    /// holds the lock AcquireNextImage, Present and Create take: keep `timeout_ns` short (they
+    /// wait for it to end) and call again after VK_TIMEOUT. VK_ERROR_OUT_OF_DATE_KHR once that
+    /// swapchain is gone.
+    VkResult WaitForPresent(u64 generation, u64 present_id, u64 timeout_ns);
+
+    /// Changes each time the swapchain is destroyed (present ids are per swapchain).
+    u64 Generation() const {
+        return generation.load(std::memory_order_acquire);
+    }
 
     /// Returns true when the swapchain needs to be recreated.
     bool NeedsRecreation() const {
-        return !swapchain || IsSubOptimal() || NeedsPresentModeUpdate();
+        return !swapchain || IsSubOptimal() || NeedsPresentModeUpdate() ||
+               (present_ids_requested && !present_ids && !present_ids_refused);
     }
 
     bool IsCreated() const {
@@ -155,6 +192,13 @@ private:
 
     bool NeedsPresentModeUpdate() const;
 
+    /// Locks the swapchain for an acquire, a present or its recreation, ahead of the present wait
+    /// thread (WaitForPresent).
+    [[nodiscard]] std::unique_lock<std::mutex> LockForUse();
+
+    /// The surface takes VK_KHR_present_id2 ids and VK_KHR_present_wait2 waits.
+    bool SurfaceSupportsPresentWait2() const;
+
     VkSurfaceKHR_T* surface;
 
     const Device& device;
@@ -184,9 +228,22 @@ private:
     bool has_imm{false};
     bool has_mailbox{false};
     bool has_fifo_relaxed{false};
+    bool present_ids_requested{}; ///< RequestPresentIds
+    bool present_ids{};           ///< Presents carry ids and can be waited for.
+    bool present_ids2{};          ///< Through VK_KHR_present_id2/wait2, not the first versions.
+    bool present_ids_refused{};   ///< Requested, but this swapchain can have none.
+    bool present_ids2_failed{};   ///< No swapchain could be made with the second versions.
+    bool present_wait_stalled{};  ///< A present wait ignored its timeout (guarded by use_mutex).
 
     bool is_outdated{};
     bool is_suboptimal{};
+
+    /// Held for each use of the swapchain handle that Vulkan wants synchronized: acquires,
+    /// presents, present waits and its destruction.
+    std::mutex use_mutex;
+    std::condition_variable use_cv;
+    std::atomic<u32> use_requests{}; ///< Threads in LockForUse; WaitForPresent lets them in first.
+    std::atomic<u64> generation{};
 };
 
 } // namespace Vulkan

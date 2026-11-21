@@ -47,7 +47,9 @@ def card(entry):
     image = (f'<a href="{html.escape(png)}"><img loading="lazy" src="{html.escape(png)}"></a>'
              if png else '<div class="noimg">no preview</div>')
     rows = [
-        ("format", f"{entry.get('format', '?')} {entry.get('width', '?')}x{entry.get('height', '?')}"
+        ("format", f"{entry.get('format', '?')}"
+                   + (f" (decoded {entry['decoded']})" if entry.get("decoded") else "")
+                   + f" {entry.get('width', '?')}x{entry.get('height', '?')}"
                    + (f"x{entry['depth']}" if entry.get("depth", 1) > 1 else "")
                    + f" L{entry.get('level', 0)}/{entry.get('layer', 0)}"
                    + (" rescaled" if entry.get("rescaled") else "")),

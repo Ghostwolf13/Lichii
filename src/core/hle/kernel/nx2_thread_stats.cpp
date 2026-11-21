@@ -54,6 +54,8 @@ enum CoreField : size_t {
     BlockLookups,
     BlocksCompiled,
     CacheClears,
+    FastmemFaults,
+    FastmemRecompiles,
     ExitCounts,
     HintCounts = ExitCounts + Exits,
     CoreFields = HintCounts + Hints,
@@ -247,6 +249,10 @@ void Report(u64 now) {
                  per_second(d[Reads]), per_second(d[PollReads]), per_second(d[HintCounts]),
                  per_second(d[HintCounts + 1]), per_second(d[HintCounts + 2]),
                  per_second(d[HintCounts + 3]), per_second(d[HintCounts + 4]));
+#if defined(ARCHITECTURE_x86_64)
+        LOG_INFO(Kernel, "Guest core {} x64 fastmem over {:.1f} s: {} handled faults, {} invalidation requests",
+                 core, seconds, d[FastmemFaults], d[FastmemRecompiles]);
+#endif
     }
 }
 
@@ -268,7 +274,8 @@ void MaybeReport(u64 now) {
 } // Anonymous namespace
 
 void EndRun(KThread* thread, size_t core, u64 start, u64 end, Exit exit, u32 svc,
-            u64 block_lookups, u64 blocks_compiled, u64 cache_clears) {
+            u64 block_lookups, u64 blocks_compiled, u64 cache_clears, u64 fastmem_faults,
+            u64 fastmem_recompiles) {
     const RunTally& run = t_run;
     const u64 ticks = end - start;
     if (core < g_cores.size()) {
@@ -285,6 +292,8 @@ void EndRun(KThread* thread, size_t core, u64 start, u64 end, Exit exit, u32 svc
         c[BlockLookups].store(block_lookups, std::memory_order_relaxed);
         c[BlocksCompiled].store(blocks_compiled, std::memory_order_relaxed);
         c[CacheClears].store(cache_clears, std::memory_order_relaxed);
+        c[FastmemFaults].store(fastmem_faults, std::memory_order_relaxed);
+        c[FastmemRecompiles].store(fastmem_recompiles, std::memory_order_relaxed);
     }
     // Only the core that runs a thread writes these.
     if (Counters* counters = Get(thread)) {

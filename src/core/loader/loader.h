@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
 #include <iosfwd>
 #include <memory>
@@ -160,6 +161,7 @@ enum class ResultStatus : u16 {
     ErrorIntegrityVerificationFailed,
     ErrorNUPBadFormat,
     ErrorNUPNoBasePackage,
+    ErrorNativeHomeProgramMismatch,
 };
 
 std::string GetResultStatusString(ResultStatus status);
@@ -330,7 +332,7 @@ public:
     }
 
     /**
-     * Get the control data (CNMT) of the application
+     * Get the control data (NACP) of the application
      *
      * @param[out] control Reference to store the application control data into
      *
@@ -339,6 +341,8 @@ public:
     virtual ResultStatus ReadControlData(FileSys::NACP& control) {
         return ResultStatus::ErrorNotImplemented;
     }
+
+    virtual ResultStatus ReadDeveloper(std::string& developer);
 
     /**
      * Get the application's display version ("1.8.0"), from its control data by default
@@ -359,6 +363,14 @@ public:
     virtual ResultStatus ReadManualRomFS(FileSys::VirtualFile& out_file) {
         return ResultStatus::ErrorNotImplemented;
     }
+
+    // The main NSO's build ID before the game loads, with the update that loading applies.
+    virtual ResultStatus ReadMainBuildId(Core::System& system, std::array<u8, 0x20>& build_id) {
+        return ResultStatus::ErrorNotImplemented;
+    }
+
+    // ReadMainBuildId as the uppercase hex string the NPLN patch catalogue keys on.
+    std::optional<std::string> ReadMainBuildIdHex(Core::System& system);
 
     using Modules = std::map<VAddr, std::string>;
 

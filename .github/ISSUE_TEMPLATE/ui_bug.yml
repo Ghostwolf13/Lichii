@@ -3,6 +3,10 @@ description: UI Doesnt works as expected
 title: "[UIBug] "
 labels: ["bug", "Lichii-UI"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not post games, keys, firmware, account credentials or unauthorized download links. Bug bundles, GPU traces, shader caches and memory dumps can contain game data: do not attach them publicly; ask a maintainer for handling instructions first.
   - type: checkboxes
     id: checks
     attributes:
@@ -77,5 +81,6 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Log / crash dump
+      label: Text log
+      description: Review eden_log.txt for personal information and credentials before posting. Do not attach a Ctrl+F12 bug bundle or a memory dump here.
       render: shell

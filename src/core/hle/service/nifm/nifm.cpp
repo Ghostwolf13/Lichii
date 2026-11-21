@@ -1,11 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+// SPDX-FileCopyrightText: Copyright 2025 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <filesystem>
 #include <fstream>
+#include "common/nextendo.h"
 #include "core/core.h"
+#include "core/core_timing.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
@@ -397,15 +400,40 @@ public:
     }
 
     ~IRequest() override {
+        if (state_poll_event) {
+            system.CoreTiming().UnscheduleEvent(state_poll_event);
+        }
         service_context.CloseEvent(event1);
         service_context.CloseEvent(event2);
     }
 
 private:
+    // While Nextendo online play is on, a submitted request follows the network, like on hardware.
+    // Splatoon 3's NPLN worker waits on the request's events and never asks again.
     void Submit(HLERequestContext& ctx) {
-        LOG_DEBUG(Service_NIFM, "(STUBBED) called");
+        LOG_DEBUG(Service_NIFM, "called");
 
-        if (state == RequestState::NotSubmitted) {
+        std::scoped_lock lk{state_lock};
+        if (Common::Nextendo::OnlinePlayActive()) {
+            UpdateState(NetworkRequestState());
+            if (!state_poll_event) {
+                state_poll_event = Core::Timing::CreateEvent(
+                    "IRequest::StatePoll",
+                    [this](s64,
+                           std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+                        std::scoped_lock poll_lk{state_lock};
+                        if (!Common::Nextendo::OnlinePlayActive()) {
+                            return std::nullopt;
+                        }
+                        if (const auto new_state = NetworkRequestState(); new_state != state) {
+                            UpdateState(new_state);
+                        }
+                        return std::nullopt;
+                    });
+                system.CoreTiming().ScheduleLoopingEvent(StatePollInterval, StatePollInterval,
+                                                         state_poll_event);
+            }
+        } else if (state == RequestState::NotSubmitted) {
             UpdateState(RequestState::OnHold);
         }
 
@@ -416,6 +444,7 @@ private:
     void GetRequestState(HLERequestContext& ctx) {
         LOG_DEBUG(Service_NIFM, "(STUBBED) called");
 
+        std::scoped_lock lk{state_lock};
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
         rb.PushEnum(state);
@@ -448,6 +477,7 @@ private:
     void GetResult(HLERequestContext& ctx) {
         LOG_DEBUG(Service_NIFM, "(STUBBED) called");
 
+        std::scoped_lock lk{state_lock};
         const auto result = [this] {
             const auto has_connection = IsNetworkAvailable();
             switch (state) {
@@ -506,14 +536,26 @@ private:
         rb.Push<u32>(0);
     }
 
+    static RequestState NetworkRequestState() {
+        return IsNetworkAvailable() ? RequestState::Accepted : RequestState::Invalid;
+    }
+
     void UpdateState(RequestState new_state) {
         LOG_DEBUG(Service_NIFM, "(STUBBED) called");
         state = new_state;
         event1->Signal(system.Kernel());
+        // What the second event means is unknown. Splatoon 3 waits on it for the request state.
+        if (Common::Nextendo::OnlinePlayActive()) {
+            event2->Signal(system.Kernel());
+        }
     }
+
+    static constexpr std::chrono::milliseconds StatePollInterval{1000};
 
     KernelHelpers::ServiceContext service_context;
 
+    std::mutex state_lock;
+    std::shared_ptr<Core::Timing::EventType> state_poll_event;
     RequestState state;
 
     Kernel::KEvent* event1;
@@ -1021,9 +1063,9 @@ void IGeneralService::IsAnyInternetRequestAccepted(HLERequestContext& ctx) {
 }
 
 void IGeneralService::IsAnyForegroundRequestAccepted(HLERequestContext& ctx) {
-    const bool is_accepted{};
+    const bool is_accepted = Common::Nextendo::OnlinePlayActive() && IsNetworkAvailable();
 
-    LOG_WARNING(Service_NIFM, "(STUBBED) called, is_accepted={}", is_accepted);
+    LOG_DEBUG(Service_NIFM, "called, is_accepted={}", is_accepted);
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);

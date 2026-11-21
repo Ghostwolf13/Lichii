@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -73,13 +74,42 @@ inline void ReadRomFS(const FileSys::VirtualFile& romfs, Budget& budget) {
     Walk(FileSys::ExtractRomFS(romfs), budget);
 }
 
+// Points HOME, the XDG base directories and TMPDIR at a fresh directory under the system temp
+// directory, and returns it, so a harness that touches the user data, cache or keys directories
+// never reads or writes the user's own files. Call it first in LLVMFuzzerInitialize, before
+// anything asks for a Lichii path.
+// A new private directory under the temporary directory (mode 0700, random name). mkdtemp fails
+// rather than reuse a path, so nobody can plant a directory, or a symlink inside it, ahead of the
+// harness.
+inline std::filesystem::path MakePrivateTempDir(const char* prefix) {
+    auto pattern =
+        (std::filesystem::temp_directory_path() / fmt::format("{}-XXXXXX", prefix)).string();
+    if (mkdtemp(pattern.data()) == nullptr) {
+        fmt::print(stderr, "mkdtemp failed for {}\n", pattern);
+        std::abort();
+    }
+    return pattern;
+}
+
+inline std::filesystem::path UseScratchHome(const char* harness) {
+    const auto home = MakePrivateTempDir(fmt::format("lichii-{}", harness).c_str());
+    for (const char* sub : {"", "/.local/share", "/.config", "/.cache", "/tmp"}) {
+        std::filesystem::create_directories(home.string() + sub);
+    }
+    setenv("HOME", home.c_str(), 1);
+    setenv("XDG_DATA_HOME", (home / ".local/share").c_str(), 1);
+    setenv("XDG_CONFIG_HOME", (home / ".config").c_str(), 1);
+    setenv("XDG_CACHE_HOME", (home / ".cache").c_str(), 1);
+    setenv("TMPDIR", (home / "tmp").c_str(), 1);
+    return home;
+}
+
 // Points the key manager at a scratch keys directory holding made-up key area keys for every
 // generation, as a user with dumped keys has. Plaintext NCAs then get past the key check without
 // any real keys, and the harness never reads or writes the user's own keys. Call it before
 // anything touches Core::Crypto::KeyManager.
 inline void UseSyntheticKeys() {
-    const auto dir = std::filesystem::temp_directory_path() / fmt::format("lichii-fuzz-keys-{}", getpid());
-    std::filesystem::create_directories(dir);
+    const auto dir = MakePrivateTempDir("lichii-fuzz-keys");
     std::ofstream keys{dir / "prod.keys"};
     for (const char* kind : {"application", "ocean", "system"}) {
         for (int generation = 0; generation < 0x20; ++generation) {

@@ -7,6 +7,14 @@ on:
         description: Publish the binaries as a GitHub release
         type: boolean
         default: true
+      include_whats_new:
+        description: Include the staged What's New notes for this release
+        type: boolean
+        default: false
+      nsight_aftermath:
+        description: Build Windows with Nsight Aftermath GPU crash dumps (test builds only, no NVIDIA files shipped)
+        type: boolean
+        default: false
   push:
     branches:
       - nx2-experimental
@@ -25,6 +33,9 @@ on:
       - "cpmfile.json"
       - "*.profdata"
       - ".github/workflows/release-binaries.yml"
+  # Refreshes nx2's compiler caches, which every branch's build restores (see docs/CI.md).
+  schedule:
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
@@ -47,7 +58,26 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: read
+    outputs:
+      build: ${{ steps.nightly.outputs.build || 'true' }}
     steps:
+      - name: Skip a nightly run for a commit nx2 already built
+        id: nightly
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          built=$(gh run list -R "$GITHUB_REPOSITORY" -w release-binaries.yml -b nx2 -s success -L 1 \
+            --json headSha --jq '.[0].headSha // ""')
+          echo "build=$([ "$built" = "$GITHUB_SHA" ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to publish an Aftermath build
+        if: inputs.nsight_aftermath && inputs.publish_release
+        run: |
+          echo "nsight_aftermath builds are test builds; run them with publish_release=false"
+          exit 1
+
       - name: Prepare release tag
         if: github.event_name == 'push' || inputs.publish_release
         shell: bash
@@ -69,13 +99,16 @@ jobs:
   build:
     name: ${{ matrix.platform }} binary
     needs: prepare-release
+    if: needs.prepare-release.outputs.build == 'true'
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      actions: write
     env:
+      LICHII_USE_PENDING_RELEASE_NOTES: ${{ inputs.publish_release && inputs.include_whats_new && 'ON' || 'OFF' }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 3000M
       CCACHE_COMPILERCHECK: content
-      SCCACHE_DIR: ${{ github.workspace }}/.sccache
-      SCCACHE_CACHE_SIZE: 3G
     strategy:
       fail-fast: false
       matrix:
@@ -109,10 +142,26 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v5
 
+      # The Azure Ubuntu mirror the x86-64 runners use sometimes serves these packages at a few
+      # hundred KB/s, which made this step take 20 to 40 minutes, so their .deb files are cached.
+      - name: Restore apt packages
+        if: startsWith(matrix.platform, 'linux-x86_64')
+        id: apt-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/apt-archives
+          key: apt-${{ matrix.platform }}-v1-${{ github.run_id }}
+          restore-keys: |
+            apt-${{ matrix.platform }}-v1-
+
       - name: Install Linux dependencies
         if: startsWith(matrix.platform, 'linux')
         shell: bash
         run: |
+          mkdir -p "$RUNNER_TEMP/apt-archives/partial"
+          echo "APT_DEBS_RESTORED=$(find "$RUNNER_TEMP/apt-archives" -maxdepth 1 -name '*.deb' | wc -l)" >> "$GITHUB_ENV"
+          echo "Dir::Cache::Archives \"$RUNNER_TEMP/apt-archives\";" |
+            sudo tee /etc/apt/apt.conf.d/90lichii-archives > /dev/null
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev \
@@ -159,7 +208,7 @@ jobs:
           host: linux
           target: desktop
           arch: linux_gcc_64
-          modules: qtcharts
+          modules: qtcharts qtimageformats
           cache: true
 
       - name: Install Qt on Linux ARM64
@@ -170,7 +219,7 @@ jobs:
           host: linux_arm64
           target: desktop
           arch: linux_gcc_arm64
-          modules: qtcharts
+          modules: qtcharts qtimageformats
           cache: true
 
       # Ubuntu's own clang 18 cannot read a profile from a current LLVM, so take clang from the LLVM
@@ -190,6 +239,30 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             "clang-$PGO_LLVM_VERSION" "lld-$PGO_LLVM_VERSION"
           "clang-$PGO_LLVM_VERSION" --version
+
+      # Branch builds restore nx2's caches without saving their own, which no other branch can
+      # restore: only nx2 saves and keeps one entry per cache family (docs/CI.md).
+      # A new snapshot is saved only when this run downloaded packages the cache lacked.
+      - name: Drop superseded apt packages
+        if: startsWith(matrix.platform, 'linux-x86_64') && github.ref == 'refs/heads/nx2'
+        id: apt-trim
+        shell: bash
+        run: |
+          if [ "$(find "$RUNNER_TEMP/apt-archives" -maxdepth 1 -name '*.deb' | wc -l)" = "$APT_DEBS_RESTORED" ]; then
+            echo "save=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sudo apt-get autoclean
+          sudo rm -rf "$RUNNER_TEMP/apt-archives/partial" "$RUNNER_TEMP/apt-archives/lock"
+          sudo chown -R "$USER" "$RUNNER_TEMP/apt-archives"
+          echo "save=true" >> "$GITHUB_OUTPUT"
+
+      - name: Save apt packages
+        if: steps.apt-trim.outputs.save == 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/apt-archives
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       # The profiles are in the source tree, where the Linux and Windows configure steps read them.
       - name: Check PGO profile
@@ -218,21 +291,22 @@ jobs:
           host: windows
           target: desktop
           arch: win64_msvc2022_64
-          modules: qtcharts
+          modules: qtcharts qtimageformats
           cache: true
 
-      # ccache does not handle MSVC-style command lines well, so the clang-cl job uses sccache. The
-      # other jobs use ccache, which CMake enables through USE_CCACHE
-      # (externals/cmake-modules/UseCcache.cmake).
-      - name: Install sccache on Windows
+      # ccache rather than sccache, as in build-check: sccache has no direct mode for clang-cl, so
+      # every hit still ran the preprocessor and a build with 96% hits compiled for 13 minutes.
+      - name: Install ccache on Windows
         if: startsWith(matrix.platform, 'windows')
         shell: pwsh
         run: |
-          $zip = Join-Path $env:RUNNER_TEMP 'sccache.zip'
-          Invoke-WebRequest -OutFile $zip https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip
-          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'sccache')
-          $bin = (Get-ChildItem -Recurse -Filter sccache.exe (Join-Path $env:RUNNER_TEMP 'sccache')).DirectoryName
-          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          $zip = Join-Path $env:RUNNER_TEMP 'ccache.zip'
+          Invoke-WebRequest -OutFile $zip https://github.com/ccache/ccache/releases/download/v4.14.2/ccache-4.14.2-windows-x86_64.zip
+          if ((Get-FileHash -Algorithm SHA256 $zip).Hash -ne '6993ce645e53192cec592ee23186200b574ac4c59097ecde8d9cfd681b47ae84') {
+              throw 'ccache checksum mismatch'
+          }
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
+          Join-Path $env:RUNNER_TEMP 'ccache-4.14.2-windows-x86_64' | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
       - name: Install Vulkan SDK on Windows
         if: startsWith(matrix.platform, 'windows')
@@ -243,6 +317,26 @@ jobs:
         if: startsWith(matrix.platform, 'windows')
         shell: pwsh
         run: glslangValidator --version
+
+      # Only the SDK's headers are kept: the tracker loads GFSDK_Aftermath_Lib.x64.dll at run time,
+      # so the tester supplies his own copy and the artifact holds no NVIDIA files.
+      - name: Fetch Nsight Aftermath SDK headers
+        if: startsWith(matrix.platform, 'windows') && inputs.nsight_aftermath
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'aftermath-sdk.zip'
+          Invoke-WebRequest -OutFile $zip https://developer.nvidia.com/downloads/assets/tools/secure/nsight-aftermath-sdk/2026_3_0/windows_x64/NVIDIA_Nsight_Aftermath_SDK_2026.3.0.26197-windows_x64.zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          if ($hash -ne 'e38136a60110199559b7365d3ea4ec0cb5588dc2b0f593877d864e0299659a3f') {
+            throw "Nsight Aftermath SDK hash $hash does not match the pinned release"
+          }
+          $extracted = Join-Path $env:RUNNER_TEMP 'aftermath-sdk-zip'
+          Expand-Archive $zip -DestinationPath $extracted
+          $sdk = Join-Path $env:RUNNER_TEMP 'aftermath-sdk'
+          New-Item -ItemType Directory -Force $sdk | Out-Null
+          Move-Item (Join-Path $extracted 'include') $sdk
+          Remove-Item -Recurse -Force $extracted, $zip
+          "NSIGHT_AFTERMATH_SDK=$($sdk -replace '\\', '/')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - name: Restore CPM downloads
         id: cpm-cache
@@ -260,13 +354,13 @@ jobs:
         with:
           path: |
             .ccache
-            .sccache
+            .lto-cache
           # The profile's hash is part of the key, so objects built against an older profile are
           # never restored.
-          key: objects-${{ matrix.platform }}${{ matrix.profile && format('-{0}', hashFiles(matrix.profile)) || '' }}-v2-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: objects-${{ matrix.platform }}${{ matrix.profile && format('-{0}', hashFiles(matrix.profile)) || '' }}-v3-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            objects-${{ matrix.platform }}${{ matrix.profile && format('-{0}', hashFiles(matrix.profile)) || '' }}-v2-${{ github.sha }}-
-            objects-${{ matrix.platform }}${{ matrix.profile && format('-{0}', hashFiles(matrix.profile)) || '' }}-v2-
+            objects-${{ matrix.platform }}${{ matrix.profile && format('-{0}', hashFiles(matrix.profile)) || '' }}-v3-${{ github.sha }}-
+            objects-${{ matrix.platform }}${{ matrix.profile && format('-{0}', hashFiles(matrix.profile)) || '' }}-v3-
 
       - name: Configure Linux
         if: startsWith(matrix.platform, 'linux')
@@ -288,6 +382,7 @@ jobs:
             -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
             -DENABLE_UPDATE_CHECKER=ON
             -DLICHII_BUILD_TAG=build-${{ github.run_number }}
+            "-DLICHII_USE_PENDING_RELEASE_NOTES=$LICHII_USE_PENDING_RELEASE_NOTES"
             -DLICHII_BUILD_PLATFORM=${{ matrix.platform }}
             -DUSE_DISCORD_PRESENCE=OFF
             -DUSE_CCACHE=ON
@@ -320,7 +415,15 @@ jobs:
             flags+=" -Wno-error=profile-instr-out-of-date -Wno-error=profile-instr-unprofiled"
             flags+=" -Wno-error=backend-plugin"
           fi
-          cmake -S . -B build/release -G Ninja \
+          # The ThinLTO backend runs at link time, which ccache doesn't cover; lld caches each
+          # module's native code, so a link only recompiles the modules that changed. One build's
+          # entries take 1.3 GB.
+          lto_cache="/lldltocache:$(cygpath -m "$PWD/.lto-cache") /lldltocachepolicy:cache_size_bytes=1500m"
+          aftermath=()
+          if [ '${{ inputs.nsight_aftermath }}' = true ]; then
+            aftermath=(-DENABLE_NSIGHT_AFTERMATH=ON)
+          fi
+          cmake -S . -B build/release -G Ninja "${aftermath[@]}" \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF \
             -DLICHII_TESTS=OFF \
@@ -332,14 +435,16 @@ jobs:
             -DLICHII_USE_BUNDLED_SDL3=ON \
             -DENABLE_UPDATE_CHECKER=ON \
             -DLICHII_BUILD_TAG=build-${{ github.run_number }} \
+            "-DLICHII_USE_PENDING_RELEASE_NOTES=$LICHII_USE_PENDING_RELEASE_NOTES" \
             -DLICHII_BUILD_PLATFORM=${{ matrix.platform }} \
             -DUSE_DISCORD_PRESENCE=OFF \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            -DUSE_CCACHE=ON \
             "-DCMAKE_C_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
             "-DCMAKE_CXX_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
             "-DCMAKE_LINKER=$LLVM_ROOT/bin/lld-link.exe" \
             "-DCMAKE_AR=$LLVM_ROOT/bin/llvm-lib.exe" \
+            -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded \
+            "-DCMAKE_EXE_LINKER_FLAGS=/DEBUG:FULL /OPT:REF /OPT:ICF $lto_cache" \
             "-DCMAKE_C_FLAGS=$flags" \
             "-DCMAKE_CXX_FLAGS=-EHsc $flags"
 
@@ -358,44 +463,61 @@ jobs:
             -DLICHII_USE_BUNDLED_QT=OFF \
             -DENABLE_QT_TRANSLATION=ON \
             "-DCMAKE_PREFIX_PATH=$(brew --prefix qt@6);$(brew --prefix zlib)" \
-            "-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" \
+            "-DOPENSSL_ROOT_DIR=$(brew --prefix openssl)" \
             -DVulkanHeaders_FORCE_BUNDLED=ON \
             -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
             -DENABLE_UPDATE_CHECKER=ON \
             -DLICHII_BUILD_TAG=build-${{ github.run_number }} \
+            "-DLICHII_USE_PENDING_RELEASE_NOTES=$LICHII_USE_PENDING_RELEASE_NOTES" \
             -DLICHII_BUILD_PLATFORM=${{ matrix.platform }} \
             -DUSE_DISCORD_PRESENCE=OFF \
             -DUSE_CCACHE=ON
 
       - name: Save CPM downloads
-        if: steps.cpm-cache.outputs.cache-hit != 'true'
+        if: github.ref == 'refs/heads/nx2' && steps.cpm-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
           path: .cache/cpm
           key: ${{ steps.cpm-cache.outputs.cache-primary-key }}
 
+      # The install script pins clang-cl by checksum, so it identifies the compiler without hashing
+      # the binary on every call. Entries this build didn't use are evicted, so the saved cache
+      # stays the size of one build.
       - name: Build
         shell: bash
+        env:
+          CCACHE_COMPILERCHECK: ${{ startsWith(matrix.platform, 'windows') && format('string:{0}', hashFiles('tools/windows/install-llvm.ps1')) || 'content' }}
         run: |
-          if command -v ccache > /dev/null; then ccache --zero-stats; else sccache --zero-stats; fi
+          ccache --zero-stats
+          start=$(date +%s)
           targets="lichii lichii-cmd"
           if [[ "${{ matrix.platform }}" == windows* ]]; then targets="$targets lichii-updater"; fi
           cmake --build build/release --target $targets --parallel
-          if command -v ccache > /dev/null; then ccache --show-stats; else sccache --show-stats; fi
-
-      - name: Stop sccache on Windows
-        if: always() && startsWith(matrix.platform, 'windows') && steps.compiler-cache.outcome == 'success'
-        shell: pwsh
-        run: sccache --stop-server
+          ccache --show-stats
+          ccache --evict-older-than "$(( $(date +%s) - start + 60 ))s"
+          du -sh .ccache .lto-cache 2> /dev/null || true
 
       - name: Save compiler objects
-        if: always() && steps.compiler-cache.outcome == 'success'
+        if: github.ref == 'refs/heads/nx2' && !cancelled() && steps.compiler-cache.outcome == 'success'
         uses: actions/cache/save@v5
         with:
           path: |
             .ccache
-            .sccache
+            .lto-cache
           key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
+      - name: Delete superseded caches
+        if: github.ref == 'refs/heads/nx2' && !cancelled()
+        continue-on-error: true
+        shell: bash
+        # The platform is spelled out rather than passed as PLATFORM: Windows variable names ignore
+        # case, and the MSVC environment's Platform=x64 replaced it.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tools/ci/prune-caches.sh '^objects-${{ matrix.platform }}(-[0-9a-f]{64})?-v[0-9]+-' '${{ steps.compiler-cache.outputs.cache-primary-key }}'
+          tools/ci/prune-caches.sh '^cpm-${{ matrix.platform }}-v[0-9]+-' '${{ steps.cpm-cache.outputs.cache-primary-key }}'
+          tools/ci/prune-caches.sh '^apt-${{ matrix.platform }}-v[0-9]+-' '${{ steps.apt-cache.outputs.cache-primary-key }}'
 
       # fsr4-vk, the community Vulkan port of FSR 4 that the x86-64 Linux packages ship
       # (tools/fsr4-vk/build.sh pins its commit and AMD's DLL it is built from). The build's inputs
@@ -423,10 +545,13 @@ jobs:
 
       # Both Linux packages are self-contained: linuxdeploy bundles every library the two programs
       # need except the base system ones (glibc, X11/Wayland client libraries, the GPU driver and
-      # Vulkan loader), and its Qt plugin adds the Qt libraries and platform plugins. The AppImage
-      # packs that folder into one file; the tar.gz holds the same folder for systems without FUSE,
-      # with lichii and eden-cli links at its top. Both run on glibc 2.39+ systems. A tar.gz of the
-      # bare programs needed the Qt 6.8 they were built against installed system-wide (#901).
+      # Vulkan loader), and its Qt plugin adds the Qt libraries and platform plugins. linuxdeploy's
+      # own exclude list lacks libvulkan.so.1, which fsr4-vk and the -pgo builds' libplacebo link,
+      # so it is excluded by name: the bundled loader replaced the system one and failed Vulkan
+      # init (#1767). The AppImage packs that folder into one file; the tar.gz holds the same
+      # folder for systems without FUSE, with lichii and eden-cli links at its top. Both run on
+      # glibc 2.39+ systems. A tar.gz of the bare programs needed the Qt 6.8 they were built
+      # against installed system-wide (#901).
       - name: Package Linux AppImage and tar.gz
         if: startsWith(matrix.platform, 'linux')
         shell: bash
@@ -469,6 +594,7 @@ jobs:
             --executable build/release/bin/lichii \
             --executable build/release/bin/eden-cli \
             "${fsr4_library[@]}" \
+            --exclude-library 'libvulkan.so*' \
             --desktop-file dist/io.github.zortos293.lichii.desktop \
             --icon-file "$icon" \
             --plugin qt \
@@ -481,6 +607,10 @@ jobs:
           ln -s usr/bin/eden-cli lichii/eden-cli
           tar -czf "lichii-${GITHUB_SHA}-${{ matrix.platform }}.tar.gz" lichii
           ls -la "lichii-${GITHUB_SHA}-${{ matrix.platform }}.tar.gz"
+          if tar -tzf "lichii-${GITHUB_SHA}-${{ matrix.platform }}.tar.gz" | grep '/libvulkan\.so'; then
+            echo "::error::The package bundles the Vulkan loader"
+            exit 1
+          fi
           # Both x86-64 packages must carry fsr4-vk and its licences.
           if [ "$arch" = x86_64 ]; then
             test "$(tar -tzf "lichii-${GITHUB_SHA}-${{ matrix.platform }}.tar.gz" |
@@ -503,7 +633,13 @@ jobs:
               throw "build/release/bin/$exe was not produced"
             }
           }
+          # Symbols ship as their own artifact, not in the release zip.
+          New-Item -ItemType Directory -Force build/release/symbols | Out-Null
+          Move-Item build/release/bin/*.pdb build/release/symbols/
           windeployqt --release --no-translations build/release/bin/lichii.exe
+          if (Get-ChildItem -Recurse build/release/bin -Filter 'GFSDK_*') {
+            throw 'build/release/bin holds Nsight Aftermath files, which must not ship'
+          }
 
       # A self-contained app bundle: macdeployqt copies Qt and every other Homebrew library both
       # programs load into the bundle, then the leftover Homebrew and build-tree search paths are
@@ -517,6 +653,9 @@ jobs:
           app=build/release/bin/lichii.app
           test -x "$app/Contents/MacOS/lichii"
           test -x build/release/bin/eden-cli
+          cmp dist/nx2_switches.txt "$app/Contents/Resources/nx2_switches.txt"
+          test ! -e "$app/Contents/MacOS/nx2_switches.txt"
+          python3 tools/nx2/test_switches.py SwitchDiscovery.test_signed_macos_resources_and_precedence
           cp build/release/bin/eden-cli "$app/Contents/MacOS/eden-cli"
           "$(brew --prefix qt@6)/bin/macdeployqt" "$app" \
             -executable="$app/Contents/MacOS/eden-cli" -libpath="$(brew --prefix)/lib" \
@@ -581,10 +720,19 @@ jobs:
         if: startsWith(matrix.platform, 'windows')
         uses: actions/upload-artifact@v7
         with:
-          name: lichii-${{ matrix.platform }}-${{ github.sha }}
+          name: lichii-${{ matrix.platform }}${{ inputs.nsight_aftermath && '-aftermath' || '' }}-${{ github.sha }}
           path: build/release/bin/
           if-no-files-found: error
           retention-days: 7
+
+      - name: Upload Windows symbols
+        if: startsWith(matrix.platform, 'windows')
+        uses: actions/upload-artifact@v7
+        with:
+          name: symbols-${{ matrix.platform }}${{ inputs.nsight_aftermath && '-aftermath' || '' }}-${{ github.sha }}
+          path: build/release/symbols/
+          if-no-files-found: error
+          retention-days: 90
 
       # Both Linux files go in one artifact: the tar.gz and the AppImage.
       - name: Upload Linux binary

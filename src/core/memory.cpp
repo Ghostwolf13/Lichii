@@ -26,6 +26,9 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/swap.h"
+#ifdef HAS_HYPERVISOR
+#include "core/arm/hypervisor/hv_vm.h"
+#endif
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/device_memory.h"
@@ -60,10 +63,35 @@ static inline bool AddressSpaceContains(const Common::PageTable& table, const Co
 struct Memory::Impl {
     explicit Impl(Core::System& system_) : system{system_} {}
 
-    void SetCurrentPageTable(Kernel::KProcess& process) {
+    void SetCurrentPageTable(Kernel::KProcess& process,
+                             [[maybe_unused]] Kernel::Svc::CreateProcessFlag flags) {
         current_page_table = &process.GetPageTable().GetImpl();
 
-        if (process.IsApplication() && Settings::IsFastmemEnabled()) {
+        bool use_fastmem = process.IsApplication() && Settings::IsFastmemEnabled();
+#ifdef HAS_HYPERVISOR
+        using Flag = Kernel::Svc::CreateProcessFlag;
+        if (True(flags & Flag::IsApplication) &&
+            Settings::values.cpu_backend.GetValue() == Settings::CpuBackend::Hypervisor) {
+            if (True(flags & Flag::Is64Bit) &&
+                (flags & Flag::AddressSpaceMask) == Flag::AddressSpace64Bit &&
+                !system.IsPoweredOn() && system.IsHypervisorAllowedForLoad() &&
+                system.IsMulticore() && !system.DebuggerEnabled() &&
+                Settings::values.cpu_clock.GetValue() == Settings::CpuClock::Normal &&
+                !Settings::values.sync_core_speed.GetValue()) {
+                hv_vm = HvVm::Create(system);
+            }
+            if (!hv_vm) {
+                LOG_WARNING(Core_ARM, "Hypervisor unavailable for this guest or CPU configuration; "
+                                      "using Dynarmic");
+            }
+        }
+        use_fastmem = use_fastmem && !hv_vm;
+#endif
+#ifdef HAS_NCE
+        use_fastmem = use_fastmem &&
+                      (!system.DeviceMemory().buffer.IsDirectMapped() || process.UsesNativeExecution());
+#endif
+        if (use_fastmem) {
             current_page_table->fastmem_arena = system.DeviceMemory().buffer.VirtualBasePointer();
         } else {
             current_page_table->fastmem_arena = nullptr;
@@ -75,6 +103,16 @@ struct Memory::Impl {
 #else
         host_buffer = std::addressof(system.DeviceMemory().buffer);
 #endif
+#ifdef HAS_NATIVE_PAGE_PROTECTION
+#ifdef HAS_HYPERVISOR
+        if (hv_vm) {
+#else
+        if (process.UsesNativeExecution()) {
+#endif
+            nce_pages = std::make_unique<Common::SparseLargeVector<u32>>(
+                u64{1} << (current_page_table->GetAddressSpaceBits() - LICHII_PAGEBITS));
+        }
+#endif
     }
 
     void MapMemoryRegion(Common::PageTable& page_table, Common::ProcessAddress base, u64 size,
@@ -84,9 +122,27 @@ struct Memory::Impl {
         ASSERT_MSG((base & LICHII_PAGEMASK) == 0, "non-page aligned base: {:016X}", GetInteger(base));
         ASSERT_MSG(target >= DramMemoryMap::Base, "Out of bounds target: {:016X}",
                    GetInteger(target));
+#ifdef HAS_NATIVE_PAGE_PROTECTION
+        std::unique_lock lock{nce_page_mutex, std::defer_lock};
+        if (nce_pages) {
+            lock.lock();
+            const u64 first = GetInteger(base) >> LICHII_PAGEBITS;
+            const u64 count = size >> LICHII_PAGEBITS;
+            nce_pages->CommitRegion(first, first + count);
+            for (u64 page = first; page < first + count; ++page) {
+                nce_pages->GetUnchecked(page) = static_cast<u32>(perms);
+            }
+        }
+#endif
         MapPages(page_table, base / LICHII_PAGESIZE, size / LICHII_PAGESIZE, target,
                  Common::PageType::Memory);
 
+#ifdef HAS_HYPERVISOR
+        if (hv_vm) {
+            hv_vm->Map(GetInteger(base), GetInteger(target) - DramMemoryMap::Base, size, perms);
+            return;
+        }
+#endif
         if (current_page_table->fastmem_arena) {
             host_buffer->Map(GetInteger(base), GetInteger(target) - DramMemoryMap::Base, size, perms, separate_heap);
         }
@@ -96,6 +152,19 @@ struct Memory::Impl {
                      bool separate_heap) {
         ASSERT_MSG((size & LICHII_PAGEMASK) == 0, "non-page aligned size: {:016X}", size);
         ASSERT_MSG((base & LICHII_PAGEMASK) == 0, "non-page aligned base: {:016X}", GetInteger(base));
+#ifdef HAS_NATIVE_PAGE_PROTECTION
+        std::unique_lock lock{nce_page_mutex, std::defer_lock};
+        if (nce_pages) {
+            lock.lock();
+            const u64 first = GetInteger(base) >> LICHII_PAGEBITS;
+            nce_pages->ZeroRegion(first, first + (size >> LICHII_PAGEBITS));
+        }
+#endif
+#ifdef HAS_HYPERVISOR
+        if (hv_vm) {
+            hv_vm->Unmap(GetInteger(base), size);
+        }
+#endif
         MapPages(page_table, base / LICHII_PAGESIZE, size / LICHII_PAGESIZE, 0,
                  Common::PageType::Unmapped);
 
@@ -109,9 +178,23 @@ struct Memory::Impl {
         ASSERT_MSG((size & LICHII_PAGEMASK) == 0, "non-page aligned size: {:016X}", size);
         ASSERT_MSG((vaddr & LICHII_PAGEMASK) == 0, "non-page aligned base: {:016X}", vaddr);
 
-        if (!current_page_table->fastmem_arena) {
+        if (!current_page_table->fastmem_arena
+#ifdef HAS_HYPERVISOR
+            && !hv_vm
+#endif
+        ) {
             return;
         }
+
+#ifdef HAS_NATIVE_PAGE_PROTECTION
+        if (nce_pages) {
+            std::scoped_lock lock{nce_page_mutex};
+            UpdateNceProtection(vaddr, size, [&](u32 state) {
+                return (state & ~NceBaseMask) | static_cast<u32>(perms);
+            });
+            return;
+        }
+#endif
 
         u64 protect_bytes = 0, protect_begin = 0;
 
@@ -329,29 +412,24 @@ struct Memory::Impl {
         });
     }
 
-    [[nodiscard]] inline const u8* GetSpan(const VAddr addr, const std::size_t size) const noexcept {
-        const auto first = current_page_table->entries[addr >> LICHII_PAGEBITS].Block();
-        const auto last = current_page_table->entries[(addr + size) >> LICHII_PAGEBITS].Block();
-        if (Common::PageTable::PageEntryData::CanFastSpan(first, last)) {
-            return GetPointerSilent(addr);
-        }
-        if (first != Common::PageTable::PageEntryData::INVALID_BLOCK_ID &&
-            last != Common::PageTable::PageEntryData::INVALID_BLOCK_ID) {
+    /// Returns a host pointer to [addr, addr + size) if the whole range is backed by one linear
+    /// host range, nullptr otherwise. Every page of such a range stores the same offset; block ids
+    /// can't prove it, since equal ids at the ends say nothing about a page remapped in between.
+    [[nodiscard]] u8* GetSpan(const VAddr addr, const std::size_t size) const noexcept {
+        // An empty span at the exclusive end of the address space has no page-table entry.
+        if (!AddressSpaceContains(*current_page_table, addr, size) ||
+            addr >= (u64{1} << current_page_table->GetAddressSpaceBits())) {
             return nullptr;
         }
-        return GetContiguousSpan(addr, size);
-    }
-    [[nodiscard]] inline u8* GetSpan(const VAddr addr, const std::size_t size) noexcept {
-        const auto first = current_page_table->entries[addr >> LICHII_PAGEBITS].Block();
-        const auto last = current_page_table->entries[(addr + size) >> LICHII_PAGEBITS].Block();
-        if (Common::PageTable::PageEntryData::CanFastSpan(first, last)) {
-            return GetPointerSilent(addr);
+        const u64 first_page = addr >> LICHII_PAGEBITS;
+        const u64 last_page = (addr + (size != 0 ? size - 1 : 0)) >> LICHII_PAGEBITS;
+        const uintptr_t offset = current_page_table->entries[first_page].Pointer(true);
+        for (u64 page = first_page + 1; page <= last_page; ++page) {
+            if (current_page_table->entries[page].Pointer(true) != offset) {
+                return nullptr;
+            }
         }
-        if (first != Common::PageTable::PageEntryData::INVALID_BLOCK_ID &&
-            last != Common::PageTable::PageEntryData::INVALID_BLOCK_ID) {
-            return nullptr;
-        }
-        return GetContiguousSpan(addr, size);
+        return GetPointerSilent(addr);
     }
 
     bool WriteBlockImpl(const Common::ProcessAddress addr, const void* buffer, const std::size_t size, bool unsafe) {
@@ -504,6 +582,25 @@ struct Memory::Impl {
             return;
         }
 
+#ifdef HAS_NATIVE_PAGE_PROTECTION
+        std::unique_lock lock{nce_page_mutex, std::defer_lock};
+        if (nce_pages) {
+            lock.lock();
+            const u64 begin = vaddr & ~LICHII_PAGEMASK;
+            const u64 end = Common::AlignUp(vaddr + size, LICHII_PAGESIZE);
+            UpdateNceProtection(begin, end - begin, [&](u32 state) {
+                if (!cached) {
+                    return (state & NceCached) != 0
+                               ? (state & ~(NceCached | NceReadReady)) + NceCacheGeneration
+                               : state;
+                }
+                if ((state & NceCached) == 0) {
+                    return (state | NceCached) + NceCacheGeneration;
+                }
+                return state;
+            });
+        } else
+#endif
         if (current_page_table->fastmem_arena) {
             Common::MemoryPermission perm{};
             // EDEN_NX2_NO_REACTIVE=1 drops the read traps on Switch 2 programs. Opt-in: without
@@ -596,12 +693,31 @@ struct Memory::Impl {
         }();
         return !disabled && current_page_table->fastmem_arena &&
                !Settings::ReactiveFlushing() &&
+#ifdef HAS_NCE
+               !Settings::IsNceEnabled();
+#else
                Settings::values.cpu_backend.GetValue() != Settings::CpuBackend::Nce;
+#endif
     }
 
     void RasterizerArmReadTraps(u64 vaddr, u64 size) {
         // Clean cached read areas also need invalidation when reactive flushing is enabled.
         read_trap_generation.fetch_add(1, std::memory_order_release);
+#ifdef HAS_NATIVE_PAGE_PROTECTION
+        if (nce_pages && vaddr != 0 && size != 0 &&
+            AddressSpaceContains(*current_page_table, vaddr, size)) {
+            std::scoped_lock lock{nce_page_mutex};
+            const u64 begin = vaddr & ~LICHII_PAGEMASK;
+            const u64 end = Common::AlignUp(vaddr + size, LICHII_PAGESIZE);
+            UpdateNceProtection(begin, end - begin, [](u32 state) {
+                if ((state & NceCached) == 0) {
+                    return state;
+                }
+                return (state & ~NceReadReady) + NceCacheGeneration;
+            });
+            return;
+        }
+#endif
         if (vaddr == 0 || size == 0 || !AddressSpaceContains(*current_page_table, vaddr, size) ||
             !ReadTrapsEnabled()) {
             return;
@@ -709,10 +825,6 @@ struct Memory::Impl {
             }
             const u16 current_block =
                 Common::PageTable::PageEntryData::BlockIdForMapping(mapping_id);
-            if (mapping_id == Common::PageTable::PageEntryData::INVALID_BLOCK_ID) {
-                LOG_WARNING(HW_Memory,
-                            "Page table block ids are exhausted; validating spans page by page");
-            }
 
             page_table.entries.CommitRegion(base, end);
             while (base != end) {
@@ -779,24 +891,6 @@ struct Memory::Impl {
             GetInteger(vaddr), []() {}, []() {});
     }
 
-    [[nodiscard]] u8* GetContiguousSpan(VAddr addr, std::size_t size) const noexcept {
-        u8* const base = GetPointerSilent(addr);
-        if (base == nullptr) {
-            return nullptr;
-        }
-
-        const VAddr end = addr + size;
-        const VAddr first_page = ((addr >> LICHII_PAGEBITS) + 1) << LICHII_PAGEBITS;
-        const std::uintptr_t base_ptr = reinterpret_cast<std::uintptr_t>(base);
-        for (VAddr page = first_page; page < end; page += LICHII_PAGESIZE) {
-            const std::uintptr_t expected = base_ptr + (page - addr);
-            if (reinterpret_cast<std::uintptr_t>(GetPointerSilent(page)) != expected) {
-                return nullptr;
-            }
-        }
-        return base;
-    }
-
     /// @brief Reads a particular data type out of memory at the given virtual address.
     /// @param vaddr The virtual address to read the data type from.
     /// @tparam T The data type to read out of memory.
@@ -835,7 +929,13 @@ struct Memory::Impl {
         const u64 addr = GetInteger(vaddr);
         bool rasterizer_write = false;
         if (auto const ptr = GetPointerImpl(addr, [addr, data]() {
-            LOG_ERROR(HW_Memory, "Unmapped Write{} @ {:#016x} = {:#016x}", sizeof(T) * 8, addr, u64(data));
+            // As with unmapped reads, a guest spinning on a bad pointer writes unmapped memory
+            // tens of thousands of times a second (#1340's fill loop): keep the first ones and
+            // then a sample.
+            static std::atomic<u64> unmapped_writes{};
+            if (const u64 count = unmapped_writes.fetch_add(1); count < 1000 || count % 100000 == 0) {
+                LOG_ERROR(HW_Memory, "Unmapped Write{} @ {:#016x} = {:#016x}", sizeof(T) * 8, addr, u64(data));
+            }
         }, [&]() {
             HandleRasterizerWrite(addr, sizeof(T));
             rasterizer_write = true;
@@ -1035,6 +1135,123 @@ struct Memory::Impl {
             p, scratch_buffers[core], [&](DAddr address) { gpu.InvalidateRegion(address, size, true); });
     }
 
+#ifdef HAS_NATIVE_PAGE_PROTECTION
+    static constexpr u32 NceBaseMask = 0x7;
+    static constexpr u32 NceCached = 1u << 3;
+    static constexpr u32 NceReadReady = 1u << 4;
+    static constexpr u32 NceCacheGeneration = 1u << 5;
+
+    static Common::MemoryPermission NceHostPermission(u32 state) {
+        const auto base = static_cast<Common::MemoryPermission>(state & NceBaseMask);
+        if ((state & NceCached) == 0) {
+            return base;
+        }
+        auto mask = Common::MemoryPermission::Execute;
+        if ((state & NceReadReady) != 0) {
+            mask |= Common::MemoryPermission::Read;
+        }
+        return base & mask;
+    }
+
+    template <typename Update>
+    void UpdateNceProtection(u64 address, u64 size, Update update) {
+        const u64 first = address >> LICHII_PAGEBITS;
+        const u64 end = first + (size >> LICHII_PAGEBITS);
+        u64 run_start = first;
+        auto run_permission = Common::MemoryPermission{};
+        const auto finish_run = [&](u64 page) {
+            if (page > run_start) {
+#ifdef HAS_HYPERVISOR
+                hv_vm->Protect(run_start << LICHII_PAGEBITS,
+                               (page - run_start) << LICHII_PAGEBITS, run_permission);
+#else
+                host_buffer->Protect(run_start << LICHII_PAGEBITS,
+                                     (page - run_start) << LICHII_PAGEBITS, run_permission);
+#endif
+            }
+            run_start = page;
+        };
+        nce_pages->CommitRegion(first, end);
+        for (u64 page = first; page < end; ++page) {
+            auto& state = nce_pages->GetUnchecked(page);
+            const u32 previous = state;
+            state = update(state);
+            const auto permission = NceHostPermission(state);
+            if (permission == NceHostPermission(previous)) {
+                finish_run(page);
+                run_start = page + 1;
+            } else if (permission != run_permission) {
+                finish_run(page);
+                run_permission = permission;
+            }
+        }
+        finish_run(end);
+    }
+
+    std::optional<u64> RecoverNceAccess(u64 fault_address, bool write,
+                                        std::optional<u64> prior_trap) {
+        const u64 address = fault_address & ~LICHII_PAGEMASK;
+        const u64 page = address >> LICHII_PAGEBITS;
+        const auto access = write ? Common::MemoryPermission::Write : Common::MemoryPermission::Read;
+        if (!nce_pages || page >= nce_pages->size()) {
+            return std::nullopt;
+        }
+        std::unique_lock lock{nce_page_mutex};
+        const auto state = (*nce_pages)[page];
+        const auto base = static_cast<Common::MemoryPermission>(state & NceBaseMask);
+        const auto [ptr, type, block] = current_page_table->entries[page].PointerTypeBlock(true);
+        const auto trap_key = [](u16 mapping, u32 page_state) {
+            return (static_cast<u64>(mapping) << 32) | (page_state / NceCacheGeneration);
+        };
+        if (ptr == 0 || !True(base & access) ||
+            (type != Common::PageType::Memory && type != Common::PageType::RasterizerCachedMemory)) {
+            return std::nullopt;
+        }
+        if (True(NceHostPermission(state) & access)) {
+            const u64 trap = trap_key(block, state);
+            return state >= NceCacheGeneration && prior_trap != trap ? std::optional{trap}
+                                                                    : std::nullopt;
+        }
+        if (type != Common::PageType::RasterizerCachedMemory) {
+            return std::nullopt;
+        }
+        lock.unlock();
+        if (write) {
+            InvalidateGPUMemory(reinterpret_cast<u8*>(ptr + address), LICHII_PAGESIZE);
+        } else {
+            DownloadFromRasterizer(address, LICHII_PAGESIZE);
+        }
+        lock.lock();
+        const auto [current_ptr, current_type, current_block] =
+            current_page_table->entries[page].PointerTypeBlock(true);
+        if (current_ptr != ptr || current_block != block) {
+            return std::nullopt;
+        }
+        const auto current = (*nce_pages)[page];
+        const bool rearmed = current / NceCacheGeneration != state / NceCacheGeneration;
+        if (!write && current_type == Common::PageType::RasterizerCachedMemory &&
+            True(static_cast<Common::MemoryPermission>(current & NceBaseMask) & access)) {
+            if (rearmed) {
+                return trap_key(current_block, current);
+            }
+            UpdateNceProtection(address, LICHII_PAGESIZE, [](u32 previous) {
+                return previous | NceReadReady;
+            });
+        }
+        const auto resolved = (*nce_pages)[page];
+        if (!True(NceHostPermission(resolved) & access)) {
+            return std::nullopt;
+        }
+        return trap_key(current_block, resolved);
+    }
+
+    std::unique_ptr<Common::SparseLargeVector<u32>> nce_pages;
+    std::mutex nce_page_mutex;
+#endif
+#ifdef HAS_HYPERVISOR
+    std::shared_ptr<HvVm> hv_vm;
+#endif
+
     Core::System& system;
     Tegra::MaxwellDeviceMemoryManager* gpu_device_memory{};
     Common::PageTable* current_page_table = nullptr;
@@ -1068,9 +1285,21 @@ void Memory::Reset() {
     impl = std::make_unique<Impl>(system);
 }
 
-void Memory::SetCurrentPageTable(Kernel::KProcess& process) {
-    impl->SetCurrentPageTable(process);
+void Memory::SetCurrentPageTable(Kernel::KProcess& process, Kernel::Svc::CreateProcessFlag flags) {
+    impl->SetCurrentPageTable(process, flags);
 }
+
+#ifdef HAS_HYPERVISOR
+std::shared_ptr<HvVm> Memory::GetHypervisor() const {
+    return impl->hv_vm;
+}
+
+void Memory::ReleaseHypervisor() {
+    std::scoped_lock lock{impl->nce_page_mutex};
+    impl->nce_pages.reset();
+    impl->hv_vm.reset();
+}
+#endif
 
 void Memory::MapMemoryRegion(Common::PageTable& page_table, Common::ProcessAddress base, u64 size,
                              Common::PhysicalAddress target, Common::MemoryPermission perms,
@@ -1276,6 +1505,13 @@ bool Memory::InvalidateNCE(Common::ProcessAddress vaddr, size_t size) {
 
     return mapped && ptr != nullptr;
 }
+
+#ifdef HAS_NATIVE_PAGE_PROTECTION
+std::optional<u64> Memory::RecoverNceAccess(u64 fault_address, bool write,
+                                           std::optional<u64> prior_trap) {
+    return impl->RecoverNceAccess(fault_address, write, prior_trap);
+}
+#endif
 
 bool Memory::InvalidateSeparateHeap(void* fault_address) {
 #ifdef __ANDROID__

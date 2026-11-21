@@ -55,20 +55,26 @@ constexpr u32 MESH_EMULATION_UNUSED_VERTEX = ~0U;
 /// (RuntimeInfo::mesh_as_compute) that writes one block per workgroup to a u32 storage buffer:
 /// max_vertices * vertex_lines words (vertex v, line l at v * vertex_lines + l), then
 /// max_primitives * PrimitiveVertices() vertex indices (1 for points, 2 for lines, 3 for
-/// triangles).
+/// triangles), then max_primitives * primitive_lines words (primitive p, line l at
+/// p * primitive_lines + l).
 [[nodiscard]] inline u32 MeshEmulationBlockWords(const MeshInfo& mesh) {
     return mesh.max_vertices * static_cast<u32>(mesh.vertex_lines.size()) +
-           mesh.max_primitives * mesh.PrimitiveVertices();
+           mesh.max_primitives *
+               (mesh.PrimitiveVertices() + static_cast<u32>(mesh.primitive_lines.size()));
 }
 
 /// Vertex shader drawing the emulation's output as a point, line or triangle list of
 /// groups * max_primitives * PrimitiveVertices() vertices, with the mesh program's vertex
 /// outputs. Points get point_size unless the program writes its own. With a task program
 /// (args_binding != ~0) the blocks start at the arguments' MESH_EMULATION_ARGS_BASE.
-[[nodiscard]] std::vector<u32> EmitMeshEmulationVertex(const Profile& profile,
-                                                       const MeshInfo& mesh, u32 binding,
-                                                       u32 args_binding, bool convert_depth,
-                                                       float point_size = 1.0f);
+/// Per-primitive outputs go to every vertex of their primitive, which no other primitive
+/// shares, for the fragment shader to read flat (RuntimeInfo::per_primitive_flat): generics at
+/// their location, Layer and ViewportIndex as built-ins, and PrimitiveId as a u32 at
+/// primitive_id_location (~0 drops it).
+[[nodiscard]] std::vector<u32> EmitMeshEmulationVertex(const Profile& profile, const MeshInfo& mesh,
+                                                       u32 binding, u32 args_binding,
+                                                       bool convert_depth, float point_size = 1.0f,
+                                                       u32 primitive_id_location = ~0U);
 
 /// Mesh emulation with a task program: push constants of the distribution pass.
 struct MeshEmulationDistributionConstants {

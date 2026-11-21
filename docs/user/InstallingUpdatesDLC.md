@@ -15,7 +15,7 @@ Use this guide when you want to install Updates or DLC for your games in Eden.
 ### Pre-Requisites
 
 1. Eden already setup and configured for your platform.
-2. The Update/DLC file(s) you want to install
+2. Update or DLC files you are authorized to copy and use. Lichii does not provide these files or download sources for them.
 
 ---
 

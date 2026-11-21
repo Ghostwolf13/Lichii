@@ -3,11 +3,14 @@
 
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <chrono>
 #include <cstddef>
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
+#include <thread>
 #include <type_traits>
 #include "common/container/unordered_map.h"
 #include <utility>
@@ -15,6 +18,7 @@
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "common/bit_util.h"
 #include "common/common_types.h"
+#include "common/logging.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/query_cache/frame_trace.h"
@@ -37,6 +41,15 @@ using Tegra::Engines::Maxwell3D;
 using VideoCommon::QueryType;
 
 namespace {
+// Tilers skip the samples query write sync and the conditional rendering compares (dbb9e0c5fe).
+// Apple GPUs are tilers too: on MoltenVK each sync ends the Metal render pass and adds blit and
+// compute encoders, which Metal serializes (#1068).
+bool IsTilerQueryDriver(VkDriverId driver_id) {
+    return driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
+           driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MESA_TURNIP ||
+           driver_id == VK_DRIVER_ID_MOLTENVK;
+}
+
 class SamplesQueryBank : public VideoCommon::BankBase {
 public:
     static constexpr size_t BANK_SIZE = 256;
@@ -86,17 +99,41 @@ public:
         return BankBase::IsDead() && scheduler.IsFree(last_used_tick);
     }
 
-    void Sync(size_t start, size_t size) {
+    void Sync(size_t start, size_t size, u64 written_tick) {
         const auto& dev = device.GetLogical();
-        const VkResult query_result = dev.GetQueryResults(
-            *query_pool, static_cast<u32>(start), static_cast<u32>(size), sizeof(u64) * size,
-            &host_results[start], sizeof(u64), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        const auto read = [&] {
+            return dev.GetQueryResults(*query_pool, static_cast<u32>(start),
+                                       static_cast<u32>(size), sizeof(u64) * size,
+                                       &host_results[start], sizeof(u64), VK_QUERY_RESULT_64_BIT);
+        };
+        // Polled instead of VK_QUERY_RESULT_WAIT_BIT: once the host GPU has passed the submission
+        // that wrote these queries, their results are written. If they still aren't, that
+        // submission was dropped (the kernel reset a hung ring and recovered without a device
+        // loss), and RADV's wait would spin for 20 s per query.
+        VkResult query_result = read();
+        std::optional<std::chrono::steady_clock::time_point> passed_at;
+        while (query_result == VK_NOT_READY) {
+            scheduler.GetMasterSemaphore().Refresh();
+            if (!passed_at && scheduler.IsFree(written_tick)) {
+                passed_at = std::chrono::steady_clock::now();
+            }
+            if (passed_at &&
+                std::chrono::steady_clock::now() - *passed_at > std::chrono::seconds{1}) {
+                LOG_CRITICAL(Render_Vulkan,
+                             "Occlusion queries {}..{} of bank {} are unavailable 1 s after the "
+                             "GPU passed tick {}: their submission was dropped",
+                             start, start + size, index, written_tick);
+                query_result = VK_ERROR_DEVICE_LOST;
+                break;
+            }
+            std::this_thread::yield();
+            query_result = read();
+        }
         switch (query_result) {
         case VK_SUCCESS:
             return;
         case VK_ERROR_DEVICE_LOST:
             device.ReportLoss();
-            [[fallthrough]];
         default:
             throw vk::Exception(query_result);
         }
@@ -262,8 +299,7 @@ public:
         }
         PauseCounter();
         const auto driver_id = device.GetDriverID();
-        if (driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
-            driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MESA_TURNIP) {
+        if (IsTilerQueryDriver(driver_id)) {
             pending_sync.clear();
             sync_values_stash.clear();
             return;
@@ -436,6 +472,7 @@ public:
         {
             std::scoped_lock lk(flush_guard);
             pending_flush_sets.emplace_back(std::move(pending_flush_queries));
+            pending_flush_ticks.push_back(scheduler.CurrentTick());
             // A list the fencing thread is done with, with its capacity: a fence made with
             // reports pending grew a new one from nothing (~2,400 a second at Ocarina's water).
             if (!spare_flush_queries.empty()) {
@@ -449,14 +486,19 @@ public:
 
     void PopUnsyncedQueries() override {
         std::vector<size_t> current_flush_queries;
+        u64 written_tick;
         {
             std::scoped_lock lk(flush_guard);
             current_flush_queries = std::move(pending_flush_sets.front());
             pending_flush_sets.pop_front();
+            written_tick = pending_flush_ticks.front();
+            pending_flush_ticks.pop_front();
         }
         ApplyBanksWideOp<false>(
-            current_flush_queries,
-            [](SamplesQueryBank* bank, size_t start, size_t amount) { bank->Sync(start, amount); });
+            current_flush_queries, [written_tick](SamplesQueryBank* bank, size_t start,
+                                                  size_t amount) {
+                bank->Sync(start, amount, written_tick);
+            });
         for (auto q : current_flush_queries) {
             auto* query = GetQuery(q);
             u64 total = 0;
@@ -684,6 +726,7 @@ private:
     // flush levels
     std::vector<size_t> pending_flush_queries;
     std::deque<std::vector<size_t>> pending_flush_sets;
+    std::deque<u64> pending_flush_ticks; ///< Tick that recorded each set; guarded by flush_guard
     static constexpr size_t MaxSpareFlushQueries = 16;
     std::vector<std::vector<size_t>> spare_flush_queries; ///< Guarded by flush_guard
 
@@ -1642,7 +1685,7 @@ bool QueryCacheRuntime::HostConditionalRenderingCompareValues(VideoCommon::Looku
     auto driver_id = impl->device.GetDriverID();
     const bool is_gpu_high = Settings::IsGPULevelHigh();
 
-    if ((!is_gpu_high && driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS) || driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY || driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MESA_TURNIP) {
+    if ((!is_gpu_high && driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS) || IsTilerQueryDriver(driver_id)) {
         EndHostConditionalRendering();
         TraceConditionalRendering("driver-bypass", true, object_1.address, object_2.address);
         return true;

@@ -26,6 +26,10 @@ enum class Errno : u32 {
     MSGSIZE = 90,
     OPNOTSUPP = 95,
     AFNOSUPPORT = 97,
+    ADDRINUSE = 98,
+    ADDRNOTAVAIL = 99,
+    NETDOWN = 100,
+    NETUNREACH = 101,
     CONNABORTED = 103,
     CONNRESET = 104,
     NOTCONN = 107,
@@ -33,6 +37,7 @@ enum class Errno : u32 {
     CONNREFUSED = 111,
     INPROGRESS = 115,
     ISCONN = 106,
+    HOSTUNREACH = 113,
 };
 
 enum class GetAddrInfoError : s32 {
@@ -57,6 +62,7 @@ enum class GetAddrInfoError : s32 {
 enum class Domain : u32 {
     Unspecified = 0,
     INET = 2,
+    INET6 = 28,
 };
 
 enum class Type : u32 {
@@ -188,6 +194,7 @@ enum class Protocol : u32 {
 enum class SocketLevel : u32 {
     IP = 0,
     TCP = 6,
+    IPV6 = 41,
     SOCKET = 0xffff, // i.e. SOL_SOCKET
 };
 
@@ -196,6 +203,7 @@ enum class OptName : u32 {
     KEEPALIVE = 0x8,
     BROADCAST = 0x20,
     LINGER = 0x80,
+    REUSEPORT = 0x200,
     SNDBUF = 0x1001,
     RCVBUF = 0x1002,
     SNDTIMEO = 0x1005,
@@ -211,6 +219,15 @@ enum class OptName : u32 {
 /// Option names at SocketLevel::TCP.
 enum class TcpOptName : u32 {
     NODELAY = 0x1,
+};
+
+/// Option names at SocketLevel::IPV6, FreeBSD's.
+enum class Ipv6OptName : u32 {
+    UNICAST_HOPS = 4,
+    MULTICAST_HOPS = 10,
+    MULTICAST_LOOP = 11,
+    V6ONLY = 27,
+    TCLASS = 61,
 };
 
 enum class ShutdownHow : s32 {
@@ -232,6 +249,17 @@ struct SockAddrIn {
     std::array<u8, 248> zeroes;
 };
 static_assert(sizeof(SockAddrIn) == 0x100);
+
+/// A FreeBSD sockaddr_in6, which a guest SockAddrIn holds when its family is INET6.
+struct SockAddrIn6 {
+    u8 len;
+    u8 family;
+    u16 portno;
+    u32 flowinfo;
+    std::array<u8, 16> ip;
+    u32 scope_id;
+};
+static_assert(sizeof(SockAddrIn6) == 28);
 
 enum class PollEvents : u16 {
     // Using Pascal case because IN is a macro on Windows.

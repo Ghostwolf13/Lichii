@@ -3,11 +3,13 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
 #include <utility>
 
 #include "common/assert.h"
 #include "common/common_types.h"
 #include "common/logging.h"
+#include "common/swap.h"
 #include "core/hle/service/sockets/sockets.h"
 #include "core/hle/service/sockets/sockets_translate.h"
 #include "core/internal_network/network.h"
@@ -42,6 +44,18 @@ Errno Translate(Network::Errno value) {
         return Errno::INPROGRESS;
     case Network::Errno::ISCONN:
         return Errno::ISCONN;
+    case Network::Errno::ADDRINUSE:
+        return Errno::ADDRINUSE;
+    case Network::Errno::ADDRNOTAVAIL:
+        return Errno::ADDRNOTAVAIL;
+    case Network::Errno::AFNOSUPPORT:
+        return Errno::AFNOSUPPORT;
+    case Network::Errno::HOSTUNREACH:
+        return Errno::HOSTUNREACH;
+    case Network::Errno::NETDOWN:
+        return Errno::NETDOWN;
+    case Network::Errno::NETUNREACH:
+        return Errno::NETUNREACH;
     default:
         UNIMPLEMENTED_MSG("Unimplemented errno={}", value);
         return Errno::SUCCESS;
@@ -136,6 +150,8 @@ Network::Domain Translate(Domain domain) {
         return Network::Domain::Unspecified;
     case Domain::INET:
         return Network::Domain::INET;
+    case Domain::INET6:
+        return Network::Domain::INET6;
     default:
         UNIMPLEMENTED_MSG("Unimplemented domain={}", domain);
         return {};
@@ -148,6 +164,8 @@ Domain Translate(Network::Domain domain) {
         return Domain::Unspecified;
     case Network::Domain::INET:
         return Domain::INET;
+    case Network::Domain::INET6:
+        return Domain::INET6;
     default:
         UNIMPLEMENTED_MSG("Unimplemented domain={}", domain);
         return {};
@@ -365,7 +383,23 @@ PollEvents Translate(Network::PollEvents flags) {
     return result;
 }
 
+static u16 SwapPort(u16 port) {
+    return static_cast<u16>(port >> 8 | port << 8);
+}
+
 Network::SockAddrIn Translate(SockAddrIn value) {
+    if (Domain(value.family) == Domain::INET6) {
+        SockAddrIn6 addr;
+        std::memcpy(&addr, &value, sizeof(addr));
+        return {
+            .family = Network::Domain::INET6,
+            .ip = {},
+            .portno = SwapPort(addr.portno),
+            .ip6 = addr.ip,
+            .flowinfo = Common::swap32(addr.flowinfo),
+            .scope_id = addr.scope_id,
+        };
+    }
     // All lengths are valid, from [0 upto 256]
     return {
         .family = Translate(Domain(value.family)),
@@ -375,6 +409,19 @@ Network::SockAddrIn Translate(SockAddrIn value) {
 }
 
 SockAddrIn Translate(Network::SockAddrIn value) {
+    if (value.family == Network::Domain::INET6) {
+        const SockAddrIn6 addr{
+            .len = sizeof(SockAddrIn6),
+            .family = static_cast<u8>(Domain::INET6),
+            .portno = SwapPort(value.portno),
+            .flowinfo = Common::swap32(value.flowinfo),
+            .ip = value.ip6,
+            .scope_id = value.scope_id,
+        };
+        SockAddrIn result{};
+        std::memcpy(&result, &addr, sizeof(addr));
+        return result;
+    }
     return {
         .len = 16,
         .family = static_cast<u8>(Translate(value.family)),

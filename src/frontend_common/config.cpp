@@ -34,6 +34,15 @@
 
 namespace FS = Common::FS;
 
+namespace {
+
+std::string GameConfigPath(const std::string& config_file) {
+    return FS::PathToUTF8String(FS::GetEdenPath(FS::EdenPath::ConfigDir) / "custom" /
+                                FS::ToU8String(config_file));
+}
+
+} // namespace
+
 Config::Config(const ConfigType config_type)
     : type(config_type), global{config_type == ConfigType::GlobalConfig} {}
 
@@ -50,7 +59,7 @@ void Config::Initialize(const std::string& config_name) {
         Reload();
         break;
     case ConfigType::PerGameConfig:
-        config_loc = FS::PathToUTF8String(fs_config_loc / "custom" / FS::ToU8String(config_file));
+        config_loc = GameConfigPath(config_file);
         void(FS::CreateParentDir(config_loc));
         SetUpIni();
         Reload();
@@ -71,6 +80,60 @@ void Config::Initialize(const std::optional<std::string> config_path) {
     void(FS::CreateParentDir(config_loc));
     SetUpIni();
     Reload();
+}
+
+namespace {
+
+// Writes into a game's config file without loading it into the settings.
+class GameConfigWriter final : public Config {
+public:
+    explicit GameConfigWriter(const std::string& config_name) : Config{ConfigType::PerGameConfig} {
+        FrontendCommon::CheckLegacyProfileBeforeConfig();
+        config_loc = GameConfigPath(fmt::format("{}.ini", config_name));
+        void(FS::CreateParentDir(config_loc));
+        SetUpIni();
+    }
+
+    void Save(const Settings::BasicSetting& setting, const std::string& value) {
+        const std::string key = AdjustKey(setting.GetLabel());
+        BeginGroup(Settings::TranslateCategory(setting.GetCategory()));
+        WriteBooleanSetting(std::string(key).append("\\use_global"), false);
+        WriteBooleanSetting(std::string(key).append("\\default"),
+                            value == setting.DefaultToString());
+        WriteStringSetting(key, value);
+        EndGroup();
+        WriteToIni();
+    }
+
+private:
+    void ReloadAllValues() override {}
+    void SaveAllValues() override {}
+    void ReadHidbusValues() override {}
+    void ReadDebugControlValues() override {}
+    void ReadPathValues() override {}
+    void ReadShortcutValues() override {}
+    void ReadUIValues() override {}
+    void ReadUIGamelistValues() override {}
+    void ReadUILayoutValues() override {}
+    void ReadMultiplayerValues() override {}
+    void SaveHidbusValues() override {}
+    void SaveDebugControlValues() override {}
+    void SavePathValues() override {}
+    void SaveShortcutValues() override {}
+    void SaveUIValues() override {}
+    void SaveUIGamelistValues() override {}
+    void SaveUILayoutValues() override {}
+    void SaveMultiplayerValues() override {}
+    std::vector<Settings::BasicSetting*>& FindRelevantList(Settings::Category category) override {
+        return Settings::values.linkage.by_category[category];
+    }
+};
+
+} // namespace
+
+void Config::SaveGameValue(const std::string& config_name, const Settings::BasicSetting& setting,
+                           const std::string& value) {
+    GameConfigWriter{config_name}.Save(setting, value);
 }
 
 void Config::WriteToIni() const {
@@ -142,8 +205,15 @@ void Config::WriteToIni() const {
     CSimpleIniA::FileWriter writer(fp);
     // FileWriter ignores fputs errors, so the stream's error flag is checked too
     const bool written = config->Save(writer, false) >= 0 && !std::ferror(fp);
+    // On disk before the rename: without it a power loss or kernel panic right after a save can
+    // leave the renamed file empty (delayed allocation on ext4 and XFS).
+#ifdef _WIN32
+    const bool synced = written && std::fflush(fp) == 0 && _commit(_fileno(fp)) == 0;
+#else
+    const bool synced = written && std::fflush(fp) == 0 && fsync(fileno(fp)) == 0;
+#endif
     const bool closed = std::fclose(fp) == 0;
-    if (!written || !closed) {
+    if (!synced || !closed) {
         LOG_ERROR(Frontend, "Config file could not be saved!");
         std::filesystem::remove(temporary, error);
         return;
@@ -174,7 +244,21 @@ void Config::WriteToIni() const {
     if (error) {
         LOG_ERROR(Frontend, "Config file could not be saved: {}", error.message());
         std::filesystem::remove(temporary, error);
+        return;
     }
+#ifndef _WIN32
+    // The rename is a change to the folder: it survives a power loss only once the folder is on
+    // disk too. The config is saved either way; a failure here only leaves that window open.
+    const auto folder =
+        target.has_parent_path() ? target.parent_path() : std::filesystem::path{"."};
+    const int folder_fd = open(folder.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (folder_fd < 0 || fsync(folder_fd) != 0) {
+        LOG_WARNING(Frontend, "Config file saved, but its folder could not be synced");
+    }
+    if (folder_fd >= 0) {
+        close(folder_fd);
+    }
+#endif
 }
 
 void Config::SetUpIni() {
@@ -225,7 +309,6 @@ void Config::SetUpIni() {
         seed(Settings::values.gpu_accuracy, ToString(u32(Settings::GpuAccuracy::Low)));
         seed(Settings::values.nvdec_emulation, ToString(u32(Settings::NvdecEmulation::Gpu)));
         seed(Settings::values.async_presentation, ToString(true));
-        seed(Settings::values.use_asynchronous_shaders, ToString(true));
         EndGroup();
     }
 #endif

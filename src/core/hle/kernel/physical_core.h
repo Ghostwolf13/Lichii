@@ -69,6 +69,9 @@ public:
 
 private:
     const std::size_t m_core_index;
+    // EDEN_NX2_IDLE_STATS=1: every 10 s, each core logs how often it went idle, how many of those
+    // periods its poll caught, and how long blocked periods took to wake after the interrupt.
+    const bool m_idle_stats;
     std::mutex m_guard;
     std::condition_variable m_on_interrupt;
     Core::ArmInterface* m_arm_interface{};

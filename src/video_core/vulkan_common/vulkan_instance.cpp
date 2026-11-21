@@ -3,7 +3,9 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cstddef>
+#include <cstring>
 #include <future>
 #include <optional>
 #include <span>
@@ -15,6 +17,7 @@
 #include <ranges>
 #include <vulkan/vulkan_core.h>
 #include "core/frontend/emu_window.h"
+#include "video_core/vulkan_common/vulkan_address_map.h"
 #include "video_core/vulkan_common/vulkan_instance.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #ifdef EGLANTINE_STREAMLINE
@@ -43,7 +46,7 @@ namespace {
     const vk::InstanceDispatch& dld, std::vector<VkExtensionProperties> const& properties,
     Core::Frontend::WindowSystemType window_type, bool enable_validation) {
     std::vector<const char*> extensions;
-    extensions.reserve(6);
+    extensions.reserve(7);
     // Headless presents to VK_EXT_headless_surface where the driver has it (GPU trace replay).
     const bool headless_surface =
         window_type == Core::Frontend::WindowSystemType::Headless &&
@@ -90,6 +93,13 @@ namespace {
             })) {
             extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
         }
+        // Surface queries for present ids and present waits (VK_KHR_present_id2/wait2).
+        if (std::ranges::any_of(properties, [](const VkExtensionProperties& property) {
+                return std::strcmp(property.extensionName,
+                                   VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME) == 0;
+            })) {
+            extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+        }
     }
     // Probe optional extensions against the same snapshot the caller verifies against, so the
     // check here and the verification in CreateInstance can never disagree (see TOCTOU note below).
@@ -97,7 +107,8 @@ namespace {
     if (AreExtensionsSupported(dld, properties, std::array{VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME}))
         extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 #endif
-    if (enable_validation && AreExtensionsSupported(dld, properties, std::array{VK_EXT_DEBUG_UTILS_EXTENSION_NAME}))
+    if ((enable_validation || Vulkan::AddressMap::Wanted()) &&
+        AreExtensionsSupported(dld, properties, std::array{VK_EXT_DEBUG_UTILS_EXTENSION_NAME}))
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 #ifdef EGLANTINE_STREAMLINE
     // What NVIDIA's DLSS asks for through Streamline, where available. Static: the returned
@@ -191,6 +202,12 @@ vk::Instance CreateInstance(const Common::DynamicLibrary& library, vk::InstanceD
     if (!vk::Load(*instance, dld)) {
         LOG_ERROR(Render_Vulkan, "Failed to load Vulkan instance function pointers");
         throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
+    }
+    // A loader may return entry points of extensions the instance did not enable.
+    if (std::ranges::none_of(extensions, [](const char* name) {
+            return std::strcmp(name, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME) == 0;
+        })) {
+        dld.vkGetPhysicalDeviceSurfaceCapabilities2KHR = nullptr;
     }
     return instance;
 }

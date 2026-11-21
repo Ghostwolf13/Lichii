@@ -59,15 +59,13 @@ inline size_t RemoveAllDLC(Core::System& system, const u64 program_id) {
     const auto& fs_controller = system.GetFileSystemController();
     const auto dlc_entries = system.GetContentProvider().ListEntriesFilter(
         FileSys::TitleType::AOC, FileSys::ContentRecordType::Data);
-    std::vector<u64> program_dlc_entries;
-
+    std::vector<u64> add_on_content;
+    add_on_content.reserve(dlc_entries.size());
     for (const auto& entry : dlc_entries) {
-        if (FileSys::GetBaseTitleID(entry.title_id) == program_id) {
-            program_dlc_entries.push_back(entry.title_id);
-        }
+        add_on_content.push_back(entry.title_id);
     }
 
-    for (const auto& entry : program_dlc_entries) {
+    for (const auto& entry : FileSys::GetAddOnContent(program_id, add_on_content)) {
         if (RemoveDLC(fs_controller, entry)) {
             ++count;
         }

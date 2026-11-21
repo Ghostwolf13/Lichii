@@ -30,10 +30,10 @@ the peak.
 
 While HDR is active, anti-aliasing, post-processing and FSR/SGSR/FSR 3 upscaling are off, and
 the window is scaled bilinearly. Upscalers that replace a game's own network (DLSS, FSR 3.1 in
-Ocarina of Time) run inside the game's frame and keep working. Frame generation (FSR 3 and LSFG)
-keeps working: it interpolates the HDR10 or scRGB frame as presented. It needs the GPU to write
-that format from a compute shader; where it can't, the status bar shows FG UNAVAILABLE and the log
-says why.
+Ocarina of Time) run inside the game's frame and keep working. Frame generation (Lichii Optical
+Flow and LSFG) keeps working: it interpolates the HDR10 or scRGB frame as presented. It needs the
+GPU to write that format from a compute shader; where it can't, the status bar shows FG UNAVAILABLE
+and the log says why.
 
 On Windows, Auto follows changes during play: toggling Windows HDR, moving the window to
 another monitor, changing the SDR content brightness or running the Windows HDR Calibration app

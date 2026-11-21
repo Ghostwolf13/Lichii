@@ -3,6 +3,10 @@ description: Feature Request for Lichii's UI
 title: "[Feature Request] "
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not post games, keys, firmware, account credentials or unauthorized download links. Use examples and assets you have permission to share.
   - type: textarea
     id: wanted
     attributes:

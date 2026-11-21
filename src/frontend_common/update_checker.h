@@ -22,6 +22,8 @@ enum class Failure {
     Http,
     // No usable answer arrived, for example when offline.
     Network,
+    // The running build has no published build-N tag or release platform to compare against.
+    NotReleaseBuild,
 };
 
 struct CheckResult {
@@ -32,6 +34,9 @@ struct CheckResult {
 
 // Classify a failed release request by its HTTP status, or 0 when no response arrived.
 Failure ClassifyFailure(int status);
+
+// Whether a build with this tag and platform can be compared against published releases.
+bool IsReleaseBuild(std::string_view build_tag, std::string_view platform);
 
 CheckResult Check();
 std::optional<Common::Net::Release> GetUpdate();

@@ -6,6 +6,7 @@
 #pragma once
 
 #include <climits>
+#include <unordered_map>
 #include <vector>
 
 #include "common/common_types.h"
@@ -45,6 +46,10 @@ public:
 
     void TickFrame();
 
+    /// Out of device memory: waits for the submitted work without submitting, then frees every
+    /// staging buffer the GPU is done with. Those handed out since the last submit stay.
+    void ReleaseMemory();
+
     /// Bytes of the cached staging buffers of a kind, idle or in use (EDEN_NX2_MEM_TRACE).
     [[nodiscard]] u64 CachedBytes(MemoryUsage usage);
 
@@ -62,7 +67,6 @@ private:
         u32 log2_level;
         u64 index;
         u64 tick = 0;
-        bool deferred{};
 
         StagingBufferRef Ref() const noexcept {
             return {
@@ -79,6 +83,10 @@ private:
 
     struct StagingBuffers {
         std::vector<StagingBuffer> entries;
+        /// Handed out deferred, by index, until FreeDeferred: lookups don't scan them. Tens of
+        /// thousands of copies of GPU-written command list pages stay held in Hyrule Warriors:
+        /// Age of Imprisonment fights, which made each dispatch's copies scan them all.
+        std::unordered_map<u64, StagingBuffer> deferred;
         size_t delete_index = 0;
         size_t iterate_index = 0;
     };
@@ -100,6 +108,9 @@ private:
     StagingBuffersCache& GetCache(MemoryUsage usage);
 
     void ReleaseCache(MemoryUsage usage);
+
+    /// Frees every staging buffer the GPU is done with, of every kind (out of memory).
+    void ReleaseIdleBuffers();
 
     void ReleaseLevel(StagingBuffersCache& cache, size_t log2);
     size_t Region(size_t iter) const noexcept {

@@ -14,6 +14,7 @@
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
+#include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
@@ -146,9 +147,17 @@ class DescriptorLayoutBuilder {
 public:
     DescriptorLayoutBuilder(const Device& device_) : device{&device_} {}
 
+    /// Whether the layout exceeds the core descriptor limits, which only sets from an
+    /// update-after-bind pool may do: they count against the larger limits of such pools.
+    bool UsesUpdateAfterBindPool() const {
+        return device->UpdateAfterBindSampledLimits() &&
+               ExceedsSampledDescriptorLimits(std::span(bindings.data(), bindings.size()),
+                                              device->CoreSampledLimits());
+    }
+
     bool CanUsePushDescriptor() const noexcept {
         if (!device->IsKhrPushDescriptorSupported() ||
-            num_descriptors > device->MaxPushDescriptors()) {
+            num_descriptors > device->MaxPushDescriptors() || UsesUpdateAfterBindPool()) {
             return false;
         }
         return !device->IsExtDescriptorBufferSupported() ||
@@ -158,7 +167,7 @@ public:
     bool CanUseDescriptorBuffer() const noexcept {
         const auto& props = device->DescriptorBufferProperties();
         if (!device->IsExtDescriptorBufferSupported() || bindings.empty() ||
-            !props.combinedImageSamplerDescriptorSingleArray) {
+            !props.combinedImageSamplerDescriptorSingleArray || UsesUpdateAfterBindPool()) {
             return false;
         }
         return !props.bufferlessPushDescriptors || !CanUsePushDescriptor();
@@ -194,6 +203,9 @@ public:
         }
         if (use_descriptor_buffer) {
             flags |= VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
+        }
+        if (!use_push_descriptor && !use_descriptor_buffer && UsesUpdateAfterBindPool()) {
+            flags |= VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
         }
         boost::container::small_vector<VkDescriptorBindingFlags, 32> binding_flags;
         VkDescriptorSetLayoutBindingFlagsCreateInfo binding_flags_ci{};
@@ -265,6 +277,22 @@ public:
             .pSetLayouts = bindings.empty() ? nullptr : &descriptor_set_layout,
             .pushConstantRangeCount = 1,
             .pPushConstantRanges = &range,
+        });
+    }
+
+    /// The set and pipeline layouts from the cache, made on the first pipeline with these
+    /// bindings, set flags and push constant range.
+    const PipelineLayoutCache::Entry& GetLayouts(PipelineLayoutCache& cache,
+                                                 bool use_push_descriptor,
+                                                 bool use_descriptor_buffer = false) const {
+        return cache.Get(PipelineLayoutCache::MakeKey(use_push_descriptor, use_descriptor_buffer,
+                                                      is_compute, uses_mesh, mesh_emulation,
+                                                      std::span(bindings.data(), bindings.size())),
+                         [&] {
+            PipelineLayoutCache::Entry entry;
+            entry.set = CreateDescriptorSetLayout(use_push_descriptor, use_descriptor_buffer);
+            entry.pipeline = CreatePipelineLayout(*entry.set);
+            return entry;
         });
     }
 
@@ -443,11 +471,12 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
     for (const auto& desc : info.image_descriptors) {
         bool is_rescaled{};
         for (u32 index = 0; index < desc.count; ++index) {
-            ImageView& image_view{texture_cache.GetImageView((views++)->id)};
+            const VideoCommon::ImageViewId image_view_id{(views++)->id};
+            ImageView& image_view{texture_cache.GetImageView(image_view_id)};
             const VkImageView vk_image_view{
                 image_view.StorageView(desc.type, desc.format, desc.is_byte_addressed)};
             if (desc.is_written) {
-                texture_cache.MarkModification(image_view.image_id);
+                texture_cache.MarkStorageWrite(image_view_id);
             }
             guest_descriptor_queue.AddImage(vk_image_view);
             const bool element_rescaled{texture_cache.IsRescaling(image_view)};

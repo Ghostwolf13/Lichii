@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <random>
 #include <stdexcept>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -66,4 +68,23 @@ TEST_CASE("Range Map: Setup", "[video_core]") {
     REQUIRE(my_map.GetValueAt(2001) == MappedEnum::Valid_3);
     REQUIRE(my_map.GetValueAt(5999) == MappedEnum::Valid_3);
     REQUIRE(my_map.GetValueAt(6000) == MappedEnum::Invalid);
+}
+
+TEST_CASE("Range Map: Random maps match a flat model", "[video_core]") {
+    constexpr u64 size = 256;
+    Common::RangeMap<u64, MappedEnum> my_map(MappedEnum::Invalid);
+    std::vector<MappedEnum> model(size + 1, MappedEnum::Invalid);
+    std::mt19937 rng{1234};
+    for (int i = 0; i < 2000; ++i) {
+        const u64 begin = rng() % size;
+        const u64 end = begin + 1 + rng() % (size - begin);
+        const auto value = static_cast<MappedEnum>(rng() % 4);
+        my_map.Map(begin, end, value);
+        for (u64 address = begin; address < end; ++address) {
+            model[address] = value;
+        }
+        for (u64 address = 0; address <= size; ++address) {
+            REQUIRE(my_map.GetValueAt(address) == model[address]);
+        }
+    }
 }

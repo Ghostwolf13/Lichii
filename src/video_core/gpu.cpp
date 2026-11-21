@@ -28,6 +28,7 @@
 #include "video_core/control/channel_state.h"
 #include "video_core/control/scheduler.h"
 #include "video_core/dma_pusher.h"
+#include "video_core/due_composites.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/kepler_memory.h"
@@ -36,6 +37,7 @@
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/gpu_trace/recorder.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_split.h"
 #include "video_core/pending_maps.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_timestamp.h"
@@ -221,6 +223,9 @@ struct GPU::Impl {
             auto request = std::move(sync_requests.front());
             sync_requests.pop_front();
             sync_request_mutex.unlock();
+            if (VideoCommon::GpuSplit::OnBackThread()) {
+                VideoCommon::GpuSplit::Get().WaitRender();
+            }
             VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::TickWork);
             request();
             current_sync_fence.fetch_add(1, std::memory_order_release);
@@ -230,9 +235,33 @@ struct GPU::Impl {
     }
 
     [[nodiscard]] u64 GetTicks() const {
-        return ReadGpuTimestamp(system.CoreTiming(), g_nx2_ampere.load(std::memory_order_relaxed),
-                                Settings::values.gpu_clock.GetValue(),
+        const bool ampere = g_nx2_ampere.load(std::memory_order_relaxed) && !LegacyTimestamps();
+        return ReadGpuTimestamp(system.CoreTiming(), ampere, Settings::values.gpu_clock.GetValue(),
                                 ampere_anchor.load(std::memory_order_relaxed));
+    }
+
+    /// Whether the running title keeps GPU tick timestamps (UsesLegacyAmpereTimestamps). Known
+    /// once the application process exists; until then (program id 0) nanoseconds are used. An
+    /// application change (NotifyApplicationChanged) replaces the cached answer.
+    [[nodiscard]] bool LegacyTimestamps() const {
+        s8 known = legacy_timestamps.load(std::memory_order_relaxed);
+        if (known < 0) {
+            const u64 program_id = system.GetApplicationProcessProgramID();
+            if (program_id == 0) {
+                return false;
+            }
+            const s8 found = UsesLegacyAmpereTimestamps(program_id) ? 1 : 0;
+            if (legacy_timestamps.compare_exchange_strong(known, found,
+                                                          std::memory_order_relaxed)) {
+                known = found;
+            }
+        }
+        return known != 0;
+    }
+
+    void NotifyApplicationChanged(u64 program_id) {
+        legacy_timestamps.store(UsesLegacyAmpereTimestamps(program_id) ? 1 : 0,
+                                std::memory_order_relaxed);
     }
 
     void RendererFrameEndNotify() {
@@ -405,7 +434,7 @@ struct GPU::Impl {
             [this, current_request_counter, num_fences, composite_layers = std::move(layers),
              composite_fences = std::move(fences)] {
                 if (num_fences == 0) {
-                    renderer->Composite(composite_layers);
+                    CompositeOnOwner(composite_layers);
                     return;
                 }
                 auto& syncpoint_manager = system.Host1x().GetSyncpointManager();
@@ -417,7 +446,7 @@ struct GPU::Impl {
                         }
                         free_swap_counters.push_back(current_request_counter);
                     }
-                    renderer->Composite(composite_layers);
+                    CompositeOnOwner(composite_layers);
                 };
                 for (size_t i = 0; i < num_fences; i++) {
                     syncpoint_manager.RegisterGuestAction(composite_fences[i].id,
@@ -425,6 +454,21 @@ struct GPU::Impl {
                 }
             });
         gpu_thread.TickGPU(is_async);
+    }
+
+    /// A present whose fences were all reached, on the thread that reached the last one. Every
+    /// present goes through due_composites, so none overtakes one queued for the owner.
+    void CompositeOnOwner(const VideoCommon::DueComposites::Layers& layers) {
+        const auto composite = [this](const VideoCommon::DueComposites::Layers& due) {
+            renderer->Composite(due);
+        };
+        // A fence another thread reached waits for the owner's next tick. That thread may be one
+        // the GPU threads wait for, so it doesn't wait.
+        due_composites.Reached(
+            layers, VideoCommon::GpuSplit::OwnsScheduler(), composite, [this, composite] {
+                (void)RequestSyncOperation([this, composite] { due_composites.Run(composite); });
+                gpu_thread.TickGPU(true);
+            });
     }
 
     void WaitForComposite() {
@@ -477,6 +521,7 @@ struct GPU::Impl {
     std::list<std::function<void()>> sync_requests;
     std::atomic<u64> current_sync_fence{};
     std::atomic<AmpereAnchor> ampere_anchor{};
+    mutable std::atomic<s8> legacy_timestamps{-1};
     u64 last_sync_fence{};
 
     VideoCommon::PendingMaps pending_maps;
@@ -501,6 +546,7 @@ struct GPU::Impl {
     std::deque<size_t> free_swap_counters;
     std::deque<size_t> request_swap_counters;
     std::mutex request_swap_mutex;
+    VideoCommon::DueComposites due_composites;
     u64 pending_composite_fence{};
 };
 
@@ -655,6 +701,10 @@ std::vector<u8> GPU::GetAppletCaptureBuffer() {
 
 u64 GPU::GetTicks() const {
     return impl->GetTicks();
+}
+
+void GPU::NotifyApplicationChanged(u64 program_id) {
+    impl->NotifyApplicationChanged(program_id);
 }
 
 bool GPU::IsAsync() const {

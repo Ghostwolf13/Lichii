@@ -56,9 +56,10 @@ struct StateAccess {
     static void CaptureGlobals(Writer& writer, Tegra::Control::ChannelState* any_channel,
                                Tegra::Host1x::SyncpointManager& syncpoints);
 
-    /// Applies a State record. `channel` is the record's channel, initialized (GPU::InitChannel),
-    /// or null for a global one. Returns false if the record doesn't fit this build.
-    static bool Restore(const Record& record, Tegra::Control::ChannelState* channel,
+    /// Applies a State record of a trace in format `version` (Reader::Version). `channel` is the
+    /// record's channel, initialized (GPU::InitChannel), or null for a global one. Returns false
+    /// if the record doesn't fit this build.
+    static bool Restore(const Record& record, u32 version, Tegra::Control::ChannelState* channel,
                         Tegra::Control::ChannelState* any_channel,
                         Tegra::Host1x::SyncpointManager& syncpoints);
 

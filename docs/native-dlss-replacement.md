@@ -5,9 +5,10 @@ Windows, then AMD FSR 3.1.6 if NVIDIA DLSS is disabled or unavailable. FSR uses 
 eight temporal-upscaling passes, including depth, motion, history and optional RCAS.
 This is separate from the presentation filters that scale the finished window image.
 
-Fire Emblem uses the jitter-only spatial workaround by default. Explicit `fsr` and `dlss`
-comparison modes enable temporal replacement for its validated input contract. The upstream
-temporal blend and RCAS fallback remain available if a temporal backend is unavailable.
+Fire Emblem uses temporal replacement by default: NVIDIA DLSS when it is on and available,
+then FSR 3.1 with the captured depth, then the upstream temporal blend and RCAS. A frame without
+matching motion vectors and depth, or one the temporal upscale turns down, is scaled with the
+jitter-only spatial workaround instead, never by the native pass.
 Invalid consumed inputs leave the native dispatch enabled. An already-rejected native
 tensor shader remains an explicit dispatch failure. General tensor emulation remains.
 
@@ -45,18 +46,31 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
 `EDEN_NX2_DLSS_REPLACEMENT=fsr` explicitly enables FSR; `native` disables both replacements;
 `dlss` asks for DLSS as its setting does.
 
-- Max Resolution add-on off: the 3/4-scale pass (`e40f5efb5480e692`; `ef542df87cacfe9e` on the
-  Linux RADV build, same contract) is replaced and FSR/DLSS
+The passes are recognised by native program key (`FindOcarinaUpscalePass` in
+`src/video_core/ocarina_upscale.h`), which lowering changes leave alone. Passes no capture has
+shown the native program of yet (`ef542df87cacfe9e`, `4c1ae2fe58f30a97`, `c033c3ddc9f0897b`) are
+matched by shader hash, and stop matching when the lowering of their program changes.
+
+- Max Resolution add-on off: the 3/4-scale pass (native program `6f9367bd41dc0b58`, shader
+  `e40f5efb5480e692`; also shader `ef542df87cacfe9e`, same contract) is replaced and FSR/DLSS
   writes the game's output size (1080p to 1440p docked, 810p to 1080p handheld).
-- Max Resolution add-on on, docked: the full-size pass (`6bd913e1f34e83eb`) at 2560x1440 is
-  replaced by a 3840x2160 temporal image. The game still finishes its 1440p frame. At presentation,
+- Max Resolution add-on on, docked: the full-size pass (native program `da6df3e54c716df2`,
+  shader `6bd913e1f34e83eb`) at 2560x1440 is replaced by a 3840x2160 temporal image. The game
+  still finishes its 1440p frame. At presentation,
   the HUD is taken from the difference between that frame and a 1440p copy of the temporal scene,
   and composited over the 4K scene. The 4K image skips the presentation's post-processing and
   upscale filters.
 - Max Resolution add-on on, handheld: the scene renders at 1920x1080 and the same output pass
-  runs at 1:1 (`c033c3ddc9f0897b`, 1920x1080 to 1920x1080); the game's final pass then scales to
-  its 2560x1440 output. FSR replaces it as native anti-aliasing (no upscale). DLSS leaves the
-  game's pass there (DLAA through it is untested).
+  (native program `da6df3e54c716df2`; also shader `c033c3ddc9f0897b`) runs at 1:1, 1920x1080 to
+  1920x1080; the game's final pass then scales to its 2560x1440 output. FSR replaces it as
+  native anti-aliasing (no upscale). DLSS leaves the game's pass there (DLAA through it is
+  untested).
+- Scaled scenes: when the game's dynamic resolution shrinks the scene (handheld, down to 854x480)
+  or a DLSS render scale does (docked), it upscales with the scaled passes (native programs
+  `d8efd9f0c95abd80`, shader `03bf0ffc7d2d0bed`, and `e4cda162ff6009e2`, shader
+  `9302bc0d6d1d9bc1`; also shader `4c1ae2fe58f30a97`). Any 16:9 scene up to the pass's output
+  size is taken: FSR/DLSS writes 1920x1080 handheld, and the 3840x2160 image above docked. When the
+  scene size changes, the upscaler's images are recreated and its history starts over.
 - The game has no motion vectors or jitter. Motion comes from the scene depth reprojected
   through this and the previous frame's camera (vertex constant buffer 3). Link's recognized
   skinned draw is replayed with both poses where his depth matches. Without his pose the frame
@@ -147,7 +161,8 @@ and makes later evaluations fall back; it does not wait for the scheduler worker
 
 `EDEN_NX2_DLSS_REPLACEMENT=fsr` selects temporal replacement and forces FSR for comparison.
 `dlss` selects temporal replacement with NVIDIA preferred when enabled and available.
-`native` preserves the guest evaluation. With no override, Fire Emblem uses spatial de-jitter.
+`native` preserves the guest evaluation. `spatial` keeps Fire Emblem on the spatial de-jitter for
+comparisons. With no override, Fire Emblem's replacement is temporal.
 The old `EDEN_NX2_DLSS_STANDIN` variable is not read. The internal `standin` backend override
 does not select Fire Emblem's intercepted dispatch. The RCAS sharpness setting controls FSR
 and fallback sharpening. NVIDIA model-selection overrides

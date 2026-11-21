@@ -19,6 +19,17 @@ inline bool Enabled() {
     return enabled;
 }
 
+/// EDEN_DKB_GPU_SITES=1 with EDEN_DKB_FRAME_TRACE=1: the Vulkan scheduler timestamps every recorded
+/// command of the sampled frame for the `DKB gpu_sites` report. Off by default because thousands
+/// of timestamps make that frame slower.
+inline bool GpuSitesEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_DKB_GPU_SITES");
+        return Enabled() && value && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
 struct RateLimit {
     std::chrono::steady_clock::time_point next{};
 

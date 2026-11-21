@@ -22,6 +22,8 @@ constexpr std::size_t profile_username_size{32};
 using ProfileUsername = std::array<u8, profile_username_size>;
 using UserIDArray = std::array<Common::UUID, MAX_USERS>;
 
+enum class ProfileStorage { Shared, Scratch };
+
 // This is nn::account::Uid
 struct Uid {
     std::array<u8, 0x10> unk0;
@@ -69,8 +71,12 @@ static_assert(sizeof(ProfileBase) == 0x38, "ProfileBase is an invalid size");
 /// objects
 class ProfileManager {
 public:
-    ProfileManager();
+    explicit ProfileManager(ProfileStorage storage = ProfileStorage::Shared);
     ~ProfileManager();
+
+    bool IsScratch() const {
+        return storage == ProfileStorage::Scratch;
+    }
 
     Result AddUser(const ProfileInfo& user);
     Result CreateNewUser(Common::UUID uuid, const ProfileUsername& username);
@@ -111,6 +117,10 @@ public:
     void WriteUserSaveFile();
 
     void ResetUserSaveFile();
+    /// Whether the last load read the users from profiles.dat, rather than making the default one.
+    bool UserSaveFileRead() const {
+        return user_save_file_read;
+    }
 
     std::vector<Common::UUID> FindExistingProfileUUIDs();
     std::vector<std::string> FindExistingProfileStrings();
@@ -119,10 +129,14 @@ public:
 
 private:
     void ParseUserSaveFile();
+    /// Makes the default user when there is none, and opens the current user.
+    void OpenCurrentUser();
     std::optional<std::size_t> AddToProfiles(const ProfileInfo& profile);
     void RemoveAllProfiles();
 
+    const ProfileStorage storage;
     bool is_save_needed{};
+    bool user_save_file_read{};
     std::array<ProfileInfo, MAX_USERS> profiles{};
     std::array<ProfileInfo, MAX_USERS> stored_opened_profiles{};
     std::size_t user_count{};

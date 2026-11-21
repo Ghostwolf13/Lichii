@@ -30,6 +30,10 @@ public:
     DeviceMemory& operator=(const DeviceMemory&) = delete;
     DeviceMemory(const DeviceMemory&) = delete;
 
+#ifdef HAS_NCE
+    [[nodiscard]] u64 PrepareNativeExecution(bool has_39bit_address_space);
+#endif
+
     template <typename T>
     Common::PhysicalAddress GetPhysicalAddr(const T* ptr) const {
         return GetPhysicalAddr(reinterpret_cast<uintptr_t>(ptr));

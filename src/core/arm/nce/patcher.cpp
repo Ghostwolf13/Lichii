@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <numeric>
-#include <bit>
 #include "common/cpu_features.h"
 #include "common/alignment.h"
 #include "common/literals.h"
@@ -25,6 +24,10 @@ using NativeExecutionParameters = Kernel::KThread::NativeExecutionParameters;
 
 constexpr size_t MaxRelativeBranch = 128_MiB;
 constexpr u32 ModuleCodeIndex = 0x24 / sizeof(u32);
+
+static constexpr bool IsCounterRegister(u32 reg) {
+    return reg == CntfrqEl0 || reg == CntpctEl0 || reg == CntvctEl0;
+}
 
 Patcher::Patcher() : c(m_patch_instructions), c_pre(m_patch_instructions_pre) {
     // The first word of the patch section is always a branch to the first instruction of the
@@ -55,6 +58,10 @@ Patcher::Patcher(std::span<const u8> text) : c(m_patch_instructions), c_pre(m_pa
             BranchToPatch(offset);
             const auto src_reg = mrs.GetSystemReg() == TpidrroEl0 ? oaknut::SystemReg::TPIDRRO_EL0 : oaknut::SystemReg::TPIDR_EL0;
             WriteMrsHandler(offset + sizeof(u32), oaknut::XReg{static_cast<int>(mrs.GetRt())}, src_reg);
+        } else if (mrs.Verify() && IsCounterRegister(mrs.GetSystemReg())) {
+            BranchToPatch(offset);
+            WriteCounterRead(offset + sizeof(u32), oaknut::XReg{static_cast<int>(mrs.GetRt())},
+                             mrs.GetSystemReg(), c);
         } else if (auto msr = MSR{words[i]}; msr.Verify() && msr.GetSystemReg() == TpidrEl0) {
             BranchToPatch(offset);
             WriteMsrHandler(offset + sizeof(u32), oaknut::XReg{static_cast<int>(msr.GetRt())});
@@ -148,27 +155,11 @@ bool Patcher::PatchText(std::span<const u8> program_image, const Kernel::CodeSet
             continue;
         }
 
-        // MRS Xn, CNTPCT_EL0
-        if (auto mrs = MRS{inst}; mrs.Verify() && mrs.GetSystemReg() == CntpctEl0) {
+        if (auto mrs = MRS{inst}; mrs.Verify() && IsCounterRegister(mrs.GetSystemReg())) {
             bool pre_buffer = false;
-            auto ret = AddRelocations(pre_buffer);
-            if (pre_buffer) {
-                WriteCntpctHandler(ret, oaknut::XReg{static_cast<int>(mrs.GetRt())}, c_pre);
-            } else {
-                WriteCntpctHandler(ret, oaknut::XReg{static_cast<int>(mrs.GetRt())}, c);
-            }
-            continue;
-        }
-
-        // MRS Xn, CNTFRQ_EL0
-        if (auto mrs = MRS{inst}; mrs.Verify() && mrs.GetSystemReg() == CntfrqEl0) {
-            bool pre_buffer = false;
-            auto ret = AddRelocations(pre_buffer);
-            if (pre_buffer) {
-                WriteCntfrqHandler(ret, oaknut::XReg{static_cast<int>(mrs.GetRt())}, c_pre);
-            } else {
-                WriteCntfrqHandler(ret, oaknut::XReg{static_cast<int>(mrs.GetRt())}, c);
-            }
+            const auto ret = AddRelocations(pre_buffer);
+            WriteCounterRead(ret, oaknut::XReg{static_cast<int>(mrs.GetRt())}, mrs.GetSystemReg(),
+                             pre_buffer ? c_pre : c);
             continue;
         }
 
@@ -425,7 +416,7 @@ void Patcher::WriteLoadContext(oaknut::VectorCodeGenerator& cg) {
     cg.MSR(oaknut::SystemReg::FPSR, X0);
     cg.LDR(W0, X30, offsetof(GuestContext, fpcr));
     cg.MSR(oaknut::SystemReg::FPCR, X0);
-    cg.LDR(W0, X30, offsetof(GuestContext, nzcv));
+    cg.LDR(W0, X30, offsetof(GuestContext, pstate));
     cg.MSR(oaknut::SystemReg::NZCV, X0);
 
     // Load all vector registers.
@@ -464,8 +455,8 @@ void Patcher::WriteSaveContext(oaknut::VectorCodeGenerator& cg) {
         cg.STP(oaknut::QReg{i}, oaknut::QReg{i + 1}, X30, VEC_OFF + 16 * i);
     }
 
-    // Store guest system registers, X30 and SP, using X0 as a scratch register.
-    cg.STR(X0, SP, PRE_INDEXED, -16);
+    // Store guest system registers, X30 and SP, using X0 and X1 as scratch registers.
+    cg.STP(X0, X1, SP, PRE_INDEXED, -16);
     cg.LDR(X0, SP, 16);
     cg.STR(X0, X30, 8 * 30);
     cg.ADD(X0, SP, 32);
@@ -475,8 +466,10 @@ void Patcher::WriteSaveContext(oaknut::VectorCodeGenerator& cg) {
     cg.MRS(X0, oaknut::SystemReg::FPCR);
     cg.STR(W0, X30, offsetof(GuestContext, fpcr));
     cg.MRS(X0, oaknut::SystemReg::NZCV);
-    cg.STR(W0, X30, offsetof(GuestContext, nzcv));
-    cg.LDR(X0, SP, POST_INDEXED, 16);
+    cg.LDR(W1, X30, offsetof(GuestContext, pstate));
+    cg.BFXIL(W0, W1, 0, 28);
+    cg.STR(W0, X30, offsetof(GuestContext, pstate));
+    cg.LDP(X0, X1, SP, POST_INDEXED, 16);
 
     // Reload our return X30 from the stack, and return.
     cg.LDR(X30, SP, 8);
@@ -530,6 +523,9 @@ void Patcher::WriteSvcTrampoline(ModuleDestLabel module_dest, u32 svc_id, oaknut
     cg.LDP(X2, X3, X1, offsetof(HostContext, host_sp));
     cg.MOV(SP, X2);
     cg.MSR(oaknut::SystemReg::TPIDR_EL0, X3);
+    cg.LDP(W2, W3, X1, offsetof(HostContext, host_fpcr));
+    cg.MSR(oaknut::SystemReg::FPCR, X2);
+    cg.MSR(oaknut::SystemReg::FPSR, X3);
 
     // Load callee-saved host registers and return to host.
     static constexpr size_t HOST_REGS_OFF = offsetof(HostContext, host_saved_regs);
@@ -544,6 +540,7 @@ void Patcher::WriteSvcTrampoline(ModuleDestLabel module_dest, u32 svc_id, oaknut
     cg.LDP(Q10, Q11, X1, HOST_VREGS_OFF + 2 * sizeof(u128));
     cg.LDP(Q12, Q13, X1, HOST_VREGS_OFF + 4 * sizeof(u128));
     cg.LDP(Q14, Q15, X1, HOST_VREGS_OFF + 6 * sizeof(u128));
+    cg.CLREX();
     cg.RET();
 
     // Write the post-SVC trampoline address, which will jump back to the guest after restoring its
@@ -626,25 +623,27 @@ void Patcher::WriteMsrHandler(ModuleDestLabel module_dest, oaknut::XReg src_reg,
         this->BranchToModule(module_dest);
 }
 
-void Patcher::WriteCntfrqHandler(ModuleDestLabel module_dest, oaknut::XReg dest_reg, oaknut::VectorCodeGenerator& cg) {
-    cg.MOV(dest_reg, Common::g_wall_clock.GetGuestCNTFRQ());
+void Patcher::WriteCounterRead(ModuleDestLabel module_dest, oaknut::XReg dest_reg, u32 system_reg,
+                               oaknut::VectorCodeGenerator& cg) {
+    const auto branch_back = [&] {
+        if (&cg == &c_pre) {
+            BranchToModulePre(module_dest);
+        } else {
+            BranchToModule(module_dest);
+        }
+    };
+    if (system_reg == CntfrqEl0) {
+        cg.MOV(dest_reg, Common::g_wall_clock.GetGuestCNTFRQ());
+        branch_back();
+        return;
+    }
+    if (dest_reg.index() == XZR.index()) {
+        cg.MRS(XZR, oaknut::SystemReg::CNTVCT_EL0);
+        branch_back();
+        return;
+    }
 
-    // Jump back to the instruction after the emulated MRS.
-    if (&cg == &c_pre)
-        this->BranchToModulePre(module_dest);
-    else
-        this->BranchToModule(module_dest);
-}
-
-void Patcher::WriteCntpctHandler(ModuleDestLabel module_dest, oaknut::XReg dest_reg, oaknut::VectorCodeGenerator& cg) {
-#if defined(HAS_NCE)
-    static Common::WallClock clock(false, 1);
-#else
-    static Common::WallClock clock(true, 1);
-#endif
-    clock.SetGuestCNTFRQ(Common::g_wall_clock.GetGuestCNTFRQ());
-    const auto factor = clock.GetGuestCNTFRQFactor();
-    const auto raw_factor = std::bit_cast<std::array<u64, 2>>(factor);
+    const auto factor = Common::g_wall_clock.GetGuestCNTFRQFactor();
 
     const auto use_x2_x3 = dest_reg.index() == 0 || dest_reg.index() == 1;
     oaknut::XReg scratch0 = use_x2_x3 ? X2 : X0;
@@ -673,16 +672,13 @@ void Patcher::WriteCntpctHandler(ModuleDestLabel module_dest, oaknut::XReg dest_
     cg.LDP(scratch0, scratch1, SP, POST_INDEXED, 16);
 
     // Jump back to the instruction after the emulated MRS.
-    if (&cg == &c_pre)
-        this->BranchToModulePre(module_dest);
-    else
-        this->BranchToModule(module_dest);
+    branch_back();
 
     // Scaling factor constant values.
     cg.l(factorlo);
-    cg.dx(raw_factor[0]);
+    cg.dx(static_cast<u64>(factor));
     cg.l(factorhi);
-    cg.dx(raw_factor[1]);
+    cg.dx(static_cast<u64>(factor >> 64));
 }
 
 void Patcher::LockContext(oaknut::VectorCodeGenerator& cg) {

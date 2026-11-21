@@ -4,14 +4,22 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <string>
 #include <variant>
 #include <vector>
 
+#include <algorithm>
+
 #include <catch2/catch_test_macros.hpp>
+#include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 
 #include "common/settings.h"
+#include "common/uuid.h"
+#include "core/hle/service/acc/nextendo_id_token.h"
 #include "core/internal_network/local_redirect.h"
 #include "core/internal_network/network.h"
+#include "tests/common/temp_dir.h"
 
 namespace LocalRedirect = Network::LocalRedirect;
 
@@ -62,7 +70,7 @@ void WriteFile(const std::filesystem::path& path, const void* data, std::streams
 }
 
 bool Same(const Network::SockAddrIn& a, const Network::SockAddrIn& b) {
-    return a.family == b.family && a.ip == b.ip && a.portno == b.portno;
+    return a.family == b.family && a.ip == b.ip && a.ip6 == b.ip6 && a.portno == b.portno;
 }
 
 void ResetRedirectSettings() {
@@ -124,6 +132,22 @@ TEST_CASE("LocalRedirect: host names map to the user's server", "[core]") {
     REQUIRE(Same(LocalRedirect::ConnectTarget(Public), Public));
     REQUIRE(LocalRedirect::Allowed(Public));
 
+    // A dual-stack INET6 socket reaches 127.0.0.1 as ::ffff:127.0.0.1 and stays INET6.
+    Network::SockAddrIn mapped{Network::Domain::INET6, {}, 443};
+    mapped.ip6 = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1};
+    const Network::SockAddrIn mapped_target = LocalRedirect::ConnectTarget(mapped);
+    REQUIRE(mapped_target.family == Network::Domain::INET6);
+    REQUIRE(mapped_target.portno == 8443);
+    REQUIRE(mapped_target.ip6 ==
+            Network::IPv6Address{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 1});
+    Network::SockAddrIn mapped_http = mapped;
+    mapped_http.portno = 80;
+    REQUIRE(Same(LocalRedirect::ConnectTarget(mapped_http), mapped_http));
+    // The redirect never resolves to ::1, so ::1 stays where it is.
+    Network::SockAddrIn loopback6 = mapped;
+    loopback6.ip6 = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    REQUIRE(Same(LocalRedirect::ConnectTarget(loopback6), loopback6));
+
     Settings::values.online_redirect_loopback_only = true;
     LocalRedirect::Configure();
     REQUIRE_FALSE(LocalRedirect::Allowed(Public));
@@ -146,12 +170,62 @@ TEST_CASE("LocalRedirect: host names map to the user's server", "[core]") {
     REQUIRE_FALSE(LocalRedirect::Matches("a.example"));
 }
 
+TEST_CASE("LocalRedirect: several hosts, separated by commas or whitespace", "[core]") {
+    REQUIRE(LocalRedirect::ParseHosts("").empty());
+    REQUIRE(LocalRedirect::ParseHosts(" *.LP1.t.npln.srv.nintendo.net,\tgamesync.npln.nintendo.net."
+                                      "\n a.example  a.example, *.") ==
+            std::vector<std::string>{"lp1.t.npln.srv.nintendo.net", "gamesync.npln.nintendo.net",
+                                     "a.example"});
+
+    ResetRedirectSettings();
+    Settings::values.online_service_redirect = true;
+    Settings::values.online_redirect_hosts =
+        "*.lp1.t.npln.srv.nintendo.net gamesync.npln.nintendo.net";
+    LocalRedirect::Configure();
+    REQUIRE(LocalRedirect::Matches("lp1.t.npln.srv.nintendo.net"));
+    REQUIRE(LocalRedirect::Matches("g1234.lp1.t.npln.srv.nintendo.net"));
+    REQUIRE(LocalRedirect::Matches("gamesync.npln.nintendo.net"));
+    REQUIRE(LocalRedirect::Matches("eu.gamesync.npln.nintendo.net"));
+    REQUIRE_FALSE(LocalRedirect::Matches("npln.nintendo.net"));
+    REQUIRE_FALSE(LocalRedirect::Matches("t.npln.srv.nintendo.net"));
+    ResetRedirectSettings();
+}
+
+TEST_CASE("LocalRedirect: the local id token names the profile and no Nextendo account",
+          "[core]") {
+    const auto profile = Common::UUID::MakeRandomWithSeed(7);
+    const std::string token =
+        Service::Account::Nextendo::BuildLocalIdToken(profile, 0x0100A3D008C5C000ULL, "1.2.3");
+    const size_t first = token.find('.');
+    const size_t second = token.find('.', first + 1);
+    REQUIRE(second != std::string::npos);
+    REQUIRE(second + 1 < token.size());
+
+    std::string payload = token.substr(first + 1, second - first - 1);
+    std::ranges::replace(payload, '-', '+');
+    std::ranges::replace(payload, '_', '/');
+    payload.append((4 - payload.size() % 4) % 4, '=');
+    std::vector<unsigned char> decoded(payload.size());
+    const int length =
+        EVP_DecodeBlock(decoded.data(), reinterpret_cast<const unsigned char*>(payload.data()),
+                        static_cast<int>(payload.size()));
+    REQUIRE(length > 0);
+    const std::string json(reinterpret_cast<const char*>(decoded.data()),
+                           static_cast<size_t>(length) - std::ranges::count(payload, '='));
+    const auto claims = nlohmann::json::parse(json);
+    REQUIRE(claims.at("sub") == profile.RawString());
+    REQUIRE(claims.at("tv") == "1.2.3");
+    REQUIRE(claims.at("app_id") == "0100A3D008C5C000");
+    REQUIRE_FALSE(claims.contains("nnex"));
+}
+
 TEST_CASE("LocalRedirect: malformed server and CA certificates are ignored", "[core]") {
     ResetRedirectSettings();
     Settings::values.online_service_redirect = true;
     Settings::values.online_redirect_hosts = "a.example";
     Settings::values.online_redirect_server = "192.0.2.1";
-    const auto ca_path = std::filesystem::temp_directory_path() / "lichii_redirect_test_ca.der";
+    const Tests::TempDir directory{"lichii-redirect-test"};
+    const auto ca_path = directory / "ca.der";
     constexpr char Pem[] = "-----BEGIN CERTIFICATE-----";
     WriteFile(ca_path, Pem, sizeof(Pem) - 1);
     Settings::values.online_redirect_ca = ca_path.string();
@@ -176,6 +250,5 @@ TEST_CASE("LocalRedirect: malformed server and CA certificates are ignored", "[c
     LocalRedirect::Configure();
     REQUIRE(LocalRedirect::TestCa().size() == sizeof(TestCertificate));
 
-    std::filesystem::remove(ca_path);
     ResetRedirectSettings();
 }

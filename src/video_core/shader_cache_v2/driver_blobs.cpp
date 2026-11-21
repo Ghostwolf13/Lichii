@@ -141,7 +141,8 @@ DriverBlobStore::DriverBlobStore(std::filesystem::path file_, const DeviceIdenti
                         Common::FS::FileShareFlag::ShareReadWrite);
         }
     }
-    writer.emplace(file, options.writer);
+    writer.emplace(file, options.writer,
+                   [this](std::span<const WrittenRecord> records) { OnWritten(records); });
     if (discarded != DriverBlobDiscard::None || loaded_bytes == 0) {
         const std::vector<u8> payload = EncodeIdentity(identity);
         writer->Append(RecordKind::DeviceIdentity, 0, payload);
@@ -160,6 +161,11 @@ std::optional<std::vector<u8>> DriverBlobStore::Find(RecordKind kind, u64 key) {
         return std::nullopt;
     }
     Entry& entry = it->second;
+    if (!reader.IsOpen()) {
+        // A new file: opened once it holds a blob of this session
+        reader.Open(file, Common::FS::FileAccessMode::Read, Common::FS::FileType::BinaryFile,
+                    Common::FS::FileShareFlag::ShareReadWrite);
+    }
     std::vector<u8> bytes(RecordHeaderSize + entry.payload_size + RecordHashSize);
     std::optional<LogRecord> record;
     if (reader.Seek(static_cast<s64>(entry.offset)) &&
@@ -196,19 +202,38 @@ void DriverBlobStore::Store(RecordKind kind, u64 key, std::span<const u8> payloa
         return;
     }
     const auto [it, inserted] = index.try_emplace({kind, key});
+    Entry& entry = it->second;
     if (!inserted) {
-        if (it->second.state == State::Written) {
+        if (entry.written && entry.state != State::Rejected) {
             return;
         }
-        dead_bytes += RecordSize(it->second.payload_size);
+        dead_bytes += RecordSize(entry.payload_size);
     }
-    it->second = {
-        .payload_size = static_cast<u32>(payload.size()), .state = State::Written, .used = true};
+    entry.payload_size = static_cast<u32>(payload.size());
+    entry.state = State::Written;
+    entry.used = true;
+    entry.written = true;
+    ++entry.queued;
     file_bytes += RecordSize(payload.size());
     written.fetch_add(1, std::memory_order_relaxed);
     written_bytes.fetch_add(RecordSize(payload.size()), std::memory_order_relaxed);
     // Under the lock, so that Close never ends the writer under it
     writer->Append(kind, key, payload);
+}
+
+void DriverBlobStore::OnWritten(std::span<const WrittenRecord> records) {
+    std::scoped_lock lock{mutex};
+    for (const WrittenRecord& record : records) {
+        const auto it = index.find({record.kind, record.key});
+        if (it == index.end() || it->second.queued == 0) {
+            continue;
+        }
+        Entry& entry = it->second;
+        if (--entry.queued == 0 && entry.state == State::Written) {
+            entry.offset = record.offset;
+            entry.state = State::Stored;
+        }
+    }
 }
 
 bool DriverBlobStore::Full() const {

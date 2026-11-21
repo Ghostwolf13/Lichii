@@ -363,7 +363,7 @@ static void* EmitExclusiveWrite128CallTrampoline(oaknut::CodeGenerator& code, co
 }
 
 A64AddressSpace::A64AddressSpace(const A64::UserConfig& conf)
-        : AddressSpace(conf.code_cache_size)
+        : AddressSpace(conf.code_cache_size, conf.fastmem_pointer)
         , conf(conf) {
     EmitPrelude();
 }
@@ -441,8 +441,11 @@ void A64AddressSpace::EmitPrelude() {
 
         if (conf.HasOptimization(OptimizationFlag::ReturnStackBuffer)) {
             code.LDR(Xscratch0, l_return_to_dispatcher);
+            code.MOV(Xscratch1, std::bit_cast<u64>(&cache_generation));
+            code.LDR(Xscratch1, Xscratch1);
             for (std::size_t i = 0; i < RSBCount; i++) {
                 code.STR(Xscratch0, SP, offsetof(StackLayout, rsb) + offsetof(RSBEntry, code_ptr) + i * sizeof(RSBEntry));
+                code.STR(Xscratch1, SP, offsetof(StackLayout, rsb) + offsetof(RSBEntry, cache_generation) + i * sizeof(RSBEntry));
             }
         }
 
@@ -479,8 +482,11 @@ void A64AddressSpace::EmitPrelude() {
 
         if (conf.HasOptimization(OptimizationFlag::ReturnStackBuffer)) {
             code.LDR(Xscratch0, l_return_to_dispatcher);
+            code.MOV(Xscratch1, std::bit_cast<u64>(&cache_generation));
+            code.LDR(Xscratch1, Xscratch1);
             for (std::size_t i = 0; i < RSBCount; i++) {
                 code.STR(Xscratch0, SP, offsetof(StackLayout, rsb) + offsetof(RSBEntry, code_ptr) + i * sizeof(RSBEntry));
+                code.STR(Xscratch1, SP, offsetof(StackLayout, rsb) + offsetof(RSBEntry, cache_generation) + i * sizeof(RSBEntry));
             }
         }
 

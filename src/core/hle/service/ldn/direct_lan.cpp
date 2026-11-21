@@ -7,8 +7,6 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
-
-#include <mstcpip.h>
 #else
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -113,12 +111,6 @@ bool DirectLan::Open(Network::IPv4Address ip, Network::IPv4Address subnet_mask) 
 #ifdef _WIN32
         // SO_REUSEADDR would let a second process share the listening port
         SetOption(*listener, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1);
-#ifdef SIO_UDP_CONNRESET
-        BOOL report_reset = FALSE;
-        DWORD bytes_returned = 0;
-        WSAIoctl(udp->GetFD(), SIO_UDP_CONNRESET, &report_reset, sizeof(report_reset), nullptr, 0,
-                 &bytes_returned, nullptr, nullptr);
-#endif
 #else
         listener->SetReuseAddr(true);
 #endif

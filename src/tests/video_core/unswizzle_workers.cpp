@@ -247,6 +247,7 @@ TEST_CASE("Full upload keeps mip layer offsets and compressed edge blocks", "[un
                                   PixelFormat::BC1_RGBA_UNORM, PixelFormat::ASTC_2D_5X4_UNORM}) {
             ImageInfo info;
             info.type = ImageType::e2D;
+            info.native_tiling = native;
             info.format = format;
             info.size = {2049, 1025, 1};
             info.block = {0, 4, 0};
@@ -292,6 +293,7 @@ TEST_CASE("Full upload does not wait behind a saturated shared pool", "[unswizzl
     Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31, 16};
     memory.EnableNativeTiling();
     ImageInfo info;
+    info.native_tiling = true;
     info.type = ImageType::e2D;
     info.format = PixelFormat::R8_UNORM;
     info.size = {2049, 1025, 1};
@@ -351,6 +353,7 @@ TEST_CASE("Full upload end to end microbenchmark", "[.unswizzle_upload_benchmark
     for (const auto format :
          {PixelFormat::R8_UNORM, PixelFormat::R16_UNORM, PixelFormat::A8B8G8R8_UNORM}) {
         ImageInfo info;
+        info.native_tiling = true;
         info.type = ImageType::e2D;
         info.format = format;
         info.size = {2049, 1025, 1};
@@ -473,5 +476,37 @@ TEST_CASE("Unswizzle end to end microbenchmark", "[.unswizzle_benchmark]") {
                         layout.bpp, layout.block_height, native, layout.HostBytes(),
                         layout.GuestBytes(), parallel_used, s, p, p / s);
         }
+    }
+}
+
+TEST_CASE("Native address spaces can upload both texture GOB orders",
+          "[unswizzle_workers][texture_layout]") {
+    using namespace VideoCommon;
+    ScopedSystemTestContext context;
+    Core::System system;
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    Tegra::MemoryManager memory{system, device_memory, 32, 1ULL << 31, 16};
+    memory.EnableNativeTiling();
+    UnswizzleWorker worker;
+    const Layout layout{513, 257, 16, 4, 2};
+    ImageInfo info;
+    info.type = ImageType::e2D;
+    info.format = PixelFormat::BC7_UNORM;
+    info.size = {layout.width * 4 - 3, layout.height * 4 - 3, 1};
+    info.block = {0, layout.block_height, 0};
+    info.resources = {1, 1};
+    info.layer_stride = CalculateLayerStride(info);
+    std::vector<u8> input(CalculateGuestSizeInBytes(info));
+    Fill(input);
+    std::vector<u8> expected(CalculateUnswizzledSizeBytes(info));
+    std::vector<u8> actual(expected.size());
+    for (const bool native : {false, true}) {
+        CAPTURE(native);
+        info.native_tiling = native;
+        layout.Serial(expected, input, native);
+        [[maybe_unused]] const auto copies = UnswizzleImage(memory, 0, info, input, actual, &worker);
+        CHECK(actual == expected);
+        CHECK(actual[16] == input[native ? 0x40 : 0x20]);
     }
 }

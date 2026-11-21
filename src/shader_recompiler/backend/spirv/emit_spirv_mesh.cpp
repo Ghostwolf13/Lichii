@@ -10,7 +10,9 @@
 // epilogue (reached by every invocation, see structured_control_flow.cpp) hands them to Vulkan.
 
 #include <algorithm>
+#include <optional>
 #include <span>
+#include <vector>
 
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
@@ -207,11 +209,15 @@ void ComputeMeshEpilogue(EmitContext& ctx) {
         }
     }
     // Primitive p: its k vertex indices (map bytes 4 + k * p). Past the count: 0 0 0 for a
-    // triangle (degenerate), MESH_EMULATION_UNUSED_VERTEX for a point or a line.
+    // triangle (degenerate), MESH_EMULATION_UNUSED_VERTEX for a point or a line. Its lines
+    // follow all the indices, at p * primitive_lines + l.
     const u32 corners{mesh.PrimitiveVertices()};
     const Id unused_vertex{corners == 3 ? ctx.u32_zero_value
                                         : ctx.Const(MESH_EMULATION_UNUSED_VERTEX)};
     const Id index_base{ctx.OpIAdd(ctx.U32[1], block, ctx.Const(vertex_words))};
+    const u32 primitive_lines{static_cast<u32>(mesh.primitive_lines.size())};
+    const Id primitive_line_base{
+        ctx.OpIAdd(ctx.U32[1], index_base, ctx.Const(mesh.max_primitives * corners))};
     for (u32 first = 0; first < mesh.max_primitives; first += threads) {
         const Id primitive{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
         const auto write = [&] {
@@ -227,6 +233,25 @@ void ComputeMeshEpilogue(EmitContext& ctx) {
                 ctx.OpStore(
                     OutputWord(ctx, ctx.OpIAdd(ctx.U32[1], destination, ctx.Const(element))),
                     ctx.OpSelect(ctx.U32[1], used, value, unused_vertex));
+            }
+            if (primitive_lines == 0) {
+                return;
+            }
+            const Id group{ctx.OpShiftRightLogical(ctx.U32[1], primitive, ctx.Const(5U))};
+            const Id slot{ctx.OpBitwiseAnd(ctx.U32[1], primitive, ctx.Const(31U))};
+            const Id source{ctx.OpIAdd(
+                ctx.U32[1], ctx.OpIMul(ctx.U32[1], group, ctx.Const(primitive_lines * 32)),
+                ctx.OpIAdd(ctx.U32[1], slot, ctx.Const(ctx.mesh_primitive_base)))};
+            const Id line_destination{
+                ctx.OpIAdd(ctx.U32[1], primitive_line_base,
+                           ctx.OpIMul(ctx.U32[1], primitive, ctx.Const(primitive_lines)))};
+            for (u32 line = 0; line < primitive_lines; ++line) {
+                const Id word{ctx.OpLoad(
+                    ctx.U32[1], SharedWord(ctx, ctx.mesh_attributes,
+                                           ctx.OpIAdd(ctx.U32[1], source, ctx.Const(line * 32))))};
+                ctx.OpStore(
+                    OutputWord(ctx, ctx.OpIAdd(ctx.U32[1], line_destination, ctx.Const(line))),
+                    word);
             }
         };
         if (first + threads > mesh.max_primitives) {
@@ -328,6 +353,19 @@ Id EmitIsbeRead(EmitContext& ctx, Id address) {
     const Id word{ctx.OpLoad(ctx.U32[1], PayloadWord(ctx, index))};
     return ctx.OpSelect(ctx.U32[1], ctx.OpIEqual(ctx.U1, address, ctx.u32_zero_value), own_index,
                         word);
+}
+
+// A program reading back a word of its own output attribute region: the word
+// EmitIsbeWriteAttribute stores at the same address. A word that another invocation writes is
+// only defined here when that write is ordered before this read; hardware runs the warp's
+// threads in step, these invocations are not.
+Id EmitIsbeReadOutput(EmitContext& ctx, Id address) {
+    const Id index{ctx.OpShiftRightLogical(ctx.U32[1], address, ctx.Const(2U))};
+    if (ctx.stage == Stage::Task) {
+        return ctx.OpLoad(ctx.U32[1], PayloadWord(ctx, index));
+    }
+    return ctx.OpLoad(ctx.U32[1], SharedWord(ctx, ctx.mesh_attributes,
+                                            Clamped(ctx, index, ctx.mesh_attribute_words)));
 }
 
 void EmitIsbeWriteAttribute(EmitContext& ctx, Id address, Id value) {
@@ -473,7 +511,8 @@ void EmitMeshEpilogue(EmitContext& ctx) {
 /// emit_spirv.h). Points also write PointSize, and points and lines past the primitive count are
 /// moved outside the clip volume and culled with a negative ClipDistance.
 std::vector<u32> EmitMeshEmulationVertex(const Profile& profile, const MeshInfo& mesh, u32 binding,
-                                         u32 args_binding, bool convert_depth, float point_size) {
+                                         u32 args_binding, bool convert_depth, float point_size,
+                                         u32 primitive_id_location) {
     Sirit::Module module{profile.supported_spirv};
     module.AddCapability(spv::Capability::Shader);
     module.SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
@@ -546,17 +585,50 @@ std::vector<u32> EmitMeshEmulationVertex(const Profile& profile, const MeshInfo&
         interfaces.push_back(clip_distance);
     }
     std::array<Id, IR::NUM_GENERICS> generics{};
-    for (const u32 line : mesh.vertex_lines) {
-        const IR::Attribute attribute{line};
-        if (!IR::IsGeneric(attribute)) {
-            continue;
-        }
+    const auto define_generic = [&](IR::Attribute attribute) {
         const u32 index{IR::GenericAttributeIndex(attribute)};
         if (!Sirit::ValidId(generics[index])) {
             generics[index] = module.AddGlobalVariable(output_vec4, spv::StorageClass::Output);
             module.Decorate(generics[index], spv::Decoration::Location, index);
             interfaces.push_back(generics[index]);
         }
+    };
+    for (const u32 line : mesh.vertex_lines) {
+        if (IR::IsGeneric(IR::Attribute{line})) {
+            define_generic(IR::Attribute{line});
+        }
+    }
+    // Per-primitive outputs: a target for each primitive line (invalid when it has none).
+    const Id output_u32{module.TypePointer(spv::StorageClass::Output, u32_type)};
+    const auto define_u32 = [&](std::optional<spv::BuiltIn> builtin, u32 location) {
+        const Id variable{module.AddGlobalVariable(output_u32, spv::StorageClass::Output)};
+        if (builtin) {
+            module.Decorate(variable, spv::Decoration::BuiltIn, *builtin);
+        } else {
+            module.Decorate(variable, spv::Decoration::Location, location);
+        }
+        interfaces.push_back(variable);
+        return variable;
+    };
+    std::vector<Id> primitive_targets;
+    for (const u32 line : mesh.primitive_lines) {
+        const IR::Attribute attribute{line};
+        Id target{};
+        if (IR::IsGeneric(attribute)) {
+            define_generic(attribute);
+        } else if (attribute == IR::Attribute::Layer || attribute == IR::Attribute::ViewportIndex) {
+            module.AddExtension("SPV_EXT_shader_viewport_index_layer");
+            module.AddCapability(spv::Capability::ShaderViewportIndexLayerEXT);
+            if (attribute == IR::Attribute::ViewportIndex && profile.support_multi_viewport) {
+                module.AddCapability(spv::Capability::MultiViewport);
+            }
+            target = define_u32(attribute == IR::Attribute::Layer ? spv::BuiltIn::Layer
+                                                                  : spv::BuiltIn::ViewportIndex,
+                                0);
+        } else if (attribute == IR::Attribute::PrimitiveId && primitive_id_location != ~0U) {
+            target = define_u32(std::nullopt, primitive_id_location);
+        }
+        primitive_targets.push_back(target);
     }
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(buffer);
@@ -627,6 +699,29 @@ std::vector<u32> EmitMeshEmulationVertex(const Profile& profile, const MeshInfo&
                            value);
         } else if (attribute == IR::Attribute::PointSize && Sirit::ValidId(point_size_output)) {
             module.OpStore(point_size_output, value);
+        }
+    }
+    // The primitive's lines, after all the block's indices: the same on each of its vertices.
+    const u32 primitive_lines{static_cast<u32>(mesh.primitive_lines.size())};
+    const Id primitive_line_base{module.OpIAdd(
+        u32_type,
+        module.OpIAdd(u32_type, block,
+                      constant(mesh.max_vertices * vertex_lines + mesh.max_primitives * corners)),
+        module.OpIMul(u32_type, primitive, constant(primitive_lines)))};
+    for (u32 line = 0; line < primitive_lines; ++line) {
+        const IR::Attribute attribute{mesh.primitive_lines[line]};
+        const bool is_generic{IR::IsGeneric(attribute)};
+        if (!is_generic && !Sirit::ValidId(primitive_targets[line])) {
+            continue;
+        }
+        const Id word{load(module.OpIAdd(u32_type, primitive_line_base, constant(line)))};
+        if (is_generic) {
+            module.OpStore(module.OpAccessChain(output_f32,
+                                                generics[IR::GenericAttributeIndex(attribute)],
+                                                constant(IR::GenericAttributeElement(attribute))),
+                           module.OpBitcast(f32_type, word));
+        } else {
+            module.OpStore(primitive_targets[line], word);
         }
     }
     // OpenGL-style clip space, as the mesh epilogue's ConvertDepth: z = (z + w) / 2.

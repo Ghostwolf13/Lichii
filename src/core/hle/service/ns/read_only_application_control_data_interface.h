@@ -12,6 +12,9 @@
 
 namespace Service::NS {
 
+Result ResolveApplicationDesiredLanguage(Out<ApplicationLanguage> out_desired_language,
+                                         u32 supported_languages, bool allow_unlisted_language);
+
 class IReadOnlyApplicationControlDataInterface final
     : public ServiceFramework<IReadOnlyApplicationControlDataInterface> {
 public:

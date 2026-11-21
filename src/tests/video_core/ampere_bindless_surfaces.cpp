@@ -27,6 +27,13 @@ TEST_CASE("Ampere captured bindless formatted surfaces preserve operands", "[vid
                   0xeb20018a00f70004ULL},
              Case{{{0x0000799c, 0x8000000c, 0x00100f07, 0x0041e200}},
                   0xeb20038800f7000cULL},
+             // Cyberpunk 2077 compute (#1084): .BUFFER loads and stores, one coordinate.
+             Case{{{0x01017998, 0x20000000, 0x001e0100, 0x004f6200}},
+                  0xeb00000200170101ULL},
+             Case{{{0x0000799c, 0x20000008, 0x00100f23, 0x0101e400}},
+                  0xeb20118200f70008ULL},
+             Case{{{0x0100799c, 0x20000010, 0x00100f00, 0x0041e200}},
+                  0xeb20000200f70110ULL},
          }) {
         const auto lowered = LowerToMaxwell(std::array{test.instruction, Exit});
         INFO(lowered.error);
@@ -34,6 +41,34 @@ TEST_CASE("Ampere captured bindless formatted surfaces preserve operands", "[vid
         REQUIRE(lowered.instructions.size() == 2);
         REQUIRE(lowered.instructions.front() == test.expected);
         REQUIRE(lowered.required_texture_buffer == ~0U);
+    }
+}
+
+TEST_CASE("Ampere register-handle surface atomics and reductions", "[video_core][ampere]") {
+    struct Case {
+        Instruction instruction;
+        u64 expected;
+    };
+    // Cyberpunk 2077 compute (#1084): SUATOM.D.BUFFER.ADD (0x394) and SURED.D.BUFFER.ADD
+    // (0x3a0), the handle in R2 and R4; Maxwell SUATOM marks the handle with bit 54, SURED
+    // clears its bound bit 51.
+    for (const auto& test : std::array{
+             Case{{{0x0b050394, 0x20000005, 0x001ee002, 0x010ee200}}, 0xea40010200500b05ULL},
+             Case{{{0x0a0013a0, 0x20000009, 0x0010e004, 0x0041e200}}, 0xeb40020200010a09ULL},
+         }) {
+        const auto lowered = LowerToMaxwell(std::array{test.instruction, Exit});
+        INFO(lowered.error);
+        REQUIRE(lowered);
+        REQUIRE(lowered.instructions.size() == 2);
+        REQUIRE(lowered.instructions.front() == test.expected);
+        REQUIRE(lowered.required_texture_buffer == ~0U);
+
+        auto bound_field = test.instruction;
+        bound_field.words[1] |= 1U << 22;
+        REQUIRE_FALSE(LowerToMaxwell(std::array{bound_field, Exit}));
+        auto scratch_handle = test.instruction;
+        scratch_handle.words[2] = (scratch_handle.words[2] & ~0xffU) | 250U;
+        REQUIRE_FALSE(LowerToMaxwell(std::array{scratch_handle, Exit}));
     }
 }
 

@@ -71,9 +71,20 @@ LogFile ReadLogFile(const std::filesystem::path& file, const ForEach& for_each) 
         if (size > 0) {
             log.bytes.resize(static_cast<size_t>(size));
             stream.seekg(0);
-            stream.read(reinterpret_cast<char*>(log.bytes.data()), size);
+            // In chunks: MinGW's libstdc++ hands one read to the CRT's _read, which aborts the
+            // process (invalid parameter) on a count above INT_MAX, a cache past 2 GiB
+            constexpr std::streamoff Chunk = std::streamoff{256} << 20;
+            std::streamoff done = 0;
+            while (done < size) {
+                const std::streamoff want = std::min(Chunk, size - done);
+                stream.read(reinterpret_cast<char*>(log.bytes.data()) + done, want);
+                done += stream.gcount();
+                if (stream.gcount() != want) {
+                    break;
+                }
+            }
             // Cut short when the file shrank since (a compaction replaced it)
-            log.bytes.resize(static_cast<size_t>(stream.gcount()));
+            log.bytes.resize(static_cast<size_t>(done));
         }
     }
     log.parsed = ParseLog(log.bytes, for_each);
@@ -100,7 +111,8 @@ std::optional<std::vector<u8>> ReadRecordPayload(const std::filesystem::path& fi
     return bytes;
 }
 
-WriteResult AppendToLog(const std::filesystem::path& file, std::span<const u8> records) {
+WriteResult AppendToLog(const std::filesystem::path& file, std::span<const u8> records,
+                        u64* records_offset) {
     // Without locks on this file system (the lock is neither held nor busy) it goes on as the
     // other caches do there.
     const Common::FS::FileLock lock{PipelineCacheLockPath(file)};
@@ -118,6 +130,9 @@ WriteResult AppendToLog(const std::filesystem::path& file, std::span<const u8> r
                             FileShareFlag::ShareReadWrite};
         if (target.IsOpen() && target.WriteSpan(std::span<const u8>{bytes}) == bytes.size() &&
             target.Flush()) {
+            if (records_offset) {
+                *records_offset = FileHeaderSize;
+            }
             return WriteResult::Written;
         }
         LOG_ERROR(Common_Filesystem, "Failed to create shader cache {}",
@@ -151,7 +166,8 @@ WriteResult AppendToLog(const std::filesystem::path& file, std::span<const u8> r
         }
     }
     // A record cut off by a crash leaves the end off a record boundary.
-    bytes.resize((RecordAlignment - size % RecordAlignment) % RecordAlignment);
+    const u64 padding = (RecordAlignment - size % RecordAlignment) % RecordAlignment;
+    bytes.resize(padding);
     bytes.insert(bytes.end(), records.begin(), records.end());
     bool written{};
     {
@@ -161,6 +177,9 @@ WriteResult AppendToLog(const std::filesystem::path& file, std::span<const u8> r
                   target.WriteSpan(std::span<const u8>{bytes}) == bytes.size() && target.Flush();
     }
     if (written) {
+        if (records_offset) {
+            *records_offset = size + padding;
+        }
         return WriteResult::Written;
     }
     // Cut off what was written (a full disk), so that the next records follow complete ones.

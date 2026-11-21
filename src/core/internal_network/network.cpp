@@ -4,17 +4,22 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <utility>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include "common/error.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mswsock.h>
 #else
 #include <arpa/inet.h>
 #include <errno.h>
@@ -82,36 +87,6 @@ SOCKET GetInterruptSocket() {
     return interrupt_socket;
 }
 
-sockaddr TranslateFromSockAddrIn(SockAddrIn input) {
-    sockaddr_in result;
-
-#ifdef __unix__
-    result.sin_len = sizeof(result);
-#endif
-
-    switch (static_cast<Domain>(input.family)) {
-    case Domain::INET:
-        result.sin_family = AF_INET;
-        break;
-    default:
-        UNIMPLEMENTED_MSG("Unhandled sockaddr family={}", input.family);
-        result.sin_family = AF_INET;
-        break;
-    }
-
-    result.sin_port = htons(input.portno);
-
-    auto& ip = result.sin_addr.S_un.S_un_b;
-    ip.s_b1 = input.ip[0];
-    ip.s_b2 = input.ip[1];
-    ip.s_b3 = input.ip[2];
-    ip.s_b4 = input.ip[3];
-
-    sockaddr addr;
-    std::memcpy(&addr, &result, sizeof(addr));
-    return addr;
-}
-
 LINGER MakeLinger(bool enable, u32 linger_value) {
     ASSERT(linger_value <= (std::numeric_limits<u_short>::max)());
 
@@ -171,6 +146,12 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
         return Errno::INPROGRESS;
     case WSAEISCONN:
         return Errno::ISCONN;
+    case WSAEADDRINUSE:
+        return Errno::ADDRINUSE;
+    case WSAEADDRNOTAVAIL:
+        return Errno::ADDRNOTAVAIL;
+    case WSAEAFNOSUPPORT:
+        return Errno::AFNOSUPPORT;
     default:
         UNIMPLEMENTED_MSG("Unimplemented errno={}", e);
         return Errno::OTHER;
@@ -224,28 +205,6 @@ void AcknowledgeInterrupt() {
 
 SOCKET GetInterruptSocket() {
     return interrupt_pipe_fd[0];
-}
-
-sockaddr TranslateFromSockAddrIn(SockAddrIn input) {
-    sockaddr_in result;
-
-    switch (static_cast<Domain>(input.family)) {
-    case Domain::INET:
-        result.sin_family = AF_INET;
-        break;
-    default:
-        UNIMPLEMENTED_MSG("Unhandled sockaddr family={}", input.family);
-        result.sin_family = AF_INET;
-        break;
-    }
-
-    result.sin_port = htons(input.portno);
-
-    result.sin_addr.s_addr = input.ip[0] | input.ip[1] << 8 | input.ip[2] << 16 | input.ip[3] << 24;
-
-    sockaddr addr;
-    std::memcpy(&addr, &result, sizeof(addr));
-    return addr;
 }
 
 int WSAPoll(WSAPOLLFD* fds, ULONG nfds, int timeout) {
@@ -320,6 +279,12 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
         return Errno::INPROGRESS;
     case EISCONN:
         return Errno::ISCONN;
+    case EADDRINUSE:
+        return Errno::ADDRINUSE;
+    case EADDRNOTAVAIL:
+        return Errno::ADDRNOTAVAIL;
+    case EAFNOSUPPORT:
+        return Errno::AFNOSUPPORT;
     default:
         UNIMPLEMENTED_MSG("Unimplemented errno={} ({})", e, strerror(e));
         return Errno::OTHER;
@@ -327,6 +292,63 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
 }
 
 #endif
+
+/// A host socket address and its length, as bind, connect and sendto take them.
+struct HostSockAddr {
+    sockaddr_storage storage{};
+    socklen_t len = 0;
+
+    const sockaddr* Get() const {
+        return reinterpret_cast<const sockaddr*>(&storage);
+    }
+};
+
+HostSockAddr TranslateFromSockAddrIn(const SockAddrIn& input) {
+    HostSockAddr result{};
+    if (input.family == Domain::INET6) {
+        sockaddr_in6 addr{};
+#ifdef SIN6_LEN
+        addr.sin6_len = sizeof(addr);
+#endif
+        addr.sin6_family = AF_INET6;
+        addr.sin6_port = htons(input.portno);
+        addr.sin6_flowinfo = htonl(input.flowinfo);
+        std::memcpy(&addr.sin6_addr, input.ip6.data(), sizeof(addr.sin6_addr));
+        addr.sin6_scope_id = input.scope_id;
+        std::memcpy(&result.storage, &addr, sizeof(addr));
+        result.len = sizeof(addr);
+        return result;
+    }
+
+    sockaddr_in addr{};
+    if (input.family != Domain::INET) {
+        UNIMPLEMENTED_MSG("Unhandled sockaddr family={}", input.family);
+    }
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(input.portno);
+    std::memcpy(&addr.sin_addr, input.ip.data(), sizeof(addr.sin_addr));
+    std::memcpy(&result.storage, &addr, sizeof(addr));
+    result.len = sizeof(sockaddr);
+    return result;
+}
+
+/// The error as a socket of domain reports it. The host errors added for IPv6 reach IPv4 sockets as
+/// OTHER, which the guest has always seen as errno 0.
+Errno ForDomain(Domain domain, Errno error) {
+    if (domain == Domain::INET6) {
+        return error;
+    }
+    switch (error) {
+    case Errno::ADDRNOTAVAIL:
+    case Errno::AFNOSUPPORT:
+    case Errno::HOSTUNREACH:
+    case Errno::NETDOWN:
+    case Errno::NETUNREACH:
+        return Errno::OTHER;
+    default:
+        return error;
+    }
+}
 
 Errno GetAndLogLastError(CallType call_type = CallType::Other) {
 #ifdef _WIN32
@@ -392,6 +414,8 @@ Domain TranslateDomainFromNative(int domain) {
         return Domain::Unspecified;
     case AF_INET:
         return Domain::INET;
+    case AF_INET6:
+        return Domain::INET6;
     default:
         UNIMPLEMENTED_MSG("Unhandled domain={}", domain);
         return Domain::INET;
@@ -404,6 +428,8 @@ int TranslateDomainToNative(Domain domain) {
         return 0;
     case Domain::INET:
         return AF_INET;
+    case Domain::INET6:
+        return AF_INET6;
     default:
         UNIMPLEMENTED_MSG("Unimplemented domain={}", domain);
         return 0;
@@ -588,7 +614,10 @@ int TranslateTypeToNative(Type type) {
     NETWORK_PROTOCOL_TRANSLATE_ELEM(SCTP) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(UDPLITE)
 #elif defined(_WIN32)
+// IP is protocol 0, the default a guest passes most often (since IPv6 sockets, Ocarina of Time's
+// boot probe opens an INET6 datagram socket with it). HOPOPTS is 0 too, so it stays out.
 #define NETWORK_PROTOCOL_TRANSLATE_LIST \
+    NETWORK_PROTOCOL_TRANSLATE_ELEM(IP) \
     /*NETWORK_PROTOCOL_TRANSLATE_ELEM(HOPOPTS)*/ \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(ICMP) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(IGMP) \
@@ -618,9 +647,14 @@ int TranslateTypeToNative(Type type) {
     /*NETWORK_PROTOCOL_TRANSLATE_ELEM(L2TP)*/ \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(SCTP)
 #else
+// As on the hosts above: IP (protocol 0) is the default, and ICMP and ICMPV6 are the raw sockets
+// bsd:u allows.
 #define NETWORK_PROTOCOL_TRANSLATE_LIST \
+    NETWORK_PROTOCOL_TRANSLATE_ELEM(IP) \
+    NETWORK_PROTOCOL_TRANSLATE_ELEM(ICMP) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(TCP) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(UDP) \
+    NETWORK_PROTOCOL_TRANSLATE_ELEM(ICMPV6) \
     NETWORK_PROTOCOL_TRANSLATE_ELEM(SCTP)
 #endif
 [[nodiscard]] Protocol TranslateProtocolFromNative(u32 protocol) {
@@ -645,11 +679,23 @@ int TranslateTypeToNative(Type type) {
 }
 #undef NETWORK_PROTOCOL_TRANSLATE_LIST
 
-SockAddrIn TranslateToSockAddrIn(sockaddr_in input, size_t input_len) {
+SockAddrIn TranslateToSockAddrIn(const sockaddr_storage& input) {
     SockAddrIn result{};
-    result.family = TranslateDomainFromNative(input.sin_family);
-    result.portno = ntohs(input.sin_port);
-    result.ip = TranslateIPv4(input.sin_addr);
+    if (input.ss_family == AF_INET6) {
+        sockaddr_in6 addr;
+        std::memcpy(&addr, &input, sizeof(addr));
+        result.family = Domain::INET6;
+        result.portno = ntohs(addr.sin6_port);
+        std::memcpy(result.ip6.data(), &addr.sin6_addr, result.ip6.size());
+        result.flowinfo = ntohl(addr.sin6_flowinfo);
+        result.scope_id = addr.sin6_scope_id;
+        return result;
+    }
+    sockaddr_in addr;
+    std::memcpy(&addr, &input, sizeof(addr));
+    result.family = TranslateDomainFromNative(addr.sin_family);
+    result.portno = ntohs(addr.sin_port);
+    result.ip = TranslateIPv4(addr.sin_addr);
     return result;
 }
 
@@ -763,10 +809,8 @@ std::optional<IPv4Address> GetRoomIPv4Address() {
     }
     if (const auto room_member = GetRoomMember().lock()) {
         // The room host and moderators are in the Moderator state instead of Joined
-        const auto state = room_member->GetState();
-        if (state == RoomMember::State::Joined || state == RoomMember::State::Moderator) {
-            return room_member->GetFakeIpAddress();
-        }
+        if (const auto identity = room_member->GetENetIdentity())
+            return identity->ip;
     }
     return std::nullopt;
 }
@@ -790,13 +834,33 @@ u32 IPv4AddressToInteger(IPv4Address ip_addr) {
            static_cast<u32>(ip_addr[2]) << 8 | static_cast<u32>(ip_addr[3]);
 }
 
+std::string IPv6AddressToString(IPv6Address ip_addr) {
+    std::array<char, INET6_ADDRSTRLEN> buf = {};
+    ASSERT(inet_ntop(AF_INET6, ip_addr.data(), buf.data(), sizeof(buf)) == buf.data());
+    return std::string(buf.data());
+}
+
+std::string SockAddrToString(const SockAddrIn& addr) {
+    if (addr.family == Domain::INET6) {
+        return fmt::format("[{}]:{}", IPv6AddressToString(addr.ip6), addr.portno);
+    }
+    return fmt::format("{}:{}", IPv4AddressToString(addr.ip), addr.portno);
+}
+
 std::variant<std::vector<AddrInfo>, GetAddrInfoError> GetAddressInfo(
-    const std::string& host, const std::optional<std::string>& service) {
+    const std::string& host, const std::optional<std::string>& service, Domain family) {
+    const bool ipv6 = family == Domain::INET6;
     if (auto redirected = LocalRedirect::Resolve(host, service)) {
+        // Redirected names resolve to 127.0.0.1 alone; an AAAA query finds nothing, as for a name
+        // without IPv6 addresses, so the guest falls back to IPv4.
+        if (ipv6) {
+            return GetAddrInfoError::NONAME;
+        }
         return std::move(*redirected);
     }
     addrinfo hints{};
-    hints.ai_family = AF_INET; // Switch only supports IPv4.
+    // An unspecified family resolves IPv4 alone, as it always has; AAAA records only for INET6.
+    hints.ai_family = ipv6 ? AF_INET6 : AF_INET;
     // Loopback only: no query reaches the host's resolver; only numeric addresses and localhost
     // resolve, and the filter below keeps the loopback ones.
     const bool loopback_only = LocalRedirect::LoopbackOnly();
@@ -808,7 +872,7 @@ std::variant<std::vector<AddrInfo>, GetAddrInfoError> GetAddressInfo(
             name.pop_back();
         }
         if (name == "localhost") {
-            lookup = "127.0.0.1";
+            lookup = ipv6 ? "::1" : "127.0.0.1";
         }
     }
     addrinfo* addrinfo;
@@ -822,17 +886,19 @@ std::variant<std::vector<AddrInfo>, GetAddrInfoError> GetAddressInfo(
     }
     std::vector<AddrInfo> ret;
     for (auto* current = addrinfo; current; current = current->ai_next) {
-        // We should only get AF_INET results due to the hints value.
-        ASSERT_OR_EXECUTE(addrinfo->ai_family == AF_INET &&
-                              addrinfo->ai_addrlen == sizeof(sockaddr_in),
+        // We should only get results of the family the hints asked for.
+        ASSERT_OR_EXECUTE(current->ai_family == hints.ai_family &&
+                              current->ai_addrlen ==
+                                  (ipv6 ? sizeof(sockaddr_in6) : sizeof(sockaddr_in)),
                           continue;);
 
         AddrInfo& out = ret.emplace_back();
         out.family = TranslateDomainFromNative(current->ai_family);
         out.socket_type = TranslateTypeFromNative(current->ai_socktype);
         out.protocol = TranslateProtocolFromNative(current->ai_protocol);
-        out.addr = TranslateToSockAddrIn(*reinterpret_cast<sockaddr_in*>(current->ai_addr),
-                                         current->ai_addrlen);
+        sockaddr_storage storage{};
+        std::memcpy(&storage, current->ai_addr, current->ai_addrlen);
+        out.addr = TranslateToSockAddrIn(storage);
         if (current->ai_canonname != nullptr) {
             out.canon_name = current->ai_canonname;
         }
@@ -912,6 +978,12 @@ Socket::~Socket() {
 Socket::Socket(Socket&& rhs) noexcept {
     fd = std::exchange(rhs.fd, INVALID_SOCKET);
     socket_type = rhs.socket_type;
+    socket_domain = rhs.socket_domain;
+#ifdef _WIN32
+    std::scoped_lock lock{rhs.reuse_mutex};
+    reuse_addr = rhs.reuse_addr;
+    reuse_port = rhs.reuse_port;
+#endif
 }
 
 template <typename T>
@@ -925,7 +997,7 @@ std::pair<T, Errno> Socket::GetSockOpt(SOCKET fd_so, int level, int option) {
         ASSERT(len > 0 && static_cast<size_t>(len) <= sizeof(value));
         return {value, Errno::SUCCESS};
     }
-    return {value, GetAndLogLastError()};
+    return {value, ForDomain(socket_domain, GetAndLogLastError())};
 }
 
 template <typename T>
@@ -935,21 +1007,47 @@ Errno Socket::SetSockOpt(SOCKET fd_so, int level, int option, T value) {
     if (result != SOCKET_ERROR) {
         return Errno::SUCCESS;
     }
-    return GetAndLogLastError();
+    return ForDomain(socket_domain, GetAndLogLastError());
 }
 
-Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
-    fd = socket(TranslateDomainToNative(domain), TranslateTypeToNative(type), TranslateProtocolToNative(protocol));
-    if (fd != INVALID_SOCKET) {
-        socket_type = type;
-        return Errno::SUCCESS;
-    }
+#ifdef _WIN32
+/// Whether a receive on UDP socket fd fails once a send drew ICMP port unreachable.
+static void ReportUdpResets(SOCKET fd, bool report) {
+    BOOL report_reset = report ? TRUE : FALSE;
+    DWORD bytes_returned = 0;
+    WSAIoctl(fd, SIO_UDP_CONNRESET, &report_reset, sizeof(report_reset), nullptr, 0,
+             &bytes_returned, nullptr, nullptr);
+}
+#endif
 
-    return GetAndLogLastError();
+Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
+    socket_domain = domain;
+    fd = socket(TranslateDomainToNative(domain), TranslateTypeToNative(type), TranslateProtocolToNative(protocol));
+    if (fd == INVALID_SOCKET) {
+        return ForDomain(socket_domain, GetAndLogLastError());
+    }
+    socket_type = type;
+    if (domain == Domain::INET6) {
+        // As on FreeBSD, an INET6 socket takes IPv6 alone until the guest clears IPV6_V6ONLY;
+        // Linux and macOS hosts would otherwise take IPv4 too, on the same port.
+        if (SetIpv6Option(Ipv6Option::V6Only, 1) != Errno::SUCCESS) {
+            LOG_WARNING(Network, "Could not make an IPv6 socket take IPv6 alone");
+        }
+    }
+#ifdef _WIN32
+    if (type == Type::DGRAM) {
+        // Windows fails the next receive with WSAECONNRESET once a peer answers a send with ICMP
+        // port unreachable. The console does not on an unconnected socket, which Pia shares
+        // among its peers, so one peer that left would read as the network failing. Connect
+        // turns the reports back on.
+        ReportUdpResets(fd, false);
+    }
+#endif
+    return Errno::SUCCESS;
 }
 
 std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
-    sockaddr_in addr;
+    sockaddr_storage addr{};
     socklen_t addrlen = sizeof(addr);
 
     const bool wait_for_accept = !is_non_blocking;
@@ -975,17 +1073,26 @@ std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
     const SOCKET new_socket = accept(fd, reinterpret_cast<sockaddr*>(&addr), &addrlen);
 
     if (new_socket == INVALID_SOCKET) {
-        return {AcceptResult{}, GetAndLogLastError()};
+        return {AcceptResult{}, ForDomain(socket_domain, GetAndLogLastError())};
     }
 
+    auto accepted = std::make_unique<Socket>(new_socket);
+    accepted->socket_domain = socket_domain;
+#ifdef _WIN32
+    // The accepted socket takes the listener's options, the host's SO_REUSEADDR among them.
+    {
+        std::scoped_lock lock{reuse_mutex};
+        accepted->reuse_addr = reuse_addr;
+        accepted->reuse_port = reuse_port;
+    }
+#endif
     AcceptResult result{
-        .socket = std::make_unique<Socket>(new_socket),
-        .sockaddr_in = TranslateToSockAddrIn(addr, addrlen),
+        .socket = std::move(accepted),
+        .sockaddr_in = TranslateToSockAddrIn(addr),
     };
     if (!LocalRedirect::Allowed(result.sockaddr_in)) {
-        const auto& peer = result.sockaddr_in;
-        LOG_DEBUG(Network, "Host redirect: connection from {}.{}.{}.{}:{} refused (loopback only)",
-                  peer.ip[0], peer.ip[1], peer.ip[2], peer.ip[3], peer.portno);
+        LOG_DEBUG(Network, "Host redirect: connection from {} refused (loopback only)",
+                  SockAddrToString(result.sockaddr_in));
         return {AcceptResult{}, Errno::CONNABORTED};
     }
 
@@ -995,49 +1102,56 @@ std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
 Errno Socket::Connect(SockAddrIn addr_in) {
     // The guest's own address decides; the configured server it may then go to is the user's.
     if (!LocalRedirect::Allowed(addr_in)) {
-        LOG_DEBUG(Network, "Host redirect: connection to {}.{}.{}.{}:{} refused (loopback only)",
-                  addr_in.ip[0], addr_in.ip[1], addr_in.ip[2], addr_in.ip[3], addr_in.portno);
+        LOG_DEBUG(Network, "Host redirect: connection to {} refused (loopback only)",
+                  SockAddrToString(addr_in));
         return Errno::CONNREFUSED;
     }
     // The redirect's server stands in for TCP servers only.
     if (socket_type == Type::STREAM) {
         addr_in = LocalRedirect::ConnectTarget(addr_in);
     }
-    const sockaddr host_addr_in = TranslateFromSockAddrIn(addr_in);
-    if (connect(fd, &host_addr_in, sizeof(host_addr_in)) != SOCKET_ERROR) {
+    const HostSockAddr host_addr_in = TranslateFromSockAddrIn(addr_in);
+    if (connect(fd, host_addr_in.Get(), host_addr_in.len) != SOCKET_ERROR) {
+#ifdef _WIN32
+        // As on the console, a connected UDP socket's receive fails once its peer's port is
+        // unreachable.
+        if (socket_type == Type::DGRAM) {
+            ReportUdpResets(fd, true);
+        }
+#endif
         return Errno::SUCCESS;
     }
 
-    return GetAndLogLastError();
+    return ForDomain(socket_domain, GetAndLogLastError());
 }
 
 std::pair<SockAddrIn, Errno> Socket::GetPeerName() {
-    sockaddr_in addr;
+    sockaddr_storage addr{};
     socklen_t addrlen = sizeof(addr);
     if (getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &addrlen) == SOCKET_ERROR) {
-        return {SockAddrIn{}, GetAndLogLastError()};
+        return {SockAddrIn{}, ForDomain(socket_domain, GetAndLogLastError())};
     }
 
-    return {TranslateToSockAddrIn(addr, addrlen), Errno::SUCCESS};
+    return {TranslateToSockAddrIn(addr), Errno::SUCCESS};
 }
 
 std::pair<SockAddrIn, Errno> Socket::GetSockName() {
-    sockaddr_in addr;
+    sockaddr_storage addr{};
     socklen_t addrlen = sizeof(addr);
     if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &addrlen) == SOCKET_ERROR) {
-        return {SockAddrIn{}, GetAndLogLastError()};
+        return {SockAddrIn{}, ForDomain(socket_domain, GetAndLogLastError())};
     }
 
-    return {TranslateToSockAddrIn(addr, addrlen), Errno::SUCCESS};
+    return {TranslateToSockAddrIn(addr), Errno::SUCCESS};
 }
 
 Errno Socket::Bind(SockAddrIn addr) {
-    const sockaddr addr_in = TranslateFromSockAddrIn(addr);
-    if (bind(fd, &addr_in, sizeof(addr_in)) != SOCKET_ERROR) {
+    const HostSockAddr addr_in = TranslateFromSockAddrIn(addr);
+    if (bind(fd, addr_in.Get(), addr_in.len) != SOCKET_ERROR) {
         return Errno::SUCCESS;
     }
 
-    return GetAndLogLastError();
+    return ForDomain(socket_domain, GetAndLogLastError());
 }
 
 Errno Socket::Listen(s32 backlog) {
@@ -1045,7 +1159,7 @@ Errno Socket::Listen(s32 backlog) {
         return Errno::SUCCESS;
     }
 
-    return GetAndLogLastError();
+    return ForDomain(socket_domain, GetAndLogLastError());
 }
 
 Errno Socket::Shutdown(ShutdownHow how) {
@@ -1068,7 +1182,7 @@ Errno Socket::Shutdown(ShutdownHow how) {
         return Errno::SUCCESS;
     }
 
-    return GetAndLogLastError();
+    return ForDomain(socket_domain, GetAndLogLastError());
 }
 
 template <typename Operation>
@@ -1099,7 +1213,7 @@ Errno Socket::BeginDontWait() {
     std::scoped_lock lock{mode_mutex};
     if (dont_wait_calls == 0 && !is_non_blocking) {
         if (!EnableNonBlock(fd, true)) {
-            return GetAndLogLastError();
+            return ForDomain(socket_domain, GetAndLogLastError());
         }
         ++dont_wait_epoch;
     }
@@ -1143,7 +1257,7 @@ std::pair<s32, Errno> Socket::Recv(int flags, std::span<u8> message) {
             return {static_cast<s32>(result), Errno::SUCCESS};
         }
 
-        return {-1, GetAndLogLastError()};
+        return {-1, ForDomain(socket_domain, GetAndLogLastError())};
     });
 }
 
@@ -1152,7 +1266,7 @@ std::pair<s32, Errno> Socket::RecvFrom(int flags, std::span<u8> message, SockAdd
     ASSERT(message.size() < static_cast<size_t>((std::numeric_limits<int>::max)()));
 
     return Transfer(flags, [&](int host_flags) -> std::pair<s32, Errno> {
-        sockaddr_in addr_in{};
+        sockaddr_storage addr_in{};
         socklen_t addrlen = sizeof(addr_in);
         socklen_t* const p_addrlen = addr ? &addrlen : nullptr;
         sockaddr* const p_addr_in = addr ? reinterpret_cast<sockaddr*>(&addr_in) : nullptr;
@@ -1162,12 +1276,12 @@ std::pair<s32, Errno> Socket::RecvFrom(int flags, std::span<u8> message, SockAdd
                      static_cast<int>(message.size()), host_flags, p_addr_in, p_addrlen);
         if (result != SOCKET_ERROR) {
             if (addr) {
-                *addr = TranslateToSockAddrIn(addr_in, addrlen);
+                *addr = TranslateToSockAddrIn(addr_in);
             }
             return {static_cast<s32>(result), Errno::SUCCESS};
         }
 
-        return {-1, GetAndLogLastError()};
+        return {-1, ForDomain(socket_domain, GetAndLogLastError())};
     });
 }
 
@@ -1180,7 +1294,7 @@ std::pair<s32, Errno> Socket::RecvMsg(int flags, std::span<u8> message, SockAddr
     const int peek_flags = (flags & FLAG_MSG_PEEK) != 0 ? MSG_PEEK : 0;
     return Transfer(flags, [&](int host_flags) -> std::pair<s32, Errno> {
         const int native_flags = peek_flags | host_flags;
-        sockaddr_in addr_in{};
+        sockaddr_storage addr_in{};
 #ifdef _WIN32
         // A datagram that does not fit fills message with its start and fails with WSAEMSGSIZE,
         // which recvmsg reports as a successful receive with MSG_TRUNC.
@@ -1192,7 +1306,7 @@ std::pair<s32, Errno> Socket::RecvMsg(int flags, std::span<u8> message, SockAddr
         s32 received = static_cast<s32>(result);
         if (result == SOCKET_ERROR) {
             if (WSAGetLastError() != WSAEMSGSIZE) {
-                return {-1, GetAndLogLastError()};
+                return {-1, ForDomain(socket_domain, GetAndLogLastError())};
             }
             received = static_cast<s32>(message.size());
             msg_flags |= FLAG_MSG_TRUNC;
@@ -1208,16 +1322,15 @@ std::pair<s32, Errno> Socket::RecvMsg(int flags, std::span<u8> message, SockAddr
         header.msg_iovlen = 1;
         const auto result = recvmsg(fd, &header, native_flags);
         if (result == SOCKET_ERROR) {
-            return {-1, GetAndLogLastError()};
+            return {-1, ForDomain(socket_domain, GetAndLogLastError())};
         }
-        const socklen_t addrlen = header.msg_namelen;
         const s32 received = static_cast<s32>(result);
         if ((header.msg_flags & MSG_TRUNC) != 0) {
             msg_flags |= FLAG_MSG_TRUNC;
         }
 #endif
         if (addr) {
-            *addr = TranslateToSockAddrIn(addr_in, addrlen);
+            *addr = TranslateToSockAddrIn(addr_in);
         }
         return {received, Errno::SUCCESS};
     });
@@ -1238,7 +1351,7 @@ std::pair<s32, Errno> Socket::Send(std::span<const u8> message, int flags) {
             return {static_cast<s32>(result), Errno::SUCCESS};
         }
 
-        return {-1, GetAndLogLastError(CallType::Send)};
+        return {-1, ForDomain(socket_domain, GetAndLogLastError(CallType::Send))};
     });
 }
 
@@ -1247,16 +1360,16 @@ std::pair<s32, Errno> Socket::SendTo(u32 flags, std::span<const u8> message,
     ASSERT((flags & ~FLAG_MSG_DONTWAIT) == 0);
 
     const sockaddr* to = nullptr;
-    const int to_len = addr ? sizeof(sockaddr) : 0;
-    sockaddr host_addr_in;
+    HostSockAddr host_addr_in{};
 
     if (addr) {
         if (!LocalRedirect::Allowed(*addr)) {
-            return {-1, Errno::NETUNREACH};
+            return {-1, ForDomain(socket_domain, Errno::NETUNREACH)};
         }
         host_addr_in = TranslateFromSockAddrIn(*addr);
-        to = &host_addr_in;
+        to = host_addr_in.Get();
     }
+    const int to_len = static_cast<int>(host_addr_in.len);
 
     return Transfer(static_cast<int>(flags), [&](int host_flags) -> std::pair<s32, Errno> {
         const auto result = sendto(fd, reinterpret_cast<const char*>(message.data()),
@@ -1265,7 +1378,7 @@ std::pair<s32, Errno> Socket::SendTo(u32 flags, std::span<const u8> message,
             return {static_cast<s32>(result), Errno::SUCCESS};
         }
 
-        return {-1, GetAndLogLastError(CallType::Send)};
+        return {-1, ForDomain(socket_domain, GetAndLogLastError(CallType::Send))};
     });
 }
 
@@ -1284,10 +1397,55 @@ std::pair<Errno, Errno> Socket::GetPendingError() {
     return {TranslateNativeError(pending_err), getsockopt_err};
 }
 
+#ifdef _WIN32
+std::pair<bool, Errno> Socket::GetReuseAddr() {
+    std::scoped_lock lock{reuse_mutex};
+    return {reuse_addr, Errno::SUCCESS};
+}
+
+std::pair<bool, Errno> Socket::GetReusePort() {
+    std::scoped_lock lock{reuse_mutex};
+    return {reuse_port, Errno::SUCCESS};
+}
+
+Errno Socket::SetReuseAddr(bool enable) {
+    std::scoped_lock lock{reuse_mutex};
+    const Errno result =
+        SetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEADDR, enable || reuse_port ? 1 : 0);
+    if (result == Errno::SUCCESS) {
+        reuse_addr = enable;
+    }
+    return result;
+}
+
+Errno Socket::SetReusePort(bool enable) {
+    std::scoped_lock lock{reuse_mutex};
+    const Errno result =
+        SetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEADDR, enable || reuse_addr ? 1 : 0);
+    if (result == Errno::SUCCESS) {
+        reuse_port = enable;
+    }
+    return result;
+}
+#else
 std::pair<bool, Errno> Socket::GetReuseAddr() {
     const auto [value, getsockopt_err] = GetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEADDR);
     return {value != 0, getsockopt_err};
 }
+
+std::pair<bool, Errno> Socket::GetReusePort() {
+    const auto [value, getsockopt_err] = GetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEPORT);
+    return {value != 0, getsockopt_err};
+}
+
+Errno Socket::SetReuseAddr(bool enable) {
+    return SetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEADDR, enable ? 1 : 0);
+}
+
+Errno Socket::SetReusePort(bool enable) {
+    return SetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEPORT, enable ? 1 : 0);
+}
+#endif
 
 std::pair<bool, Errno> Socket::GetNoDelay() {
     const auto [value, getsockopt_err] = GetSockOpt<u32>(fd, IPPROTO_TCP, TCP_NODELAY);
@@ -1296,10 +1454,6 @@ std::pair<bool, Errno> Socket::GetNoDelay() {
 
 Errno Socket::SetLinger(bool enable, u32 linger) {
     return SetSockOpt(fd, SOL_SOCKET, SO_LINGER, MakeLinger(enable, linger));
-}
-
-Errno Socket::SetReuseAddr(bool enable) {
-    return SetSockOpt<u32>(fd, SOL_SOCKET, SO_REUSEADDR, enable ? 1 : 0);
 }
 
 Errno Socket::SetKeepAlive(bool enable) {
@@ -1330,6 +1484,28 @@ Errno Socket::SetNoDelay(bool enable) {
     return SetSockOpt<u32>(fd, IPPROTO_TCP, TCP_NODELAY, enable ? 1 : 0);
 }
 
+static int TranslateIpv6OptionToNative(Ipv6Option option) {
+    switch (option) {
+    case Ipv6Option::V6Only:
+        return IPV6_V6ONLY;
+    case Ipv6Option::UnicastHops:
+        return IPV6_UNICAST_HOPS;
+    case Ipv6Option::MulticastHops:
+        return IPV6_MULTICAST_HOPS;
+    case Ipv6Option::MulticastLoop:
+        return IPV6_MULTICAST_LOOP;
+    }
+    UNREACHABLE();
+}
+
+Errno Socket::SetIpv6Option(Ipv6Option option, s32 value) {
+    return SetSockOpt<s32>(fd, IPPROTO_IPV6, TranslateIpv6OptionToNative(option), value);
+}
+
+std::pair<s32, Errno> Socket::GetIpv6Option(Ipv6Option option) {
+    return GetSockOpt<s32>(fd, IPPROTO_IPV6, TranslateIpv6OptionToNative(option));
+}
+
 Errno Socket::SetNonBlock(bool enable) {
 #ifdef _WIN32
     std::scoped_lock lock{mode_mutex};
@@ -1348,7 +1524,7 @@ Errno Socket::SetNonBlock(bool enable) {
         is_non_blocking = enable;
         return Errno::SUCCESS;
     }
-    return GetAndLogLastError();
+    return ForDomain(socket_domain, GetAndLogLastError());
 }
 
 bool Socket::IsOpened() const {

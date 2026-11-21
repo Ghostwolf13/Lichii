@@ -118,8 +118,10 @@ build/shader-sweep/shader-sweep \
   --output shader.spv
 ```
 
-Send the log, dump directory, and screenshots from both a menu and a race. Check whether
-the compute rejection is gone and whether the 3D world returns with it.
+Review the log and screenshots from both a menu and a race before sharing them. The dump directory
+contains game shaders: do not publish it or attach it to an issue. Ask a maintainer for handling
+instructions, and share only material you have permission to disclose. Check whether the compute
+rejection is gone and whether the 3D world returns with it.
 
 ## Root cause: the SMAA resolve's dither bias
 

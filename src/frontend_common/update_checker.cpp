@@ -57,10 +57,13 @@ std::optional<Common::Net::Release> SelectUpdate(std::span<const Common::Net::Re
     return selected ? std::make_optional(*selected) : std::nullopt;
 }
 
+bool IsReleaseBuild(std::string_view build_tag, std::string_view platform) {
+    return ParseBuildNumber(build_tag) && !platform.empty();
+}
+
 CheckResult Check() {
-    if (!ParseBuildNumber(Common::g_build_release_tag) ||
-        std::string_view{Common::g_build_release_platform}.empty()) {
-        return {};
+    if (!IsReleaseBuild(Common::g_build_release_tag, Common::g_build_release_platform)) {
+        return {.failure = Failure::NotReleaseBuild};
     }
 
     const auto list = Common::Net::GetReleases();

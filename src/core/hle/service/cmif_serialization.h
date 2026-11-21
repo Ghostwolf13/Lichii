@@ -345,6 +345,15 @@ void ReadInArgument(bool is_domain, CallArguments& args, const u8* raw_data, HLE
             auto& buffer = temp[OutBufferIndex];
             if (ctx.CanWriteBuffer(OutBufferIndex)) {
                 buffer.resize_destructive(ctx.GetWriteBufferSize(OutBufferIndex));
+
+                // The reply writes the whole buffer back to the guest. Start from the guest's bytes,
+                // so the ones the handler leaves alone (the tail of a short read) stay as they were.
+                bool buffer_b = (ArgType::Attr & BufferAttr_HipcMapAlias) != 0;
+                if constexpr (ArgType::Attr & BufferAttr_HipcAutoSelect) {
+                    const auto& descriptors_b = ctx.BufferDescriptorB();
+                    buffer_b = descriptors_b.size() > OutBufferIndex && descriptors_b[OutBufferIndex].Size() != 0;
+                }
+                ctx.ReadWriteBufferContents(std::span<u8>{buffer.data(), buffer.size()}, buffer_b, OutBufferIndex);
             } else {
                 buffer.resize_destructive(0);
             }

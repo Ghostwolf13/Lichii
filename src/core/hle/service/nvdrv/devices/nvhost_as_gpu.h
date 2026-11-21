@@ -12,7 +12,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include "common/container/unordered_set.h"
 #include <vector>
 
 #include "common/address_space.h"
@@ -111,8 +110,6 @@ private:
         u32 big_pages;
     };
     static_assert(sizeof(IoctlRemapEntry) == 20, "IoctlRemapEntry is incorrect size");
-
-    ::Common::unordered_set<s64_le> map_buffer_offsets{};
 
     struct IoctlMapBufferEx {
         MappingFlags flags{}; // bit0: fixed_offset, bit2: cacheable
@@ -219,7 +216,7 @@ private:
         bool initialised{};
         bool absolute_big_page_limit{}; //!< Switch 2 layout: big-page limit is va_range_end
     } vm;
-    std::unique_ptr<Tegra::MemoryManager> gmmu;
+    std::shared_ptr<Tegra::MemoryManager> gmmu;
 
     struct IoctlNx2SyncpointShimInfo {
         u64_le address;

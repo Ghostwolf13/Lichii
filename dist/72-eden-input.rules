@@ -5,3 +5,6 @@
 # Consult your distro if this is not the case
 
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_INPUT_JOYSTICK}=="1", MODE="0660", TAG+="uaccess"
+
+# Switch 2 controllers over USB: SDL drives them through libusb, which needs the USB device node
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="057e", ATTR{idProduct}=="2066|2067|2069|2073", MODE="0660", TAG+="uaccess"

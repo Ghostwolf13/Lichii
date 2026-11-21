@@ -31,8 +31,24 @@ static bool CheckAOCTitleIDMatchesBase(u64 title_id, u64 base) {
     return FileSys::GetBaseTitleID(title_id) == base;
 }
 
-static u64 GetCallerBaseTitleID(Core::System& system, const ClientProcessId& process_id) {
-    return FileSys::GetBaseTitleID(system.ResolveCallerProgramId(*process_id));
+// The game list writes the DLC toggle under the program's own ID, which keeps a Switch 2
+// Edition's program index, so read it as PatchManager does as well as under the base ID.
+static bool IsCallerDlcDisabled(Core::System& system, const ClientProcessId& process_id) {
+    const u64 program_id = system.ResolveCallerProgramId(*process_id);
+    const FileSys::PatchManager pm{program_id, system.GetFileSystemController(),
+                                   system.GetContentProvider()};
+    auto disabled = pm.GetDisabledAddons();
+    const auto& base = Settings::values.disabled_addons[FileSys::GetBaseTitleID(program_id)];
+    disabled.insert(disabled.end(), base.begin(), base.end());
+    return std::ranges::find(disabled, "DLC") != disabled.end();
+}
+
+// A Switch 2 Edition program finds its add-ons under the Switch 1 application's ID (ported from
+// jpasqui/Eglantine#1).
+static u64 GetCallerAddOnBaseTitleID(Core::System& system, const ClientProcessId& process_id,
+                                     const std::vector<u64>& add_on_content) {
+    return FileSys::GetAddOnApplicationID(system.ResolveCallerProgramId(*process_id),
+                                          add_on_content);
 }
 
 static std::vector<u64> AccumulateAOCTitleIDs(Core::System& system) {
@@ -95,17 +111,16 @@ IAddOnContentManager::~IAddOnContentManager() {
 Result IAddOnContentManager::CountAddOnContent(Out<u32> out_count, ClientProcessId process_id) {
     LOG_DEBUG(Service_AOC, "called. process_id={}", process_id.pid);
 
-    const auto current = GetCallerBaseTitleID(system, process_id);
-
-    const auto& disabled = Settings::values.disabled_addons[current];
-    if (std::find(disabled.begin(), disabled.end(), "DLC") != disabled.end()) {
+    if (IsCallerDlcDisabled(system, process_id)) {
         *out_count = 0;
         R_SUCCEED();
     }
 
+    const auto add_on_base = GetCallerAddOnBaseTitleID(system, process_id, add_on_content);
     *out_count = static_cast<u32>(
-        std::count_if(add_on_content.begin(), add_on_content.end(),
-                      [current](u64 tid) { return CheckAOCTitleIDMatchesBase(tid, current); }));
+        std::count_if(add_on_content.begin(), add_on_content.end(), [add_on_base](u64 tid) {
+            return CheckAOCTitleIDMatchesBase(tid, add_on_base);
+        }));
 
     R_SUCCEED();
 }
@@ -116,13 +131,11 @@ Result IAddOnContentManager::ListAddOnContent(Out<u32> out_count,
     LOG_DEBUG(Service_AOC, "called with offset={}, count={}, process_id={}", offset, count,
               process_id.pid);
 
-    const auto current = GetCallerBaseTitleID(system, process_id);
-
     std::vector<u32> out;
-    const auto& disabled = Settings::values.disabled_addons[current];
-    if (std::find(disabled.begin(), disabled.end(), "DLC") == disabled.end()) {
+    if (!IsCallerDlcDisabled(system, process_id)) {
+        const auto add_on_base = GetCallerAddOnBaseTitleID(system, process_id, add_on_content);
         for (u64 content_id : add_on_content) {
-            if (FileSys::GetBaseTitleID(content_id) != current) {
+            if (FileSys::GetBaseTitleID(content_id) != add_on_base) {
                 continue;
             }
 
@@ -149,8 +162,9 @@ Result IAddOnContentManager::GetAddOnContentBaseId(Out<u64> out_title_id,
                                    system.GetContentProvider()};
 
     const auto res = pm.GetControlMetadata();
-    if (res.first == nullptr) {
-        *out_title_id = FileSys::GetAOCBaseTitleID(title_id);
+    if (res.first == nullptr || res.first->GetDLCBaseTitleId() == 0) {
+        *out_title_id = FileSys::GetAOCBaseTitleID(
+            GetCallerAddOnBaseTitleID(system, process_id, add_on_content));
         R_SUCCEED();
     }
 

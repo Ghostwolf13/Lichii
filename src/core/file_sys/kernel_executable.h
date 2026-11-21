@@ -84,6 +84,9 @@ public:
     u32 GetBSSSize() const;
     u32 GetBSSOffset() const;
 
+    // The header and the stored sections, which is where the next KIP of an INI1 starts.
+    u64 GetSize() const;
+
 private:
     Loader::ResultStatus status;
 

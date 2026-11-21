@@ -143,6 +143,18 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
                     .pipelineStatistics = 0,
                 });
                 trace_work_items.resize(TraceMaxWork);
+                trace_pass_pool = device.GetLogical().CreateQueryPool({
+                    .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+                    .pNext = nullptr,
+                    .flags = 0,
+                    .queryType = VK_QUERY_TYPE_TIMESTAMP,
+                    .queryCount = TraceMaxPasses,
+                    .pipelineStatistics = 0,
+                });
+                trace_pass_items.resize(TraceMaxPasses);
+                trace_pass_tails.resize(TraceMaxSubmissions);
+            }
+            if (Common::DkbFrameTrace::GpuSitesEnabled()) {
                 trace_site_pool = device.GetLogical().CreateQueryPool({
                     .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
                     .pNext = nullptr,
@@ -693,6 +705,12 @@ void Scheduler::TraceGraphicsPipeline(const std::array<u64, 6>& hashes) {
         for (u32 stage = 0; stage < hashes.size(); ++stage) {
             TraceShader(hashes[stage], stage);
         }
+        ++trace_pass.draws;
+        const auto vertex = std::ranges::find_if(hashes.begin(), hashes.end() - 1,
+                                                 [](u64 hash) { return hash != 0; });
+        if (vertex != hashes.end() - 1) {
+            TracePassShaders(*vertex, static_cast<u32>(vertex - hashes.begin()), hashes[5]);
+        }
     });
 }
 
@@ -706,7 +724,107 @@ void Scheduler::TraceComputePipeline(u64 hash) {
         }
         ++trace_work.dispatch_attempts;
         TraceShader(hash, 6);
+        ++trace_pass.dispatches;
+        TracePassShaders(hash, 6, 0);
     });
+}
+
+void Scheduler::TracePassShaders(u64 hash, u32 stage, u64 fragment_hash) {
+    for (u32 i = 0; i < trace_pass.num_shaders; ++i) {
+        const auto& shaders = trace_pass.shaders[i];
+        if (shaders.hash == hash && shaders.fragment_hash == fragment_hash) {
+            return;
+        }
+    }
+    if (trace_pass.num_shaders == trace_pass.shaders.size()) {
+        ++trace_pass.untracked_uses;
+        return;
+    }
+    trace_pass.shaders[trace_pass.num_shaders++] = {hash, fragment_hash, stage};
+}
+
+void Scheduler::TracePassEnd(vk::CommandBuffer cmdbuf, VkExtent2D extent) {
+    if (!trace_gpu_recording || !trace_pass_pool || trace_pass_count == TraceMaxPasses) {
+        return;
+    }
+    trace_pass.submission = trace_gpu_count;
+    trace_pass.extent = extent;
+    trace_pass_items[trace_pass_count] = trace_pass;
+    cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *trace_pass_pool,
+                          trace_pass_count);
+    ++trace_pass_count;
+    trace_pass = {};
+}
+
+void Scheduler::ReportPassTimes(const std::vector<u64>& submission_begin,
+                                const std::vector<u64>& submission_end) {
+    if (!trace_pass_pool) {
+        return;
+    }
+    const u32 count = trace_pass_count;
+    trace_pass_count = 0;
+    struct Result {
+        u64 timestamp;
+        u64 available;
+    };
+    std::vector<Result> results(count);
+    if (count != 0 &&
+        device.GetLogical().GetQueryResults(
+            *trace_pass_pool, 0, count, results.size() * sizeof(Result), results.data(),
+            sizeof(Result), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) !=
+            VK_SUCCESS) {
+        return;
+    }
+    const auto to_ms = [this](u64 begin, u64 end) {
+        return static_cast<double>(
+                   Common::DkbFrameTrace::TimestampDelta(begin, end, trace_timestamp_bits)) *
+               trace_timestamp_period / 1e6;
+    };
+    struct Segment {
+        double ms;
+        const PassTrace* pass;
+        bool tail;
+    };
+    std::vector<Segment> segments;
+    double total_ms{};
+    u32 next = 0;
+    for (u32 submission = 0; submission < submission_end.size(); ++submission) {
+        u64 previous = submission_begin[submission];
+        for (; next < count && trace_pass_items[next].submission == submission; ++next) {
+            if (results[next].available == 0) {
+                continue;
+            }
+            const double ms = to_ms(previous, results[next].timestamp);
+            segments.push_back({ms, &trace_pass_items[next], false});
+            total_ms += ms;
+            previous = results[next].timestamp;
+        }
+        const double ms = to_ms(previous, submission_end[submission]);
+        segments.push_back({ms, &trace_pass_tails[submission], true});
+        total_ms += ms;
+    }
+    std::ranges::sort(segments, std::greater<>{}, &Segment::ms);
+    LOG_INFO(Render_Vulkan, "DKB gpu_passes renderer_frame={} passes={}{} timed_ms={:.3f}",
+             trace_sample_frame, count, count == TraceMaxPasses ? " (full)" : "", total_ms);
+    for (size_t i = 0; i < segments.size() && i < 16; ++i) {
+        const auto& [ms, pass, tail] = segments[i];
+        std::string shaders;
+        for (u32 s = 0; s < pass->num_shaders; ++s) {
+            const auto& shader = pass->shaders[s];
+            shaders += fmt::format("{}s{}:{:016x}", shaders.empty() ? "" : ",", shader.stage,
+                                   shader.hash);
+            if (shader.fragment_hash != 0) {
+                shaders += fmt::format("+s5:{:016x}", shader.fragment_hash);
+            }
+        }
+        LOG_INFO(Render_Vulkan,
+                 "DKB gpu_pass {:.3f}ms submission={} {} draws={} dispatches={} shaders={} "
+                 "untracked_uses={}",
+                 ms, pass->submission,
+                 tail ? std::string{"after the last pass"}
+                      : fmt::format("pass {}x{}", pass->extent.width, pass->extent.height),
+                 pass->draws, pass->dispatches, shaders, pass->untracked_uses);
+    }
 }
 
 void Scheduler::ReportWorkTimes() {
@@ -1000,8 +1118,10 @@ void Scheduler::TraceGpuSubmission() {
                 submission_end[i] = results[i * 2 + 1].timestamp;
             }
             ReportSiteTimes(submission_begin, submission_end);
+            ReportPassTimes(submission_begin, submission_end);
         }
         trace_site_count = 0;
+        trace_pass_count = 0;
         trace_gpu_tick = 0;
         trace_gpu_count = 0;
         trace_gpu_skipped = 0;
@@ -1019,6 +1139,11 @@ void Scheduler::TraceGpuSubmission() {
     if (trace_gpu_count == 0 && trace_site_pool) {
         current_upload_cmdbuf.ResetQueryPool(*trace_site_pool, 0, TraceMaxSites + 1);
         trace_site_count = 0;
+    }
+    if (trace_gpu_count == 0 && trace_pass_pool) {
+        current_upload_cmdbuf.ResetQueryPool(*trace_pass_pool, 0, TraceMaxPasses);
+        trace_pass_count = 0;
+        trace_pass = {};
     }
     current_upload_cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, *trace_query_pool,
                                         trace_gpu_count * 2);
@@ -1054,6 +1179,10 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
             trace_gpu_tick = signal_value;
             trace_work.tick = signal_value;
             trace_submissions[trace_gpu_count] = trace_work;
+            if (trace_pass_pool) {
+                trace_pass.submission = trace_gpu_count;
+                trace_pass_tails[trace_gpu_count] = trace_pass;
+            }
             ++trace_gpu_count;
             trace_gpu_recording = false;
         } else if (trace_gpu_sampling) {
@@ -1061,6 +1190,7 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         }
         if (trace_work_pool) {
             trace_work = {};
+            trace_pass = {};
         }
         cmdbuf.End();
 
@@ -1081,7 +1211,6 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
             break;
         case VK_ERROR_DEVICE_LOST:
             device.ReportLoss();
-            [[fallthrough]];
         default:
             vk::Check(result);
             break;
@@ -1123,7 +1252,10 @@ void Scheduler::InvalidateState() {
 void Scheduler::EndPendingOperations() {
     // Pause, don't reset: a submission can land between a guest's counter reset and its report,
     // and resetting here would drop the samples counted so far (the report then reads too low).
-    query_cache->CounterClose(VideoCommon::QueryType::ZPassPixelCount64);
+    // Tests submit compute passes with no query cache.
+    if (query_cache) {
+        query_cache->CounterClose(VideoCommon::QueryType::ZPassPixelCount64);
+    }
     EndRenderPass();
 }
 
@@ -1149,7 +1281,7 @@ void Scheduler::EndRenderPass()
         query_cache->CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, false);
         query_cache->NotifySegment(false);
 
-        Record([num_images = num_renderpass_images,
+        Record([this, render_area = state.render_area, num_images = num_renderpass_images,
                        images = renderpass_images,
                        ranges = renderpass_image_ranges,
                        has_transform_feedback = device.IsExtTransformFeedbackSupported()](
@@ -1189,6 +1321,7 @@ void Scheduler::EndRenderPass()
                         .subresourceRange = range,
                 };
             }
+            TracePassEnd(cmdbuf, render_area);
             cmdbuf.EndRenderPass();
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,

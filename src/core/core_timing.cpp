@@ -44,6 +44,40 @@ constexpr u32 CpuClockTargetMhz(Settings::CpuClock clock) {
     }
 }
 
+#if defined(ARCHITECTURE_x86_64)
+constexpr u32 CntpctSyncSpeed = 1;
+static_assert(std::atomic<u32>::is_always_lock_free && sizeof(std::atomic<u32>) == sizeof(u32));
+static_assert(std::atomic<u64>::is_always_lock_free && sizeof(std::atomic<u64>) == sizeof(u64));
+static_assert(static_cast<u32>(Settings::CpuClock::Normal) == 0);
+
+static u32 ReadCntpctMode() {
+    return (static_cast<u32>(Settings::values.cpu_clock.GetValue()) << 1) |
+           (Settings::values.sync_core_speed.GetValue() ? CntpctSyncSpeed : 0);
+}
+
+void CoreTiming::ConfigureInlineCntpct(bool supported) {
+    const char* value = std::getenv("EDEN_NX2_JIT_INLINE_CNTPCT");
+    const bool enabled = value && value[0] == '1' && supported && is_multicore &&
+                         Common::g_wall_clock.IsNative();
+    inline_cntpct_mode.store(enabled ? ReadCntpctMode() : InlineCntpctDisabled,
+                             std::memory_order_relaxed);
+    if (enabled) {
+        LOG_INFO(Core_Timing, "Inline JIT guest counter enabled for Normal CPU clock without core speed sync");
+    }
+}
+
+void CoreTiming::RefreshInlineCntpct() {
+    if (InlineCntpctMode()) {
+        inline_cntpct_mode.store(ReadCntpctMode(), std::memory_order_relaxed);
+    }
+}
+
+const std::atomic<u32>* CoreTiming::InlineCntpctMode() const {
+    return inline_cntpct_mode.load(std::memory_order_relaxed) == InlineCntpctDisabled
+               ? nullptr : &inline_cntpct_mode;
+}
+#endif
+
 namespace {
 
 // One second of the timer thread's waits, for EDEN_NX2_HOSTTIMING_STATS.
@@ -322,11 +356,23 @@ void CoreTiming::ResetTicks() {
 
 u64 CoreTiming::GetClockTicks() const {
     u64 fres = is_multicore ? Common::g_wall_clock.GetCNTPCT() : Common::g_wall_clock.CPUTickToGuestCNTPCT(cpu_ticks);
-    if (const u32 target = CpuClockTargetMhz(Settings::values.cpu_clock.GetValue());
-        target != CPU_CLOCK_BASE_MHZ) {
+    Settings::CpuClock clock;
+    bool sync_core_speed;
+#if defined(ARCHITECTURE_x86_64)
+    const u32 mode = inline_cntpct_mode.load(std::memory_order_relaxed);
+    if (mode != InlineCntpctDisabled) {
+        clock = static_cast<Settings::CpuClock>(mode >> 1);
+        sync_core_speed = (mode & CntpctSyncSpeed) != 0;
+    } else
+#endif
+    {
+        clock = Settings::values.cpu_clock.GetValue();
+        sync_core_speed = Settings::values.sync_core_speed.GetValue();
+    }
+    if (const u32 target = CpuClockTargetMhz(clock); target != CPU_CLOCK_BASE_MHZ) {
         fres = fres * target / CPU_CLOCK_BASE_MHZ;
     }
-    if (::Settings::values.sync_core_speed.GetValue()) {
+    if (sync_core_speed) {
         auto const ticks = f64(fres);
         auto const speed_limit = f64(Settings::SpeedLimit()) * 0.01;
         return u64(ticks / speed_limit);
@@ -403,6 +449,8 @@ CoreTiming::NextEvents CoreTiming::AdvanceEvents() {
                 event_queue.update(evt.handle, Event{next_time, event_fifo_id++, evt.type,
                                                      next_schedule_time, evt.handle});
             }
+        } else {
+            event_queue.pop();
         }
 
         global_timer = GetGlobalTimeNs().count();

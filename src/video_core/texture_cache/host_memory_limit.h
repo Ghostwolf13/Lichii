@@ -23,8 +23,8 @@ constexpr u64 MinHostCriticalMemory = u64{3} << 30;
 /// card's budget alone let the cache fill 9.7 GiB on a PC with 16 GiB of RAM and a 16 GiB page
 /// file, where the guest's memory already takes 14 GiB of commit: the driver then refused a
 /// 2.6 MiB image in every heap, host memory included, and the session ended (Ocarina of Time,
-/// RX 7600 XT). `device_usage` is the device memory in use now and `commit_room` the commit the
-/// system can still hand out: their sum is what the cache would hold with all of it.
+/// RX 7600 XT). `device_usage` is the device memory in use now and `commit_room` the commit this
+/// process can still take: their sum is what the cache would hold with all of it.
 constexpr u64 HostCriticalMemory(u64 device_usage, u64 commit_room) {
     const u64 limit = commit_room > (std::numeric_limits<u64>::max)() - device_usage
                           ? (std::numeric_limits<u64>::max)()

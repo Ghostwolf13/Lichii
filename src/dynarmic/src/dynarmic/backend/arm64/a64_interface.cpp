@@ -37,6 +37,7 @@ struct Jit::Impl final {
         HaltReason hr = core.Run(current_address_space, current_state, &halt_reason);
         PerformRequestedCacheInvalidation(hr);
         is_executing = false;
+        UpdateCounters();
         return hr;
     }
 
@@ -47,6 +48,7 @@ struct Jit::Impl final {
         HaltReason hr = core.Step(current_address_space, current_state, &halt_reason);
         PerformRequestedCacheInvalidation(hr);
         is_executing = false;
+        UpdateCounters();
         return hr;
     }
 
@@ -166,10 +168,29 @@ private:
         }
     }
 
+    // Adds what the address space compiled and cleared since the last call: JITs on the same
+    // host thread may share one Counters.
+    void UpdateCounters() {
+        if (!conf.counters) {
+            return;
+        }
+        const auto& stats = current_address_space.GetCompileStats();
+        conf.counters->blocks_compiled += stats.blocks_compiled - counted.blocks_compiled;
+        conf.counters->compile_ns += stats.compile_ns - counted.compile_ns;
+        conf.counters->cache_clears += stats.cache_clears - counted.cache_clears;
+        conf.counters->full_clears += stats.full_clears - counted.full_clears;
+        conf.counters->blocks_invalidated += stats.blocks_invalidated - counted.blocks_invalidated;
+        conf.counters->invalidated_bytes += stats.invalidated_bytes - counted.invalidated_bytes;
+        conf.counters->fastmem_recompiles += stats.fastmem_recompiles - counted.fastmem_recompiles;
+        conf.counters->code_bytes = current_address_space.GetUsedCodeBytes();
+        counted = stats;
+    }
+
     A64::UserConfig conf;
     A64JitState current_state{};
     A64AddressSpace current_address_space;
     A64Core core;
+    AddressSpace::CompileStats counted;
 
     volatile u32 halt_reason = 0;
 

@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <memory>
+#include <utility>
 #include "core/core.h"
 #include "core/hle/service/glue/arp.h"
 #include "core/hle/service/glue/bgtc.h"
@@ -17,7 +18,7 @@
 
 namespace Service::Glue {
 
-void LoopProcess(Core::System& system) {
+void LoopProcess(Core::System& system, std::shared_ptr<Time::TimeZoneBinary> isolated_time_zone) {
     auto server_manager = std::make_unique<ServerManager>(system);
 
     // ARP
@@ -38,7 +39,7 @@ void LoopProcess(Core::System& system) {
     server_manager->RegisterNamedService("notif:s", std::make_shared<INotificationServices>(system));
 
     // Time
-    auto time = std::make_shared<Time::TimeManager>(system);
+    auto time = std::make_shared<Time::TimeManager>(system, std::move(isolated_time_zone));
     server_manager->RegisterNamedService("time:u", std::make_shared<Time::StaticService>(system, Service::PSC::Time::StaticServiceSetupInfo{0, 0, 0, 0, 0, 0}, time, "time:u"));
     server_manager->RegisterNamedService("time:a", std::make_shared<Time::StaticService>(system, Service::PSC::Time::StaticServiceSetupInfo{1, 1, 0, 1, 0, 0}, time, "time:a"));
     server_manager->RegisterNamedService("time:r", std::make_shared<Time::StaticService>(system, Service::PSC::Time::StaticServiceSetupInfo{0, 0, 0, 0, 1, 0}, time, "time:r"));

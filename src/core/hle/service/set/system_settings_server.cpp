@@ -24,6 +24,7 @@
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/set/settings_server.h"
 #include "core/hle/service/set/system_settings_server.h"
+#include "core/hle/service/system_data_view.h"
 
 namespace Service::Set {
 
@@ -61,27 +62,31 @@ void SyncGlobalRegionFromCode(SystemRegionCode region_code) {
 } // Anonymous namespace
 
 Result GetFirmwareVersionImpl(FirmwareVersionFormat& out_firmware, Core::System& system,
-                              GetFirmwareVersionType type) {
-    constexpr u64 FirmwareVersionSystemDataId = 0x0100000000000809;
-    auto& fsc = system.GetFileSystemController();
-
-    // Attempt to load version data from disk
-    const FileSys::RegisteredCache* bis_system{};
-    std::unique_ptr<FileSys::NCA> nca{};
-    FileSys::VirtualDir romfs{};
-
-    bis_system = fsc.GetSystemNANDContents();
-    if (bis_system) {
-        nca = bis_system->GetEntry(FirmwareVersionSystemDataId, FileSys::ContentRecordType::Data);
-    }
-    if (nca) {
-        if (auto nca_romfs = nca->GetRomFS(); nca_romfs) {
-            romfs = FileSys::ExtractRomFS(nca_romfs);
+                              GetFirmwareVersionType type,
+                              const SystemDataView* isolated_system_data) {
+    std::shared_ptr<const FileSys::VfsFile> ver_file;
+    if (isolated_system_data) {
+        ver_file = isolated_system_data->OpenFile(SystemDataAsset::FirmwareVersion, "file");
+        R_UNLESS(ver_file, FileSys::ResultTargetNotFound);
+    } else {
+        constexpr u64 FirmwareVersionSystemDataId = 0x0100000000000809;
+        FileSys::VirtualDir romfs;
+        if (const auto* nand = system.GetFileSystemController().GetSystemNANDContents()) {
+            const auto nca =
+                nand->GetEntry(FirmwareVersionSystemDataId, FileSys::ContentRecordType::Data);
+            if (nca) {
+                if (auto raw_romfs = nca->GetRomFS()) {
+                    romfs = FileSys::ExtractRomFS(std::move(raw_romfs));
+                }
+            }
         }
-    }
-    if (!romfs) {
-        romfs = FileSys::ExtractRomFS(
-            FileSys::SystemArchive::SynthesizeSystemArchive(FirmwareVersionSystemDataId));
+        if (!romfs) {
+            romfs = FileSys::ExtractRomFS(
+                FileSys::SystemArchive::SynthesizeSystemArchive(FirmwareVersionSystemDataId));
+        }
+        if (romfs) {
+            ver_file = romfs->GetFile("file");
+        }
     }
 
     const auto early_exit_failure = [](std::string_view desc, Result code) {
@@ -90,19 +95,19 @@ Result GetFirmwareVersionImpl(FirmwareVersionFormat& out_firmware, Core::System&
         return code;
     };
 
-    const auto ver_file = romfs->GetFile("file");
     if (ver_file == nullptr) {
         return early_exit_failure("The system version archive didn't contain the file 'file'.",
                                   FileSys::ResultInvalidArgument);
     }
 
-    auto data = ver_file->ReadAllBytes();
-    if (data.size() != sizeof(FirmwareVersionFormat)) {
+    FirmwareVersionFormat firmware{};
+    if (ver_file->GetSize() != sizeof(firmware) ||
+        ver_file->ReadObject(&firmware) != sizeof(firmware)) {
         return early_exit_failure("The system version file 'file' was not the correct size.",
                                   FileSys::ResultOutOfRange);
     }
 
-    std::memcpy(&out_firmware, data.data(), sizeof(FirmwareVersionFormat));
+    out_firmware = firmware;
 
     // If the command is GetFirmwareVersion (as opposed to GetFirmwareVersion2), hardware will
     // zero out the REVISION_MINOR field.
@@ -113,8 +118,10 @@ Result GetFirmwareVersionImpl(FirmwareVersionFormat& out_firmware, Core::System&
     return ResultSuccess;
 }
 
-ISystemSettingsServer::ISystemSettingsServer(Core::System& system_)
-    : ServiceFramework{system_, "set:sys"}, m_system{system} {
+ISystemSettingsServer::ISystemSettingsServer(
+    Core::System& system_, std::shared_ptr<const SystemDataView> isolated_system_data)
+    : ServiceFramework{system_, "set:sys"}, m_system{system},
+      m_isolated_system_data{std::move(isolated_system_data)} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, C<&ISystemSettingsServer::SetLanguageCode>, "SetLanguageCode"},
@@ -347,7 +354,16 @@ ISystemSettingsServer::ISystemSettingsServer(Core::System& system_)
 
     RegisterHandlers(functions);
 
-    SetupSettings();
+    if (m_isolated_system_data) {
+        InitializeDefaultSystemSettings(m_system_settings);
+        m_system_settings.language_code = GetLanguageCodeFromIndex(
+            static_cast<std::size_t>(::Settings::values.language_index.GetValue()));
+        m_private_settings = DefaultPrivateSettings();
+        m_device_settings = DefaultDeviceSettings();
+        m_appln_settings = DefaultApplnSettings();
+    } else {
+        SetupSettings();
+    }
 
     m_system_settings.region_code =
         static_cast<SystemRegionCode>(::Settings::values.region_index.GetValue());
@@ -478,24 +494,37 @@ bool ISystemSettingsServer::StoreSettingsFile(std::filesystem::path& path, auto&
 Result ISystemSettingsServer::SetLanguageCode(LanguageCode language_code) {
     LOG_INFO(Service_SET, "called, language_code={}", language_code);
 
+    if (m_isolated_system_data) {
+        std::scoped_lock lock{m_scratch_profile_mutex};
+        m_system_settings.language_code = language_code;
+        R_SUCCEED();
+    }
+
     m_system_settings.language_code = language_code;
     SyncGlobalLanguageFromCode(language_code);
     SetSaveNeeded();
     R_SUCCEED();
 }
 
+LanguageCode ISystemSettingsServer::GetScratchLanguageCode() const {
+    std::scoped_lock lock{m_scratch_profile_mutex};
+    return m_system_settings.language_code;
+}
+
 Result ISystemSettingsServer::GetFirmwareVersion(
     OutLargeData<FirmwareVersionFormat, BufferAttr_HipcPointer> out_firmware_data) {
     LOG_DEBUG(Service_SET, "called");
 
-    R_RETURN(GetFirmwareVersionImpl(*out_firmware_data, system, GetFirmwareVersionType::Version1));
+    R_RETURN(GetFirmwareVersionImpl(*out_firmware_data, system, GetFirmwareVersionType::Version1,
+                                    m_isolated_system_data.get()));
 }
 
 Result ISystemSettingsServer::GetFirmwareVersion2(
     OutLargeData<FirmwareVersionFormat, BufferAttr_HipcPointer> out_firmware_data) {
     LOG_DEBUG(Service_SET, "called");
 
-    R_RETURN(GetFirmwareVersionImpl(*out_firmware_data, system, GetFirmwareVersionType::Version2));
+    R_RETURN(GetFirmwareVersionImpl(*out_firmware_data, system, GetFirmwareVersionType::Version2,
+                                    m_isolated_system_data.get()));
 }
 
 Result ISystemSettingsServer::GetLockScreenFlag(Out<bool> out_lock_screen_flag) {
@@ -911,10 +940,21 @@ Result ISystemSettingsServer::SetDeviceTimeZoneLocationName(
 Result ISystemSettingsServer::SetRegionCode(SystemRegionCode region_code) {
     LOG_INFO(Service_SET, "called, region_code={}", region_code);
 
+    if (m_isolated_system_data) {
+        std::scoped_lock lock{m_scratch_profile_mutex};
+        m_system_settings.region_code = region_code;
+        R_SUCCEED();
+    }
+
     m_system_settings.region_code = region_code;
     SyncGlobalRegionFromCode(region_code);
     SetSaveNeeded();
     R_SUCCEED();
+}
+
+SystemRegionCode ISystemSettingsServer::GetScratchRegionCode() const {
+    std::scoped_lock lock{m_scratch_profile_mutex};
+    return m_system_settings.region_code;
 }
 
 Result ISystemSettingsServer::GetNetworkSystemClockContext(
@@ -1176,6 +1216,12 @@ Result ISystemSettingsServer::GetDeviceNickName(
     OutLargeData<std::array<u8, 0x80>, BufferAttr_HipcMapAlias> out_device_name) {
     LOG_DEBUG(Service_SET, "called");
 
+    if (m_isolated_system_data) {
+        std::scoped_lock lock{m_scratch_profile_mutex};
+        *out_device_name = m_system_settings.device_nick_name;
+        R_SUCCEED();
+    }
+
     *out_device_name = {};
     const auto device_name_buffer = ::Settings::values.device_name.GetValue().c_str();
     memcpy(out_device_name->data(), device_name_buffer,
@@ -1189,6 +1235,13 @@ Result ISystemSettingsServer::SetDeviceNickName(
     const std::string device_name = Common::StringFromBuffer(*device_name_buffer);
 
     LOG_INFO(Service_SET, "called, device_name={}", device_name);
+
+    if (m_isolated_system_data) {
+        std::scoped_lock lock{m_scratch_profile_mutex};
+        m_system_settings.device_nick_name = {};
+        std::copy(device_name.begin(), device_name.end(), m_system_settings.device_nick_name.begin());
+        R_SUCCEED();
+    }
 
     ::Settings::values.device_name = device_name;
     R_SUCCEED();
@@ -1485,7 +1538,11 @@ Result ISystemSettingsServer::GetDefaultAccountUserSettings(Out<AccountUserSetti
 
 void ISystemSettingsServer::SetupSettings() {
     auto system_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir) / "system/save/8000000000000050";
-    if (!LoadSettingsFile(system_dir, []() { return DefaultSystemSettings(); })) {
+    if (!LoadSettingsFile(system_dir, [] {
+            SystemSettings settings{};
+            InitializeDefaultSystemSettings(settings);
+            return settings;
+        })) {
         ASSERT(false);
     }
 
@@ -1528,6 +1585,10 @@ void ISystemSettingsServer::StoreSettings() {
 }
 
 void ISystemSettingsServer::SetSaveNeeded() {
+    if (m_isolated_system_data) {
+        return;
+    }
+
     std::scoped_lock l{m_save_needed_mutex};
     StoreSettings();
 }
