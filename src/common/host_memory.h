@@ -51,7 +51,13 @@ public:
 
     void Protect(size_t virtual_offset, size_t length, MemoryPermission perms);
 
-    void EnableDirectMappedAddress();
+#ifdef HAS_NCE
+    [[nodiscard]] bool EnableDirectMappedAddress();
+    [[nodiscard]] bool IsDirectMapped() const noexcept {
+        return direct_mapped;
+    }
+#endif
+    void ResetVirtualMappings();
 
     /// Clears guest memory being handed out. Memory still zero since it was created (or since its
     /// last full clear) is skipped: clearing it only made the host give every page real memory.
@@ -109,6 +115,11 @@ public:
 
 private:
     void Swap(HostMemory& other) noexcept;
+
+#ifdef HAS_NCE
+    [[nodiscard]] bool NormalizeVirtualOffset(size_t& address, size_t length) const noexcept;
+    bool direct_mapped{};
+#endif
 
     friend class HostMemoryTestAccess;
     struct AllocationTestControl {

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <span>
 #include <vector>
@@ -37,6 +38,17 @@ struct WriterStats {
     u64 compactions{};
 };
 
+/// A record the writer put in the file
+struct WrittenRecord {
+    RecordKind kind;
+    u64 key;
+    u64 offset; ///< Where it begins in the file
+};
+
+/// Called on the writer thread with the records of each write once they are in the file, in the
+/// order they were appended
+using OnWritten = std::function<void(std::span<const WrittenRecord>)>;
+
 /// The one thread that writes a log. Any thread queues records; they are written in order,
 /// holding the log's lock (see AppendToLog). While another process holds it, or a write fails,
 /// the records stay queued and are tried again: a record is never left out for that.
@@ -45,7 +57,8 @@ public:
     /// How long destruction waits for queued records to be written
     static constexpr std::chrono::milliseconds ShutdownDrain{3000};
 
-    explicit CacheWriter(std::filesystem::path file, WriterOptions options = {});
+    explicit CacheWriter(std::filesystem::path file, WriterOptions options = {},
+                         OnWritten on_written = {});
     ~CacheWriter();
 
     CacheWriter(const CacheWriter&) = delete;
@@ -75,11 +88,14 @@ private:
 
     const std::filesystem::path file;
     const WriterOptions options;
+    const OnWritten on_written;
 
     mutable std::mutex mutex;
     std::condition_variable_any work_cv;
     std::condition_variable drained_cv;
     std::vector<u8> queued;
+    /// With on_written: the queued records, their offsets taken from the start of `queued`
+    std::vector<WrittenRecord> queued_index;
     u64 queued_records{};
     Clock::time_point first_queued{};
     Clock::time_point last_queued{};

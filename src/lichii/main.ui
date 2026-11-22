@@ -240,6 +240,7 @@
     <addaction name="action_Apply_Recommended_Settings"/>
     <addaction name="action_Restore_Previous_Settings"/>
     <addaction name="separator"/>
+    <addaction name="action_Check_For_Updates"/>
     <addaction name="action_Whats_New"/>
     <addaction name="action_About"/>
     <addaction name="action_Eden_Dependencies"/>
@@ -293,6 +294,11 @@
   <action name="action_Verify_installed_contents">
    <property name="text">
     <string>&amp;Verify Installed Contents</string>
+   </property>
+  </action>
+  <action name="action_Check_For_Updates">
+   <property name="text">
+    <string>Check for &amp;Updates...</string>
    </property>
   </action>
   <action name="action_Whats_New">

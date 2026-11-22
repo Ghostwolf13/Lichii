@@ -859,6 +859,15 @@ void ConfigureInputPlayer::ApplyConfiguration() {
     emulated_controller->EnableConfiguration();
 }
 
+void ConfigureInputPlayer::RestoreConfiguration() {
+    if (player_index == 0) {
+        hid_core.GetEmulatedController(Core::HID::NpadIdType::Player1)->RestoreConfig();
+        hid_core.GetEmulatedController(Core::HID::NpadIdType::Handheld)->RestoreConfig();
+        return;
+    }
+    emulated_controller->RestoreConfig();
+}
+
 void ConfigureInputPlayer::showEvent(QShowEvent* event) {
     if (bottom_row == nullptr) {
         return;

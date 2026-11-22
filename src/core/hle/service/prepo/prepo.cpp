@@ -9,14 +9,68 @@
 #include <cstring>
 
 #include "core/core.h"
+#include "core/hle/kernel/k_event.h"
+#include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/prepo/prepo.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/service.h"
 #include "core/reporter.h"
 
 namespace Service::PlayReport {
+
+class IAsyncContext final : public ServiceFramework<IAsyncContext> {
+public:
+    explicit IAsyncContext(Core::System& system_)
+        : ServiceFramework{system_, "prepo:IAsyncContext"},
+          service_context{system_, "prepo:IAsyncContext"} {
+        // clang-format off
+        static const FunctionInfo functions[] = {
+            {0, &IAsyncContext::GetSystemEvent, "GetSystemEvent"},
+            {1, &IAsyncContext::Cancel, "Cancel"},
+            {2, &IAsyncContext::Done, "Done"},
+            {3, &IAsyncContext::Done, "Done"},
+        };
+        // clang-format on
+        RegisterHandlers(functions);
+        completion_event = service_context.CreateEvent("prepo:IAsyncContext:CompletionEvent");
+        if (completion_event) {
+            completion_event->Signal(system.Kernel());
+        }
+    }
+
+    ~IAsyncContext() override {
+        service_context.CloseEvent(completion_event);
+    }
+
+    bool HasEvent() const {
+        return completion_event != nullptr;
+    }
+
+private:
+    void GetSystemEvent(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 2, 1};
+        rb.Push(ResultSuccess);
+        rb.PushCopyObjects(ctx, completion_event->GetReadableEvent());
+    }
+
+    void Cancel(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    // Return success and a done flag for either command; prepo's ordering is unknown.
+    void Done(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(1);
+    }
+
+    KernelHelpers::ServiceContext service_context;
+    Kernel::KEvent* completion_event{};
+};
 
 class PlayReport final : public ServiceFramework<PlayReport> {
 public:
@@ -34,6 +88,7 @@ public:
             {10200, &PlayReport::RequestImmediateTransmission, "RequestImmediateTransmission"},
             {10300, &PlayReport::GetTransmissionStatus, "GetTransmissionStatus"},
             {10400, &PlayReport::GetSystemSessionId, "GetSystemSessionId"},
+            {10500, &PlayReport::Unknown10500, "Unknown10500"},
             {20100, &PlayReport::SaveSystemReportOld, "SaveSystemReport"},
             {20101, &PlayReport::SaveSystemReportWithUserOld, "SaveSystemReportWithUser"},
             {20102, &PlayReport::SaveSystemReport, "SaveSystemReport"},
@@ -130,6 +185,20 @@ private:
         rb.Push(system_session_id);
     }
 
+    void Unknown10500(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_PREPO, "(STUBBED) called");
+
+        auto async_context = std::make_shared<IAsyncContext>(system);
+        if (!async_context->HasEvent()) {
+            IPC::ResponseBuilder rb{ctx, 2};
+            rb.Push(Kernel::ResultOutOfResource);
+            return;
+        }
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface(ctx, std::move(async_context));
+    }
+
     void SaveSystemReportOld(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
         const auto title_id = rp.PopRaw<u64>();
@@ -215,19 +284,16 @@ private:
     }
 };
 
+std::shared_ptr<ServiceFrameworkBase> CreateService(const char* name, Core::System& system) {
+    return std::make_shared<PlayReport>(name, system);
+}
+
 void LoopProcess(Core::System& system) {
     auto server_manager = std::make_unique<ServerManager>(system);
 
-    server_manager->RegisterNamedService("prepo:a",
-                                         std::make_shared<PlayReport>("prepo:a", system));
-    server_manager->RegisterNamedService("prepo:a2",
-                                         std::make_shared<PlayReport>("prepo:a2", system));
-    server_manager->RegisterNamedService("prepo:m",
-                                         std::make_shared<PlayReport>("prepo:m", system));
-    server_manager->RegisterNamedService("prepo:s",
-                                         std::make_shared<PlayReport>("prepo:s", system));
-    server_manager->RegisterNamedService("prepo:u",
-                                         std::make_shared<PlayReport>("prepo:u", system));
+    for (const char* name : {"prepo:a", "prepo:a2", "prepo:m", "prepo:s", "prepo:u"}) {
+        server_manager->RegisterNamedService(name, CreateService(name, system));
+    }
     ServerManager::RunServer(std::move(server_manager));
 }
 

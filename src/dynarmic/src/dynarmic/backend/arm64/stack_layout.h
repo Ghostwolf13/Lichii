@@ -24,7 +24,10 @@ constexpr std::size_t SpillCount = 64;
 struct alignas(16) RSBEntry {
     u64 target;
     u64 code_ptr;
+    u64 cache_generation;
 };
+
+static_assert(sizeof(RSBEntry) == 32);
 
 constexpr std::size_t RSBCount = 8;
 constexpr u64 RSBIndexMask = (RSBCount - 1) * sizeof(RSBEntry);

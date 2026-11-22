@@ -40,11 +40,15 @@ _ZN4Core6ArmNce27ReturnToRunCodeByTrampolineEPvPNS_12GuestContextEm:
     stp     q10, q11, [x5, #(HostContextVregs+0x20)]
     stp     q12, q13, [x5, #(HostContextVregs+0x40)]
     stp     q14, q15, [x5, #(HostContextVregs+0x60)]
+    mrs     x3, fpcr
+    mrs     x4, fpsr
+    stp     w3, w4, [x5, #(HostContextFpcr)]
 
     /* Load guest tpidr_el0 from argument. */
     msr     tpidr_el0, x0
 
     /* Tail call the trampoline to restore guest state. */
+    clrex
     br      x2
 
 
@@ -94,6 +98,7 @@ _ZN4Core6ArmNce50ReturnToRunCodeByExceptionLevelChangeSignalHandlerEiPvS1_:
     bl      _ZN4Core6ArmNce22UnlockThreadParametersEPv
 
     /* Returning from here will enter the guest. */
+    clrex
     ldp     x29, x30, [sp], #0x10
     ret
 

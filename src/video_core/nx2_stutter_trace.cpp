@@ -118,9 +118,60 @@ struct FrameState {
     u64 window_compute_builds{};
     std::array<u64, LookupCount> lookups{};
     std::array<u64, DriverBuildCount> driver_builds{};
+    JitDelta jit_totals{};
+    JitDelta window_jit{};
 };
 
 FrameState g_frame;
+
+JitDelta SnapshotJit() {
+    return {
+        .compile_ns = g_totals.jit_compile_ns.load(std::memory_order_relaxed),
+        .blocks = g_totals.jit_blocks.load(std::memory_order_relaxed),
+        .clears = g_totals.jit_clears.load(std::memory_order_relaxed),
+        .full_clears = g_totals.jit_full_clears.load(std::memory_order_relaxed),
+        .invalidated = g_totals.jit_invalidated.load(std::memory_order_relaxed),
+        .invalidated_bytes = g_totals.jit_invalidated_bytes.load(std::memory_order_relaxed),
+        .fastmem_recompiles = g_totals.jit_fastmem_recompiles.load(std::memory_order_relaxed),
+    };
+}
+
+JitDelta operator-(const JitDelta& a, const JitDelta& b) {
+    return {a.compile_ns - b.compile_ns,       a.blocks - b.blocks,
+            a.clears - b.clears,               a.full_clears - b.full_clears,
+            a.invalidated - b.invalidated,     a.invalidated_bytes - b.invalidated_bytes,
+            a.fastmem_recompiles - b.fastmem_recompiles};
+}
+
+void operator+=(JitDelta& a, const JitDelta& b) {
+    a.compile_ns += b.compile_ns;
+    a.blocks += b.blocks;
+    a.clears += b.clears;
+    a.full_clears += b.full_clears;
+    a.invalidated += b.invalidated;
+    a.invalidated_bytes += b.invalidated_bytes;
+    a.fastmem_recompiles += b.fastmem_recompiles;
+}
+
+std::string JitText(const JitDelta& jit) {
+    return fmt::format("jit=ms:{:.1f},blocks:{},clears:{},full:{},inval:{},inval_kib:{},fastmem:{}",
+                       static_cast<double>(jit.compile_ns) / 1e6, jit.blocks, jit.clears,
+                       jit.full_clears, jit.invalidated, jit.invalidated_bytes / 1024,
+                       jit.fastmem_recompiles);
+}
+
+/// Each core's code cache in use, in MiB.
+std::string JitCacheText() {
+    std::string text;
+    for (size_t core = 0; core < g_totals.jit_code_bytes.size(); ++core) {
+        const u64 bytes = g_totals.jit_code_bytes[core].load(std::memory_order_relaxed);
+        if (bytes != 0) {
+            text += fmt::format("{}{}:{:.0f}", text.empty() ? "" : ",", core,
+                                static_cast<double>(bytes) / (1024.0 * 1024.0));
+        }
+    }
+    return text.empty() ? "none" : text;
+}
 std::mutex g_cache_file_mutex;
 std::string g_cache_file;
 
@@ -167,11 +218,14 @@ void Summarize(FrameState& state, u64 now) {
     }
     LOG_INFO(HW_GPU,
              "Nx2StutterSummary window_s={:.2f} frames={} over33={} over100={} hist={} cat_ms={} "
-             "builds=gfx:{},compute:{} lookups={} driver_builds={} cache_bytes={} sites={}",
+             "builds=gfx:{},compute:{} lookups={} driver_builds={} cache_bytes={} sites={} {} "
+             "jit_cache_mib={}",
              static_cast<double>(now - state.window_start_ns) / 1e9, state.window_frames,
              state.window_over_33, state.window_over_100, histogram.empty() ? "none" : histogram,
              categories, state.window_graphics_builds, state.window_compute_builds, lookups,
-             driver_builds, CacheFileBytes(), sites.empty() ? "none" : sites);
+             driver_builds, CacheFileBytes(), sites.empty() ? "none" : sites,
+             JitText(state.window_jit), JitCacheText());
+    state.window_jit = {};
     state.window_start_ns = now;
     state.window_frames = 0;
     state.window_over_33 = 0;
@@ -207,7 +261,8 @@ std::pair<ZoneTicks, ZoneTicks> SnapshotZones(u64 now) {
             if (sequence.load(std::memory_order_relaxed) != begin) {
                 continue;
             }
-            if (open < ZoneSlots && now > since) {
+            // since is 0 for a thread never named (its open zone is zero-initialized, not none)
+            if (open < ZoneSlots && since != 0 && now > since) {
                 ticks[thread][open] += now - since;
             }
             break;
@@ -284,7 +339,8 @@ ThreadTicks Snapshot(u64 now) {
             if (sequence.load(std::memory_order_relaxed) != begin) {
                 continue;
             }
-            if (open < CategoryCount && now > since) {
+            // since is 0 for a thread never named (open is zero-initialized: GraphicsMiss, not None)
+            if (open < CategoryCount && since != 0 && now > since) {
                 ticks[thread][open] += now - since;
             }
             break;
@@ -348,6 +404,8 @@ void OnPresent() {
     }
     const auto last_site_ticks = std::exchange(state.site_ticks, site_ticks);
     const auto last_site_counts = std::exchange(state.site_counts, site_counts);
+    const JitDelta jit_totals = SnapshotJit();
+    const JitDelta frame_jit = jit_totals - std::exchange(state.jit_totals, jit_totals);
     const u64 frame_start_ticks = state.last_ticks;
     const u64 interval_ns = now - state.last_ns;
     const u64 interval_ticks = now_ticks - state.last_ticks;
@@ -397,6 +455,7 @@ void OnPresent() {
     }
     state.window_graphics_builds += graphics_builds;
     state.window_compute_builds += compute_builds;
+    state.window_jit += frame_jit;
     std::string sites;
     for (size_t index = 0; index < SiteCount; ++index) {
         // Ticks and count are separate atomics: a run can land in one frame's ticks and the next
@@ -429,10 +488,12 @@ void OnPresent() {
                                     *frame.busy_ms[thread]);
             }
         }
+        // jit: guest code compiled on any core during the frame, summed over the cores.
         LOG_INFO(HW_GPU, "Nx2Stutter frame={} ms={:.1f} cause={}{} other={:.1f} busy={} "
-                         "builds=gfx:{},compute:{}",
+                         "builds=gfx:{},compute:{} {}",
                  state.frames, interval_ms, frame.cause, fields, frame.other_ms,
-                 busy.empty() ? "none" : busy, graphics_builds, compute_builds);
+                 busy.empty() ? "none" : busy, graphics_builds, compute_builds,
+                 JitText(frame_jit));
     }
     if (interval_ms > state.detail_ms) {
         std::string longest;

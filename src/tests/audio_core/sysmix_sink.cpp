@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <thread>
 #include <catch2/catch_test_macros.hpp>
@@ -162,4 +163,30 @@ TEST_CASE("legacy output and renderer sinks preserve FIFO volume and repeated-fr
         stream.ProcessAudioOutAndRender(output, 240);
         REQUIRE(std::ranges::all_of(output, [](s16 value) { return value == -2000; }));
     }
+}
+
+TEST_CASE("null sink plays render output at the device rate", "[sysmix_sink]") {
+    SysmixTests::Context context;
+    AudioCore::Sink::NullSink null{"auto"};
+    auto* stream =
+        null.AcquireSinkStream(context.system, 2, "render", AudioCore::Sink::StreamType::Render);
+    stream->Start();
+    AudioCore::Sink::SinkBuffer block{240, 0, 0, false};
+    std::array<s16, 480> samples{};
+    // A consumer that woke late makes up for at most 20 blocks at once.
+    constexpr u32 catch_up = 20;
+    constexpr u32 blocks = 2 * catch_up;
+    const auto start = std::chrono::steady_clock::now();
+    for (u32 i = 0; i < blocks; ++i) {
+        stream->AppendBuffer(block, samples);
+    }
+    while (stream->GetQueueSize() != 0 &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds{5}) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    REQUIRE(stream->GetQueueSize() == 0);
+    // One 240-frame block per 5 ms at 48 kHz, for the blocks that were not caught up on.
+    REQUIRE(std::chrono::steady_clock::now() - start >=
+            std::chrono::milliseconds{5 * (blocks - catch_up - 1)});
+    null.CloseStream(stream);
 }

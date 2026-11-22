@@ -27,7 +27,7 @@ namespace Dynarmic::Backend::Arm64 {
 
 class AddressSpace {
 public:
-    explicit AddressSpace(std::size_t code_cache_size);
+    AddressSpace(std::size_t code_cache_size, std::optional<std::uintptr_t> fastmem_arena);
     virtual ~AddressSpace();
 
     virtual void GenerateIR(IR::Block& ir_block, IR::LocationDescriptor) const = 0;
@@ -45,6 +45,23 @@ public:
     void InvalidateBasicBlocks(const ::Common::unordered_set<IR::LocationDescriptor>& descriptors);
 
     void ClearCache();
+
+    /// Totals since creation; the JIT adds their growth to UserConfig::counters.
+    struct CompileStats {
+        u64 blocks_compiled = 0;
+        u64 compile_ns = 0;
+        u64 cache_clears = 0;
+        u64 full_clears = 0;
+        u64 blocks_invalidated = 0;
+        u64 invalidated_bytes = 0;
+        u64 fastmem_recompiles = 0;
+    };
+    const CompileStats& GetCompileStats() const {
+        return compile_stats;
+    }
+    std::size_t GetUsedCodeBytes() const {
+        return static_cast<std::size_t>(code.offset() - prelude_info.end_of_prelude);
+    }
 protected:
     virtual EmitConfig GetEmitConfig() = 0;
     virtual void RegisterNewBasicBlock(const IR::Block& block, const EmittedBlockInfo& block_info) = 0;
@@ -71,6 +88,7 @@ protected:
 
     IR::Block ir_block;
     const std::size_t code_cache_size;
+    u64 cache_generation = 0;
     oaknut::CodeBlock mem;
     oaknut::CodeGenerator code;
 
@@ -83,6 +101,8 @@ protected:
 
     ExceptionHandler exception_handler;
     FastmemManager fastmem_manager;
+
+    CompileStats compile_stats;
 
     struct PreludeInfo {
         std::ptrdiff_t end_of_prelude;

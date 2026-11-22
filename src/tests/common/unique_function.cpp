@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <functional>
 #include <string>
+#include <type_traits>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -25,6 +27,10 @@ struct Noisy {
 
     std::string state;
 };
+
+int Add(int a, int b) {
+    return a + b;
+}
 } // Anonymous namespace
 
 TEST_CASE("UniqueFunction", "[common]") {
@@ -104,5 +110,98 @@ TEST_CASE("UniqueFunction", "[common]") {
             REQUIRE(num_destroyed == 0);
         }
         REQUIRE(num_destroyed == 1);
+    }
+    SECTION("Owns a callable given as a const lvalue") {
+        // A worker thread was handed a const lambda by name and ran it after the function that
+        // held it had returned: the wrapper kept a reference, and the lambda's captures were gone.
+        struct Setter {
+            void operator()() const {
+                *out = value;
+            }
+            mutable int value;
+            int* out;
+        };
+        int result = 0;
+        const Setter setter{5, &result};
+        Common::UniqueFunction<void> func{setter};
+        // The wrapper holds its own copy: what happens to the original no longer reaches it.
+        setter.value = 6;
+        func();
+        REQUIRE(result == 5);
+    }
+    SECTION("Copies a callable given as a non-const lvalue") {
+        struct Setter {
+            void operator()() const {
+                *out = value;
+            }
+            int value;
+            int* out;
+        };
+        int result = 0;
+        Setter setter{5, &result};
+        Common::UniqueFunction<void> func{setter};
+        setter.value = 6;
+        func();
+        REQUIRE(result == 5);
+        setter();
+        REQUIRE(result == 6);
+    }
+    SECTION("Outlives the const lvalue it was made from") {
+        const auto make = [] {
+            const auto named = [text = std::string(64, 'x')] { return text; };
+            return Common::UniqueFunction<std::string>{named};
+        };
+        const Common::UniqueFunction<std::string> func = make();
+        REQUIRE(func() == std::string(64, 'x'));
+    }
+    SECTION("Shares a callable given through std::ref") {
+        struct Counter {
+            void operator()() {
+                ++calls;
+            }
+            int calls = 0;
+        };
+        Counter counter;
+        Common::UniqueFunction<void> func{std::ref(counter)};
+        func();
+        func();
+        REQUIRE(counter.calls == 2);
+    }
+    SECTION("Drops the result of a callable when it returns nothing") {
+        int calls = 0;
+        Common::UniqueFunction<void> func{[&calls] { return ++calls; }};
+        func();
+        REQUIRE(calls == 1);
+    }
+    SECTION("Calls a member function through its pointer") {
+        struct Receiver {
+            int Add(int amount) {
+                return total += amount;
+            }
+            int total = 0;
+        };
+        Receiver receiver;
+        Common::UniqueFunction<int, Receiver&, int> func{&Receiver::Add};
+        REQUIRE(func(receiver, 4) == 4);
+        Common::UniqueFunction<void, Receiver&, int> dropped{&Receiver::Add};
+        dropped(receiver, 5);
+        REQUIRE(receiver.total == 9);
+    }
+    SECTION("Is not constructible from what it cannot own or call") {
+        struct MoveOnly {
+            MoveOnly() = default;
+            MoveOnly(MoveOnly&&) = default;
+            MoveOnly(const MoveOnly&) = delete;
+            void operator()() const {}
+        };
+        STATIC_REQUIRE(std::is_constructible_v<Common::UniqueFunction<void>, MoveOnly>);
+        STATIC_REQUIRE_FALSE(std::is_constructible_v<Common::UniqueFunction<void>, const MoveOnly&>);
+        STATIC_REQUIRE_FALSE(std::is_constructible_v<Common::UniqueFunction<void>, int>);
+        STATIC_REQUIRE_FALSE(
+            std::is_constructible_v<Common::UniqueFunction<void>, const Common::UniqueFunction<void>&>);
+    }
+    SECTION("Takes a function by name") {
+        Common::UniqueFunction<int, int, int> func{Add};
+        REQUIRE(func(5, 4) == 9);
     }
 }

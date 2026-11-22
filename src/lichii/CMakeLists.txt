@@ -14,8 +14,12 @@ endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
+option(LICHII_USE_PENDING_RELEASE_NOTES "Show the staged What's new notes for this build" OFF)
+
 if(LICHII_TESTS)
     add_subdirectory(../tests/qt_compatibility ${CMAKE_BINARY_DIR}/qt_compatibility_tests)
+    add_subdirectory(../tests/qt_iidb ${CMAKE_BINARY_DIR}/qt_iidb_tests)
+    add_subdirectory(../tests/qt_whats_new ${CMAKE_BINARY_DIR}/qt_whats_new_tests)
 endif()
 
 add_executable(lichii
@@ -150,6 +154,8 @@ add_executable(lichii
     configuration/configure_ui.cpp
     configuration/configure_ui.h
     configuration/configure_ui.ui
+    configuration/iidb_artwork_dialog.cpp configuration/iidb_artwork_dialog.h
+    configuration/iidb_key_dialog.cpp configuration/iidb_key_dialog.h
     configuration/configure_vibration.cpp
     configuration/configure_vibration.h
     configuration/configure_vibration.ui
@@ -165,6 +171,8 @@ add_executable(lichii
     debugger/controller.cpp
     debugger/controller.h
 
+    game/artwork_image.cpp game/artwork_image.h
+    game/iidb_client.cpp game/iidb_client.h
     game/game_list.cpp game/game_list.h
     game/game_grid.cpp game/game_grid.h
 
@@ -260,13 +268,22 @@ add_executable(lichii
 )
 
 set_target_properties(lichii PROPERTIES OUTPUT_NAME "lichii")
+target_compile_definitions(lichii PRIVATE
+    LICHII_USE_PENDING_RELEASE_NOTES=$<BOOL:${LICHII_USE_PENDING_RELEASE_NOTES}>)
 
-# Shipped next to the executable: the NX2 switches a GUI launch cannot set another way. Read at
-# startup (LoadNx2Switches in main.cpp); a user copy in %APPDATA%\lichii overrides it.
-add_custom_command(TARGET lichii POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${PROJECT_SOURCE_DIR}/dist/nx2_switches.txt" "$<TARGET_FILE_DIR:lichii>/nx2_switches.txt"
-    VERBATIM)
+set(_nx2_switches "${PROJECT_SOURCE_DIR}/dist/nx2_switches.txt")
+if (APPLE)
+    set_source_files_properties("${_nx2_switches}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    target_sources(lichii PRIVATE "${_nx2_switches}")
+    add_custom_command(TARGET lichii POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -f "$<TARGET_FILE_DIR:lichii>/nx2_switches.txt"
+        VERBATIM)
+else()
+    add_custom_command(TARGET lichii POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_nx2_switches}" "$<TARGET_FILE_DIR:lichii>/nx2_switches.txt"
+        VERBATIM)
+endif()
 
 if (LICHII_CRASH_DUMPS)
     target_sources(lichii PRIVATE
@@ -405,6 +422,18 @@ if (APPLE)
     set_target_properties(lichii PROPERTIES MACOSX_BUNDLE TRUE)
     set_target_properties(lichii PROPERTIES MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/Info.plist)
 
+    if (HAS_HYPERVISOR)
+        set_target_properties(lichii PROPERTIES
+            XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${PROJECT_SOURCE_DIR}/dist/eglantine.entitlements")
+        if (NOT CMAKE_GENERATOR MATCHES "Xcode")
+            add_custom_command(TARGET lichii POST_BUILD
+                COMMAND /usr/bin/codesign --force --sign -
+                    --entitlements "${PROJECT_SOURCE_DIR}/dist/eglantine.entitlements"
+                    "$<TARGET_BUNDLE_DIR:lichii>"
+                VERBATIM)
+        endif()
+    endif()
+
     set(CMAKE_FIND_LIBRARY_SUFFIXES ".dylib")
     find_library(MOLTENVK_LIBRARY MoltenVK REQUIRED)
     message(STATUS "Using MoltenVK at ${MOLTENVK_LIBRARY}.")
@@ -431,7 +460,7 @@ target_link_libraries(lichii PRIVATE Boost::headers Qt6::Widgets Qt6::Concurrent
 # Unpacks NVIDIA's files from the Streamline release (nvidia_dlss_panel.cpp).
 target_link_libraries(lichii PRIVATE ZLIB::ZLIB)
 if (WIN32)
-    target_link_libraries(lichii PRIVATE QuaZip::QuaZip)
+    target_link_libraries(lichii PRIVATE QuaZip::QuaZip advapi32)
 endif()
 target_link_libraries(lichii PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 if (ENABLE_OPENGL)

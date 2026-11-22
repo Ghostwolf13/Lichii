@@ -9,6 +9,8 @@
 #include <cstdio>
 
 #include <bit>
+#include <chrono>
+#include <mutex>
 
 #include "dynarmic/backend/arm64/a64_address_space.h"
 #include "dynarmic/backend/arm64/a64_jitstate.h"
@@ -24,12 +26,30 @@
 
 namespace Dynarmic::Backend::Arm64 {
 
-AddressSpace::AddressSpace(std::size_t code_cache_size)
+FastmemManager::FastmemManager(ExceptionHandler& eh, std::optional<std::uintptr_t> arena)
+    : exception_handler(eh)
+{
+    if (!arena) {
+        records = std::make_shared<Records>();
+        return;
+    }
+    static std::mutex registry_mutex;
+    static ::Common::unordered_map<std::uintptr_t, std::weak_ptr<Records>> registry;
+    std::scoped_lock lock{registry_mutex};
+    auto& entry = registry[*arena];
+    records = entry.lock();
+    if (!records) {
+        records = std::make_shared<Records>();
+        entry = records;
+    }
+}
+
+AddressSpace::AddressSpace(std::size_t code_cache_size, std::optional<std::uintptr_t> fastmem_arena)
     : ir_block{IR::LocationDescriptor{0}}
     , code_cache_size(code_cache_size)
     , mem(code_cache_size)
     , code(mem.ptr(), mem.ptr())
-    , fastmem_manager(exception_handler)
+    , fastmem_manager(exception_handler, fastmem_arena)
 {
     ASSERT(code_cache_size <= 128 * 1024 * 1024 && "code_cache_size > 128 MiB not currently supported");
 
@@ -70,8 +90,13 @@ CodePtr AddressSpace::GetOrEmit(IR::LocationDescriptor descriptor) {
     if (CodePtr block_entry = Get(descriptor)) {
         return block_entry;
     }
+    const auto begin = std::chrono::steady_clock::now();
     GenerateIR(ir_block, descriptor);
     const EmittedBlockInfo block_info = Emit(std::move(ir_block));
+    ++compile_stats.blocks_compiled;
+    compile_stats.compile_ns += static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin)
+            .count());
     return block_info.entry_point;
 }
 
@@ -88,6 +113,10 @@ void AddressSpace::InvalidateBasicBlocks(const ::Common::unordered_set<IR::Locat
         // and the currently executing block may have references to itself which need to be unlinked.
         RelinkForDescriptor(descriptor, nullptr);
 
+        ++compile_stats.blocks_invalidated;
+        if (const auto info = block_infos.find(iter->second); info != block_infos.end()) {
+            compile_stats.invalidated_bytes += info->second.size;
+        }
         block_entries.erase(iter);
     }
 
@@ -95,6 +124,8 @@ void AddressSpace::InvalidateBasicBlocks(const ::Common::unordered_set<IR::Locat
 }
 
 void AddressSpace::ClearCache() {
+    ++compile_stats.cache_clears;
+    ++cache_generation;
     block_entries.clear();
     reverse_block_entries.clear();
     block_infos.clear();
@@ -108,12 +139,15 @@ std::size_t AddressSpace::GetRemainingSize() {
 
 EmittedBlockInfo AddressSpace::Emit(IR::Block block) {
     if (GetRemainingSize() < 1024 * 1024) {
+        ++compile_stats.full_clears;
         ClearCache();
     }
 
     UnprotectCodeMemory();
 
-    EmittedBlockInfo block_info = EmitArm64(code, std::move(block), GetEmitConfig(), fastmem_manager);
+    auto emit_config = GetEmitConfig();
+    emit_config.cache_generation = cache_generation;
+    EmittedBlockInfo block_info = EmitArm64(code, std::move(block), emit_config, fastmem_manager);
 
     ASSERT(block_entries.insert({block.Location(), block_info.entry_point}).second);
     ASSERT(reverse_block_entries.insert({block_info.entry_point, block.Location()}).second);
@@ -342,6 +376,7 @@ FakeCall AddressSpace::FastmemCallback(u64 host_pc) {
 
         if (patch_entry->second.recompile) {
             const auto marker = patch_entry->second.marker;
+            ++compile_stats.fastmem_recompiles;
             fastmem_manager.MarkDoNotFastmem(marker);
             InvalidateBasicBlocks({std::get<0>(marker)});
         }

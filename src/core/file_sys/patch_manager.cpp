@@ -35,6 +35,7 @@
 #include "core/loader/loader.h"
 #include "core/loader/nso.h"
 #include "core/memory/cheat_engine.h"
+#include "core/memory/dmnt_cheat_vm.h"
 
 namespace FileSys {
 namespace {
@@ -53,22 +54,60 @@ struct BuiltinPatchRecord {
     bool executable_padding = false;
 };
 
+// A hook at an instruction known only by its function: `pattern` must occur once, word-aligned,
+// in [function_offset, function_offset + function_size); its first instruction becomes a branch to
+// `cave`, whose last word becomes the branch back to the next one. A hook whose site is not found
+// is left out while the rest of its patch applies: the game keeps its own code there and the cave
+// is never reached.
+struct BuiltinPatchHook {
+    std::string_view name;
+    size_t function_offset;
+    size_t function_size;
+    std::span<const u8> pattern;
+    size_t cave_offset;
+    std::span<const u8> cave;
+};
+
+struct InstalledBuiltinHook {
+    std::string_view patch;
+    u64 site;
+    u64 cave;
+    size_t cave_size;
+};
+
+struct BuiltinPatchState {
+    size_t offset;
+    size_t size;
+};
+
 struct BuiltinPatch {
     std::string_view name;
     u64 title_id;
     std::string_view module;
     std::string_view build_id;
     std::span<const BuiltinPatchRecord> records;
-    size_t state_offset = 0;
-    size_t state_size = 0;
+    // Zero-initialized BSS ranges the routines keep their state in.
+    std::span<const BuiltinPatchState> states{};
+    std::span<const BuiltinPatchHook> hooks{};
     // Another built-in this one contains; it is skipped once this one is applied.
     std::string_view replaces{};
+    std::string_view requires_patch{};
     // Applies only with NVIDIA DLSS on at this quality in docked mode, and is not listed in
     // Add-Ons.
     std::optional<Settings::NvidiaDlssQuality> dlss_quality{};
+    // Lets the game run faster than its console frame rate (KProcess::IsFrameRateUnlocked).
+    bool unlocks_frame_rate = false;
+    // Off until checked in Add-Ons (stored as EnabledAddonKey(name)), for game options rather
+    // than fixes.
+    bool off_by_default = false;
+    bool skip_on_cheat_overlap = false;
+    // Built-ins that patch the same place: the first one applied (in this list's order) wins.
+    std::string_view group{};
+    std::string_view description{};
 };
 
 constexpr std::string_view MAX_RESOLUTION_NAME = "Max Resolution (built-in)";
+constexpr std::string_view FPS_UNLOCK_NAME = "FPS Unlock (built-in)";
 
 constexpr std::array<u8, 4> MAX_RESOLUTION_ORIGINAL{0xE8, 0x41, 0x00, 0x36};
 constexpr std::array<u8, 4> MAX_RESOLUTION_BRANCH{0x0F, 0x02, 0x00, 0x14};
@@ -248,7 +287,7 @@ constexpr std::array<u8, 48> STEP_HITSTOP_ROUTINE{
     0x40, 0xB9, 0x46, 0x32, 0xCC, 0x17,
 };
 constexpr std::array<u8, 128> STEP_SHARED_ROUTINE{
-    0xE0, 0x07, 0xBF, 0xAD, 0xCE, 0x92, 0x00, 0xB0, 0xCE, 0x01, 0x3B, 0x91, 0x0F, 0x02,
+    0xE0, 0x07, 0xBF, 0xAD, 0xCE, 0x92, 0x00, 0x90, 0xCE, 0x41, 0x38, 0x91, 0x0F, 0x02,
     0x80, 0x52, 0xD0, 0x01, 0x40, 0xF9, 0x1F, 0x02, 0x0D, 0xEB, 0x40, 0x02, 0x00, 0x54,
     0x70, 0x01, 0x00, 0xB4, 0xCE, 0x41, 0x00, 0x91, 0xEF, 0x05, 0x00, 0x71, 0x41, 0xFF,
     0xFF, 0x54, 0xCE, 0x41, 0x04, 0xD1, 0xD0, 0x01, 0x40, 0xB9, 0x0F, 0x06, 0x00, 0x11,
@@ -263,15 +302,15 @@ constexpr std::array<u8, 4> STEP_AMBIENT_ORIGINAL{
     0x7A, 0x07, 0x00, 0x11,
 };
 constexpr std::array<u8, 4> STEP_AMBIENT_HOOK{
-    0x3B, 0x1C, 0xDC, 0x14,
+    0x93, 0x1C, 0xDC, 0x14,
 };
 // add x13, x28, x1, lsl #2 ; load raw step ; bl helper ; add w26, w27, w13 ; ldr s0, [x0, #0x18] ; b 0x53F918
 constexpr std::array<u8, 60> STEP_AMBIENT_ROUTINE{
     0xED, 0x3B, 0xBD, 0xA9, 0xEF, 0x43, 0x01, 0xA9, 0xFE, 0x13, 0x00, 0xF9, 0x8D, 0x0B,
     0x01, 0x8B, 0xCE, 0x81, 0x00, 0x90, 0xCE, 0x49, 0x44, 0xF9, 0xCE, 0x01, 0x40, 0xF9,
-    0xC0, 0x11, 0x40, 0xBD, 0xD8, 0xFF, 0xFF, 0x97, 0x7A, 0x03, 0x0D, 0x0B, 0x00, 0x18,
+    0xC0, 0x11, 0x40, 0xBD, 0x80, 0xFF, 0xFF, 0x97, 0x7A, 0x03, 0x0D, 0x0B, 0x00, 0x18,
     0x40, 0xBD, 0xFE, 0x13, 0x40, 0xF9, 0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC3, 0xA8,
-    0xB8, 0xE3, 0x23, 0x17,
+    0x60, 0xE3, 0x23, 0x17,
 };
 
 // The character controller takes a tenth of its ground's velocity once the frame rate is over
@@ -295,13 +334,13 @@ constexpr std::array<u8, 4> GROUND_VELOCITY_NOP{
 // The routine replaces both fmul (0x261EB18 and 0x261EB1C) and returns to 0x261EB20, so the hook
 // guards both; the second instruction stays in place, unreached.
 constexpr std::array<u8, 8> TURN_SPEED_ORIGINAL{0x01, 0x08, 0x21, 0x1E, 0x00, 0x08, 0x28, 0x1E};
-constexpr std::array<u8, 8> TURN_SPEED_HOOK{0xCA, 0x9F, 0x58, 0x14, 0x00, 0x08, 0x28, 0x1E};
+constexpr std::array<u8, 8> TURN_SPEED_HOOK{0x21, 0xA0, 0x58, 0x14, 0x00, 0x08, 0x28, 0x1E};
 // fmov s1, #1.0 ; fcmp s8, s1 ; b.ge +0x10 ; fdiv s0, s0, s8 ; fneg s1, s0 ; b 0x261EB20 ;
 // ldr s1, [sp, #0xc] ; fmul s1, s0, s1 ; fmul s0, s0, s8 ; b 0x261EB20
 constexpr std::array<u8, 40> TURN_SPEED_ROUTINE{
     0x01, 0x10, 0x2E, 0x1E, 0x00, 0x21, 0x21, 0x1E, 0x8A, 0x00, 0x00, 0x54, 0x00, 0x18,
-    0x28, 0x1E, 0x01, 0x40, 0x21, 0x1E, 0x33, 0x60, 0xA7, 0x17, 0xE1, 0x0F, 0x40, 0xBD,
-    0x01, 0x08, 0x21, 0x1E, 0x00, 0x08, 0x28, 0x1E, 0x2F, 0x60, 0xA7, 0x17,
+    0x28, 0x1E, 0x01, 0x40, 0x21, 0x1E, 0xDC, 0x5F, 0xA7, 0x17, 0xE1, 0x0F, 0x40, 0xBD,
+    0x01, 0x08, 0x21, 0x1E, 0x00, 0x08, 0x28, 0x1E, 0xD8, 0x5F, 0xA7, 0x17,
 };
 // A movie player counts its updates with a picture shown (+0x2F8, one more each), and a cutscene
 // that plays a movie takes that count as its timeline frame: its voices, overlays and its end are
@@ -310,13 +349,13 @@ constexpr std::array<u8, 40> TURN_SPEED_ROUTINE{
 // takes whole ticks of the step through the shared helper instead, keyed by the counter's address.
 // Same site as Hookshot's movie frame count (issue 1742).
 constexpr std::array<u8, 4> MOVIE_FRAMES_ORIGINAL{0x08, 0x05, 0x00, 0x11}; // add w8, w8, #1
-constexpr std::array<u8, 4> MOVIE_FRAMES_HOOK{0xAA, 0xA8, 0x03, 0x14};     // b main+0x3C46A70
+constexpr std::array<u8, 4> MOVIE_FRAMES_HOOK{0xFF, 0xA8, 0x03, 0x14};     // b main+0x3C46BC4
 // add x13, x20, #0x2f8 ; load raw step ; bl helper ; add w8, w8, w13 ; b 0x3B5C7CC
 constexpr std::array<u8, 56> MOVIE_FRAMES_ROUTINE{
     0xED, 0x3B, 0xBD, 0xA9, 0xEF, 0x43, 0x01, 0xA9, 0xFE, 0x13, 0x00, 0xF9, 0x8D, 0xE2,
     0x0B, 0x91, 0xCE, 0x81, 0x00, 0x90, 0xCE, 0x49, 0x44, 0xF9, 0xCE, 0x01, 0x40, 0xF9,
-    0xC0, 0x11, 0x40, 0xBD, 0xBC, 0xFF, 0xFF, 0x97, 0x08, 0x01, 0x0D, 0x0B, 0xFE, 0x13,
-    0x40, 0xF9, 0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC3, 0xA8, 0x4A, 0x57, 0xFC, 0x17,
+    0xC0, 0x11, 0x40, 0xBD, 0x67, 0xFF, 0xFF, 0x97, 0x08, 0x01, 0x0D, 0x0B, 0xFE, 0x13,
+    0x40, 0xF9, 0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC3, 0xA8, 0xF5, 0x56, 0xFC, 0x17,
 };
 // Scarecrow's Song recording keeps each note's and gap's length in the elapsed counter that
 // playback (0x3293410 above) advances, and adds trunc(step) to it in two more places: while a note
@@ -339,6 +378,84 @@ constexpr std::array<u8, 40> SCARECROW_LAST_ROUTINE{
     0x17, 0x91, 0xA6, 0xFF, 0xFF, 0x97, 0xE8, 0x03, 0x0D, 0x2A, 0xFE, 0x13, 0x40, 0xF9,
     0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC3, 0xA8, 0xF4, 0x2E, 0xD9, 0x17,
 };
+// The cloth update (Havok cloth: clothes, hair, and the wind action's phase) gets its time step as
+// scale * 1/60, without the frame step, at four sites. Above 60 fps every frame still simulates
+// 1/60 s, so cloth and wind run fast at high FPS and lag behind the game at low FPS.
+// Each load now follows step / 60 up to 4/60; at step 1 the value is still exactly 1/60.
+constexpr std::array<u8, 4> CLOTH_DT_ORIGINAL_A{0x00, 0x6D, 0x46, 0xBD}; // ldr s0, [x8, #0x66c]
+constexpr std::array<u8, 4> CLOTH_DT_ORIGINAL_B{0x00, 0x01, 0x27, 0x1E}; // fmov s0, w8
+constexpr std::array<u8, 4> CLOTH_DT_ORIGINAL_D{0x02, 0x6D, 0x46, 0xBD}; // ldr s2, [x8, #0x66c]
+constexpr std::array<u8, 4> CLOTH_DT_CALL_A{0xF5, 0x01, 0xEC, 0x94};     // bl main+0x3C46B00
+constexpr std::array<u8, 4> CLOTH_DT_CALL_B{0xBF, 0x6C, 0xE6, 0x94};     // bl main+0x3C46B00
+constexpr std::array<u8, 4> CLOTH_DT_CALL_C{0xD7, 0x98, 0x40, 0x94};     // bl main+0x3C46B00
+constexpr std::array<u8, 4> CLOTH_DT_CALL_D{0xA9, 0x92, 0x40, 0x94};     // bl main+0x3C46B30
+// w17 = step / 60 bits ; select w17 when positive and within 4/60, else 4/60 ; fmov s0|s2, w17
+constexpr std::array<u8, 48> CLOTH_DT_ROUTINE_S0{
+    0xD0, 0x81, 0x00, 0x90, 0x10, 0x4A, 0x44, 0xF9, 0x10, 0x02, 0x40, 0xF9, 0x11, 0x1A, 0x40, 0xB9,
+    0x10, 0x11, 0x91, 0x52, 0x10, 0xB1, 0xA7, 0x72, 0x31, 0x06, 0x00, 0x51, 0x3F, 0x02, 0x10, 0x6B,
+    0x31, 0x32, 0x90, 0x1A, 0x31, 0x06, 0x00, 0x11, 0x20, 0x02, 0x27, 0x1E, 0xC0, 0x03, 0x5F, 0xD6,
+};
+constexpr std::array<u8, 48> CLOTH_DT_ROUTINE_S2{
+    0xD0, 0x81, 0x00, 0x90, 0x10, 0x4A, 0x44, 0xF9, 0x10, 0x02, 0x40, 0xF9, 0x11, 0x1A, 0x40, 0xB9,
+    0x10, 0x11, 0x91, 0x52, 0x10, 0xB1, 0xA7, 0x72, 0x31, 0x06, 0x00, 0x51, 0x3F, 0x02, 0x10, 0x6B,
+    0x31, 0x32, 0x90, 0x1A, 0x31, 0x06, 0x00, 0x11, 0x22, 0x02, 0x27, 0x1E, 0xC0, 0x03, 0x5F, 0xD6,
+};
+
+// Below a step of 1, Epona's jump keeps extending the JumpReady blend for slow motion.
+// Take the normal path when both steps are positive and below 1, and differ by at most
+// 8192 ULPs. Otherwise keep the game's b.pl decision. T = *[main+0x4E94B20]; T+0x10 is
+// the global frame step. The original exits do not use x9, x10 or the condition flags.
+constexpr size_t EPONA_JUMP_HOOK_OFFSET = 0x2C3AE20;
+constexpr size_t EPONA_JUMP_CAVE_OFFSET = 0x3C46FB4;
+constexpr std::array<u8, 4> EPONA_JUMP_ORIGINAL{0x45, 0x01, 0x00, 0x54};
+constexpr std::array<u8, 4> EPONA_JUMP_BRANCH{0x65, 0x30, 0x40, 0x14};
+constexpr std::array<u8, 72> EPONA_JUMP_ROUTINE{
+    0x25, 0x02, 0x00, 0x54, 0x69, 0x92, 0x00, 0xD0, 0x29, 0x91, 0x45, 0xF9,
+    0xA9, 0x01, 0x00, 0xB4, 0x2A, 0x11, 0x40, 0xB9, 0x6A, 0x01, 0x00, 0x34,
+    0x09, 0xF0, 0xA7, 0x52, 0x5F, 0x01, 0x09, 0x6B, 0x02, 0x01, 0x00, 0x54,
+    0x49, 0x01, 0x26, 0x1E, 0x3F, 0x01, 0x00, 0x71, 0xAD, 0x00, 0x00, 0x54,
+    0x29, 0x01, 0x0A, 0x6B, 0x29, 0x55, 0x89, 0x5A, 0x3F, 0x09, 0x40, 0x71,
+    0x49, 0x00, 0x00, 0x54, 0x8C, 0xCF, 0xBF, 0x17, 0x94, 0xCF, 0xBF, 0x17,
+};
+static_assert(EPONA_JUMP_CAVE_OFFSET >= 0x3C46FB0 &&
+              EPONA_JUMP_CAVE_OFFSET + EPONA_JUMP_ROUTINE.size() <= 0x3C47000);
+constexpr std::array EPONA_JUMP_RECORDS{
+    BuiltinPatchRecord{EPONA_JUMP_HOOK_OFFSET, EPONA_JUMP_BRANCH, EPONA_JUMP_ORIGINAL},
+    BuiltinPatchRecord{EPONA_JUMP_CAVE_OFFSET, EPONA_JUMP_ROUTINE, {}, true},
+};
+
+// The physics world's solver steps (port of Hookshot's fix by hckrman101, Z-TOON/Hookshot
+// 8fcc8c22b9, GPL-3.0): each update the game sets them to (int)(step * the steps of a 60 fps
+// frame + 0.001), stored at the solver's +0x2C8 (main+0x38AEB80 and main+0x38AFC10, the same code
+// in both). Below a step of 1 that is cut short, and it is 0 above 480 fps with 8 steps a frame:
+// Link slides off moving platforms, and Hookshot saw a null read in the collision code at 640-700
+// fps in the quick menu, which may be the crash after the R1 menu at ~580 fps in ZOR-455. The
+// routine rounds the count up while the step is under 1, with 0.1 of leeway for frame-time jitter,
+// and keeps it at least 1 and never below the game's. Each function's site, fcvtzs w1, s0 ;
+// str w1, [x0, #0x2c8], is found by those two instructions, as Hookshot's lifted code has them.
+constexpr size_t SOLVER_STEPS_FUNCTION_SIZE = 0x1090;
+constexpr std::array<u8, 8> SOLVER_STEPS_SITE{0x01, 0x00, 0x38, 0x1E, 0x01, 0xC8, 0x02, 0xB9};
+// fcvtzs w1, s0 ; stp x2, x3, [sp, #-16]! ; stp q2, q3, [sp, #-32]! ; mrs x2, nzcv ;
+// s2 = s0 - 0.001 (the cut float) ; to done unless 0 < s2 < s1 (the steps of a 60 fps frame) and
+// s1 <= 1000 ; w3 = ceil(s2 - 0.1), at least 1 ; w1 = max(w3, w1) ;
+// done: msr nzcv, x2 ; ldp q2, q3, [sp], #32 ; ldp x2, x3, [sp], #16 ; b back
+constexpr std::array<u8, 124> SOLVER_STEPS_ROUTINE{
+    0x01, 0x00, 0x38, 0x1E, 0xE2, 0x0F, 0xBF, 0xA9, 0xE2, 0x0F, 0xBF, 0xAD, 0x02, 0x42, 0x3B, 0xD5,
+    0xE3, 0x4D, 0x82, 0x52, 0x63, 0x50, 0xA7, 0x72, 0x62, 0x00, 0x27, 0x1E, 0x02, 0x38, 0x22, 0x1E,
+    0x48, 0x20, 0x20, 0x1E, 0x4D, 0x02, 0x00, 0x54, 0x28, 0x20, 0x20, 0x1E, 0x0D, 0x02, 0x00, 0x54,
+    0x40, 0x20, 0x21, 0x1E, 0xCA, 0x01, 0x00, 0x54, 0x43, 0x8F, 0xA8, 0x52, 0x63, 0x00, 0x27, 0x1E,
+    0x20, 0x20, 0x23, 0x1E, 0x4C, 0x01, 0x00, 0x54, 0xA3, 0x99, 0x99, 0x52, 0x83, 0xB9, 0xA7, 0x72,
+    0x63, 0x00, 0x27, 0x1E, 0x42, 0x38, 0x23, 0x1E, 0x43, 0x00, 0x28, 0x1E, 0x7F, 0x04, 0x00, 0x71,
+    0x63, 0xA4, 0x9F, 0x1A, 0x7F, 0x00, 0x01, 0x6B, 0x61, 0xC0, 0x81, 0x1A, 0x02, 0x42, 0x1B, 0xD5,
+    0xE2, 0x0F, 0xC1, 0xAC, 0xE2, 0x0F, 0xC1, 0xA8, 0x00, 0x00, 0x00, 0x14,
+};
+constexpr std::array FPS_UNLOCK_HOOKS{
+    BuiltinPatchHook{"solver steps", 0x38AEB80, SOLVER_STEPS_FUNCTION_SIZE, SOLVER_STEPS_SITE,
+                     0x3C46400, SOLVER_STEPS_ROUTINE},
+    BuiltinPatchHook{"solver steps", 0x38AFC10, SOLVER_STEPS_FUNCTION_SIZE, SOLVER_STEPS_SITE,
+                     0x3C46480, SOLVER_STEPS_ROUTINE},
+};
+
 constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x6E6CC4, DYNAMIC_FPS_CALL, DYNAMIC_FPS_ORIGINAL},
     BuiltinPatchRecord{0x3C46200, FPS_UNLOCK_ROUTINE, {}, true},
@@ -356,20 +473,257 @@ constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x2F53268, STEP_HITSTOP_HOOK, STEP_HITSTOP_ORIGINAL},
     BuiltinPatchRecord{0x3C46950, STEP_HITSTOP_ROUTINE, {}, true},
     BuiltinPatchRecord{0x53F914, STEP_AMBIENT_HOOK, STEP_AMBIENT_ORIGINAL},
-    BuiltinPatchRecord{0x3C46A00, STEP_AMBIENT_ROUTINE, {}, true},
+    BuiltinPatchRecord{0x3C46B60, STEP_AMBIENT_ROUTINE, {}, true},
     BuiltinPatchRecord{0x3C46980, STEP_SHARED_ROUTINE, {}, true},
     BuiltinPatchRecord{0x13A070, GROUND_VELOCITY_NOP, GROUND_VELOCITY_ORIGINAL_A},
     BuiltinPatchRecord{0x13D710, GROUND_VELOCITY_NOP, GROUND_VELOCITY_ORIGINAL_B},
     BuiltinPatchRecord{0x389AC2C, GROUND_VELOCITY_NOP, GROUND_VELOCITY_ORIGINAL_C},
     BuiltinPatchRecord{0x261EB18, TURN_SPEED_HOOK, TURN_SPEED_ORIGINAL},
-    BuiltinPatchRecord{0x3C46A40, TURN_SPEED_ROUTINE, {}, true},
+    BuiltinPatchRecord{0x3C46B9C, TURN_SPEED_ROUTINE, {}, true},
     BuiltinPatchRecord{0x3B5C7C8, MOVIE_FRAMES_HOOK, MOVIE_FRAMES_ORIGINAL},
-    BuiltinPatchRecord{0x3C46A70, MOVIE_FRAMES_ROUTINE, {}, true},
+    BuiltinPatchRecord{0x3C46BC4, MOVIE_FRAMES_ROUTINE, {}, true},
     BuiltinPatchRecord{0x3296B08, SCARECROW_RECORD_HOOK, SCARECROW_CUT_ORIGINAL},
     BuiltinPatchRecord{0x3C46AB0, SCARECROW_RECORD_ROUTINE, {}, true},
     BuiltinPatchRecord{0x32926C8, SCARECROW_LAST_HOOK, SCARECROW_CUT_ORIGINAL},
     BuiltinPatchRecord{0x3C46AD8, SCARECROW_LAST_ROUTINE, {}, true},
+    BuiltinPatchRecord{0x14632C, CLOTH_DT_CALL_A, CLOTH_DT_ORIGINAL_A},
+    BuiltinPatchRecord{0x2AB804, CLOTH_DT_CALL_B, CLOTH_DT_ORIGINAL_B},
+    BuiltinPatchRecord{0x2C207A4, CLOTH_DT_CALL_C, CLOTH_DT_ORIGINAL_A},
+    BuiltinPatchRecord{0x2C2208C, CLOTH_DT_CALL_D, CLOTH_DT_ORIGINAL_D},
+    BuiltinPatchRecord{0x3C46B00, CLOTH_DT_ROUTINE_S0, {}, true},
+    BuiltinPatchRecord{0x3C46B30, CLOTH_DT_ROUTINE_S2, {}, true},
 };
+
+// Convert 2 * step to game seconds. Short steps keep a per-clock fraction (x19+0x3c);
+// all other amounts retain the retail conversion, including the ordinary 60 FPS case.
+// The nine zero-filled .text alignment slots are listed for E0F3CCFA in the KaeGae
+// registry. Branches chain them without using LR. Each of eight BSS slots has an
+// address key and a double-precision fraction; a miss starts at zero.
+constexpr std::array<u8, 4> CLOCK_CARRY_ORIGINAL{0x08, 0x00, 0x38, 0x1E};
+constexpr std::array<u8, 4> CLOCK_CARRY_HOOK{0xC9, 0xBE, 0x4E, 0x14};
+constexpr std::array<u8, 28> CLOCK_CARRY_PADDING{};
+constexpr std::array<u8, 28> CLOCK_CARRY_ENTRY{
+    0x08, 0x00, 0x38, 0x1E, 0xED, 0x3B, 0xBB, 0xA9, 0xEF, 0x43, 0x01, 0xA9,
+    0xF0, 0x47, 0x01, 0xAD, 0x0D, 0x42, 0x3B, 0xD5, 0xED, 0x23, 0x00, 0xF9,
+    0x53, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> CLOCK_CARRY_RANGE_CHECK{
+    0x0D, 0x00, 0x26, 0x1E, 0xED, 0x0E, 0x00, 0x34, 0x0E, 0x00, 0xA8, 0x52,
+    0xBF, 0x01, 0x0E, 0x6B, 0x82, 0x0E, 0x00, 0x54, 0x13, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 20> CLOCK_CARRY_SETUP{
+    0x0E, 0xB9, 0x01, 0x90, 0xCE, 0x01, 0x00, 0x91, 0x6D, 0xF2, 0x00, 0x91,
+    0x0F, 0x00, 0x80, 0x52, 0xB3, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 28> CLOCK_CARRY_LOOKUP{
+    0xD0, 0x79, 0x6F, 0xF8, 0x1F, 0x02, 0x0D, 0xEB, 0xE0, 0xEB, 0xFF, 0x54,
+    0xEF, 0x05, 0x00, 0x91, 0xFF, 0x21, 0x00, 0xF1, 0x63, 0xFF, 0xFF, 0x54,
+    0x3A, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 28> CLOCK_CARRY_MISS{
+    0xCF, 0x81, 0x40, 0xB9, 0xF0, 0x05, 0x00, 0x11, 0x10, 0x0A, 0x00, 0x12,
+    0xD0, 0x81, 0x00, 0xB9, 0xCD, 0x79, 0x2F, 0xF8, 0x10, 0xE4, 0x00, 0x2F,
+    0x33, 0xFF, 0xFF, 0x17,
+};
+constexpr std::array<u8, 12> CLOCK_CARRY_HIT{
+    0xCD, 0x01, 0x01, 0x91, 0xB0, 0x79, 0x6F, 0xFC, 0x16, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> CLOCK_CARRY_CALC{
+    0x11, 0xC0, 0x22, 0x1E, 0x10, 0x2A, 0x71, 0x1E, 0x08, 0x02, 0x78, 0x1E,
+    0x11, 0x01, 0x62, 0x1E, 0x10, 0x3A, 0x71, 0x1E, 0x13, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 12> CLOCK_CARRY_STORE{
+    0xCD, 0x01, 0x01, 0x91, 0xB0, 0x79, 0x2F, 0xFC, 0x16, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> CLOCK_CARRY_DONE{
+    0xED, 0x23, 0x40, 0xF9, 0x0D, 0x42, 0x1B, 0xD5, 0xF0, 0x47, 0x41, 0xAD,
+    0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC5, 0xA8, 0x62, 0x40, 0xB1, 0x17,
+};
+constexpr std::array CLOCK_CARRY_RECORDS{
+    BuiltinPatchRecord{0x3CDFC0, CLOCK_CARRY_HOOK, CLOCK_CARRY_ORIGINAL},
+    BuiltinPatchRecord{0x177DAE4, CLOCK_CARRY_ENTRY,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_ENTRY.size())},
+    BuiltinPatchRecord{0x177DC48, CLOCK_CARRY_RANGE_CHECK,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_RANGE_CHECK.size())},
+    BuiltinPatchRecord{0x177DCA8, CLOCK_CARRY_SETUP,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_SETUP.size())},
+    BuiltinPatchRecord{0x177DF84, CLOCK_CARRY_LOOKUP,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_LOOKUP.size())},
+    BuiltinPatchRecord{0x177E084, CLOCK_CARRY_MISS,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_MISS.size())},
+    BuiltinPatchRecord{0x177DD08, CLOCK_CARRY_HIT,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_HIT.size())},
+    BuiltinPatchRecord{0x177DD68, CLOCK_CARRY_CALC,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_CALC.size())},
+    BuiltinPatchRecord{0x177DDC8, CLOCK_CARRY_STORE,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_STORE.size())},
+    BuiltinPatchRecord{0x177DE28, CLOCK_CARRY_DONE,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_DONE.size())},
+};
+constexpr std::array CLOCK_CARRY_STATE{BuiltinPatchState{0x4E9D000, 136}};
+
+// Dark's timer state at 0 and the water slots to 0x98.
+constexpr std::array DYNAMIC_FPS_STATES{BuiltinPatchState{0x4E9FE00, 0x98}};
+// Dynamic FPS's state and the sound gate at 0xA0, then the step counters on a page of their own:
+// cheats keep their flags at 0x4E9FF80..0x4E9FFB0 (#1873).
+constexpr std::array FPS_UNLOCK_STATES{
+    BuiltinPatchState{0x4E9FE00, 0xA8},
+    BuiltinPatchState{0x4E9EE00, 0x110},
+};
+
+// Text speed (port of NotRexed/Hookshot#402): main+0xAFE140 steps a text pane's letter
+// animation. At 0xAFE1B4, the start of the letters' block, s0 holds the frame time that moves
+// the letters' clock (+0x60 += rate * time) and counts down pauses (+0x58 -= time); the
+// auto-advance timer before it keeps the game's time. The site branches to a cave that scales
+// s0 (s16 is unused in the function), redoes the displaced ldrh and branches back.
+constexpr size_t TEXT_SPEED_SITE = 0xAFE1B4;
+constexpr size_t TEXT_SPEED_CAVE = 0x3C46F00;
+constexpr std::array<u8, 4> TEXT_SPEED_ORIGINAL{0x69, 0xDE, 0x40, 0x79}; // ldrh w9, [x19, #0x6e]
+constexpr std::array<u8, 4> TEXT_SPEED_BRANCH{0x53, 0x23, 0xC5, 0x14};   // b 0x3C46F00
+// ldr s16, scale ; fmul s0, s0, s16 ; ldrh w9, [x19, #0x6e] ; b 0xAFE1B8 ; scale (float)
+#define TEXT_SPEED_CAVE_CODE                                                                       \
+    0x90, 0x00, 0x00, 0x1C, 0x00, 0x08, 0x30, 0x1E, 0x69, 0xDE, 0x40, 0x79, 0xAB, 0xDC, 0x3A, 0x17
+constexpr std::array<u8, 20> TEXT_SPEED_2X_CAVE{TEXT_SPEED_CAVE_CODE, 0x00, 0x00, 0x00, 0x40};
+constexpr std::array<u8, 20> TEXT_SPEED_4X_CAVE{TEXT_SPEED_CAVE_CODE, 0x00, 0x00, 0x80, 0x40};
+// 1e6: a page at once (a frame per pause), like the game's own skip on A.
+constexpr std::array<u8, 20> TEXT_SPEED_INSTANT_CAVE{TEXT_SPEED_CAVE_CODE, 0x00, 0x24, 0x74, 0x49};
+#undef TEXT_SPEED_CAVE_CODE
+constexpr std::array TEXT_SPEED_2X_RECORDS{
+    BuiltinPatchRecord{TEXT_SPEED_SITE, TEXT_SPEED_BRANCH, TEXT_SPEED_ORIGINAL},
+    BuiltinPatchRecord{TEXT_SPEED_CAVE, TEXT_SPEED_2X_CAVE, {}, true},
+};
+constexpr std::array TEXT_SPEED_4X_RECORDS{
+    BuiltinPatchRecord{TEXT_SPEED_SITE, TEXT_SPEED_BRANCH, TEXT_SPEED_ORIGINAL},
+    BuiltinPatchRecord{TEXT_SPEED_CAVE, TEXT_SPEED_4X_CAVE, {}, true},
+};
+constexpr std::array TEXT_SPEED_INSTANT_RECORDS{
+    BuiltinPatchRecord{TEXT_SPEED_SITE, TEXT_SPEED_BRANCH, TEXT_SPEED_ORIGINAL},
+    BuiltinPatchRecord{TEXT_SPEED_CAVE, TEXT_SPEED_INSTANT_CAVE, {}, true},
+};
+
+constexpr std::array<u8, 1> YOSHI_SCENE_PROFILE_ORIGINAL{0x35};
+constexpr std::array<u8, 1> YOSHI_SCENE_PROFILE_FULL{0x19};
+constexpr std::array YOSHI_SCENE_PROFILE_RECORDS{
+    BuiltinPatchRecord{0x7582677, YOSHI_SCENE_PROFILE_FULL, YOSHI_SCENE_PROFILE_ORIGINAL},
+};
+
+// Convert elapsed time to 60 Hz steps. Short steps keep a per-web fraction (x19+0x8f8).
+// The original clamp after this conversion still limits pauses to three steps; large
+// deltas go down the original path and do not add to the pending fraction.
+// The nine zero-filled .text alignment slots are listed for E0F3CCFA in the KaeGae
+// registry. Branches chain them without using LR. Each of eight BSS slots has an
+// address key and a double-precision fraction; a miss starts at zero.
+constexpr std::array<u8, 4> WEB_CARRY_ORIGINAL{0x16, 0x00, 0x38, 0x1E};
+constexpr std::array<u8, 4> WEB_CARRY_HOOK{0x51, 0x2D, 0x45, 0x14};
+constexpr std::array<u8, 28> WEB_CARRY_PADDING{};
+constexpr std::array<u8, 28> WEB_CARRY_ENTRY{
+    0x16, 0x00, 0x38, 0x1E, 0xED, 0x3B, 0xBB, 0xA9, 0xEF, 0x43, 0x01, 0xA9,
+    0xF0, 0x47, 0x01, 0xAD, 0x0D, 0x42, 0x3B, 0xD5, 0xED, 0x23, 0x00, 0xF9,
+    0x13, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> WEB_CARRY_RANGE_CHECK{
+    0x0D, 0x00, 0x26, 0x1E, 0xED, 0x15, 0x00, 0x34, 0x0E, 0xF0, 0xA7, 0x52,
+    0xBF, 0x01, 0x0E, 0x6B, 0x82, 0x15, 0x00, 0x54, 0x13, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 20> WEB_CARRY_SETUP{
+    0xEE, 0xB8, 0x01, 0xF0, 0xCE, 0x01, 0x04, 0x91, 0x6D, 0xE2, 0x23, 0x91,
+    0x0F, 0x00, 0x80, 0x52, 0x7B, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 28> WEB_CARRY_LOOKUP{
+    0xD0, 0x79, 0x6F, 0xF8, 0x1F, 0x02, 0x0D, 0xEB, 0xE0, 0xF2, 0xFF, 0x54,
+    0xEF, 0x05, 0x00, 0x91, 0xFF, 0x21, 0x00, 0xF1, 0x63, 0xFF, 0xFF, 0x54,
+    0x3A, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 28> WEB_CARRY_MISS{
+    0xCF, 0x81, 0x40, 0xB9, 0xF0, 0x05, 0x00, 0x11, 0x10, 0x0A, 0x00, 0x12,
+    0xD0, 0x81, 0x00, 0xB9, 0xCD, 0x79, 0x2F, 0xF8, 0x10, 0xE4, 0x00, 0x2F,
+    0x6B, 0xFF, 0xFF, 0x17,
+};
+constexpr std::array<u8, 12> WEB_CARRY_HIT{
+    0xCD, 0x01, 0x01, 0x91, 0xB0, 0x79, 0x6F, 0xFC, 0x16, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> WEB_CARRY_CALC{
+    0x11, 0xC0, 0x22, 0x1E, 0x10, 0x2A, 0x71, 0x1E, 0x16, 0x02, 0x78, 0x1E,
+    0xD1, 0x02, 0x62, 0x1E, 0x10, 0x3A, 0x71, 0x1E, 0x13, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 12> WEB_CARRY_STORE{
+    0xCD, 0x01, 0x01, 0x91, 0xB0, 0x79, 0x2F, 0xFC, 0x4E, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> WEB_CARRY_DONE{
+    0xED, 0x23, 0x40, 0xF9, 0x0D, 0x42, 0x1B, 0xD5, 0xF0, 0x47, 0x41, 0xAD,
+    0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC5, 0xA8, 0xE2, 0xD1, 0xBA, 0x17,
+};
+constexpr std::array WEB_CARRY_RECORDS{
+    BuiltinPatchRecord{0x632D00, WEB_CARRY_HOOK, WEB_CARRY_ORIGINAL},
+    BuiltinPatchRecord{0x177E244, WEB_CARRY_ENTRY,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_ENTRY.size())},
+    BuiltinPatchRecord{0x177E2A8, WEB_CARRY_RANGE_CHECK,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_RANGE_CHECK.size())},
+    BuiltinPatchRecord{0x177E308, WEB_CARRY_SETUP,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_SETUP.size())},
+    BuiltinPatchRecord{0x177E504, WEB_CARRY_LOOKUP,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_LOOKUP.size())},
+    BuiltinPatchRecord{0x177E604, WEB_CARRY_MISS,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_MISS.size())},
+    BuiltinPatchRecord{0x177E368, WEB_CARRY_HIT,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_HIT.size())},
+    BuiltinPatchRecord{0x177E3C8, WEB_CARRY_CALC,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_CALC.size())},
+    BuiltinPatchRecord{0x177E428, WEB_CARRY_STORE,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_STORE.size())},
+    BuiltinPatchRecord{0x177E568, WEB_CARRY_DONE,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_DONE.size())},
+};
+constexpr std::array WEB_CARRY_STATE{BuiltinPatchState{0x4E9D100, 136}};
+
+// Keep the manager's original bit test and both targets. After the first eligible request,
+// require one guest second between requests. The hook preserves x8-x11, SP and NZCV.
+// The KaeGae registry lists these zero-filled alignment slots inside the exact build's text,
+// where the native-execution scanner can also translate the two timer reads.
+constexpr std::string_view TEXTURE_COMPACTION_NAME = "Texture heap compaction interval (built-in)";
+constexpr std::array<u8, 4> TEXTURE_COMPACTION_ORIGINAL{0x88, 0x00, 0x08, 0x36};
+constexpr std::array<u8, 4> TEXTURE_COMPACTION_HOOK{0xD3, 0x1E, 0x40, 0x14};
+constexpr std::array<u8, 28> TEXTURE_COMPACTION_PADDING{};
+constexpr std::array<u8, 28> TEXTURE_COMPACTION_ENTRY{
+    0x88, 0xDD, 0x0F, 0x36, 0xE8, 0x27, 0xBE, 0xA9, 0xEA, 0x2F, 0x01, 0xA9,
+    0x0B, 0x42, 0x3B, 0xD5, 0x08, 0xE0, 0x3B, 0xD5, 0x88, 0xDF, 0xFF, 0xB4,
+    0x93, 0xFE, 0xFF, 0x17,
+};
+constexpr std::array<u8, 24> TEXTURE_COMPACTION_SAMPLE{
+    0x29, 0xE0, 0x3B, 0xD5, 0xEA, 0xB8, 0x01, 0xF0, 0x4A, 0x01, 0x08, 0x91,
+    0x4A, 0x05, 0x40, 0xF9, 0x8A, 0x06, 0x00, 0xB4, 0x1B, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> TEXTURE_COMPACTION_ELAPSED{
+    0xEA, 0xB8, 0x01, 0xF0, 0x4A, 0x01, 0x41, 0xF9, 0x2A, 0x01, 0x0A, 0xCB,
+    0x5F, 0x01, 0x08, 0xEB, 0x83, 0x05, 0x00, 0x54, 0x13, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 20> TEXTURE_COMPACTION_RECORD{
+    0xEA, 0xB8, 0x01, 0xF0, 0x4A, 0x01, 0x08, 0x91, 0x28, 0x00, 0x80, 0xD2,
+    0x49, 0x21, 0x00, 0xA9, 0x2C, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 16> TEXTURE_COMPACTION_SKIP{
+    0x0B, 0x42, 0x1B, 0xD5, 0xEA, 0x2F, 0x41, 0xA9, 0xE8, 0x27, 0xC2, 0xA8,
+    0x45, 0xE2, 0xBF, 0x17,
+};
+constexpr std::array<u8, 16> TEXTURE_COMPACTION_ALLOW{
+    0x0B, 0x42, 0x1B, 0xD5, 0xEA, 0x2F, 0x41, 0xA9, 0xE8, 0x27, 0xC2, 0xA8,
+    0x2A, 0xE2, 0xBF, 0x17,
+};
+constexpr std::array TEXTURE_COMPACTION_RECORDS{
+    BuiltinPatchRecord{0x777278, TEXTURE_COMPACTION_HOOK, TEXTURE_COMPACTION_ORIGINAL},
+    BuiltinPatchRecord{0x177EDC4, TEXTURE_COMPACTION_ENTRY, TEXTURE_COMPACTION_PADDING},
+    BuiltinPatchRecord{0x177E828, TEXTURE_COMPACTION_SAMPLE,
+                       std::span{TEXTURE_COMPACTION_PADDING}.first<TEXTURE_COMPACTION_SAMPLE.size()>()},
+    BuiltinPatchRecord{0x177E8A8, TEXTURE_COMPACTION_ELAPSED,
+                       std::span{TEXTURE_COMPACTION_PADDING}.first<TEXTURE_COMPACTION_ELAPSED.size()>()},
+    BuiltinPatchRecord{0x177E908, TEXTURE_COMPACTION_RECORD,
+                       std::span{TEXTURE_COMPACTION_PADDING}.first<TEXTURE_COMPACTION_RECORD.size()>()},
+    BuiltinPatchRecord{0x177E968, TEXTURE_COMPACTION_SKIP,
+                       std::span{TEXTURE_COMPACTION_PADDING}.first<TEXTURE_COMPACTION_SKIP.size()>()},
+    BuiltinPatchRecord{0x177E9C8, TEXTURE_COMPACTION_ALLOW,
+                       std::span{TEXTURE_COMPACTION_PADDING}.first<TEXTURE_COMPACTION_ALLOW.size()>()},
+};
+constexpr std::array TEXTURE_COMPACTION_STATE{BuiltinPatchState{0x4E9D200, 16}};
 
 constexpr std::array BUILTIN_PATCHES{
     // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
@@ -393,16 +747,22 @@ constexpr std::array BUILTIN_PATCHES{
     // Dark's routine with a tail that also lowers the step above 60 fps, so the game keeps real
     // speed at any frame rate limit (Settings frame_rate_limit).
     BuiltinPatch{
-        .name = "FPS Unlock (built-in)",
+        .name = FPS_UNLOCK_NAME,
         .title_id = 0x0400486024DEC000,
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = FPS_UNLOCK_RECORDS,
-        .state_offset = 0x4E9FE00,
-        // Timer state at 0, the water slots to 0x98, the sound gate at 0xA0, the step counters
-        // from 0xB0.
-        .state_size = 0x1C0,
+        .states = FPS_UNLOCK_STATES,
+        .hooks = FPS_UNLOCK_HOOKS,
         .replaces = "Dynamic FPS by Dark (built-in)",
+    },
+    BuiltinPatch{
+        .name = "Epona jump (FPS Unlock)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = EPONA_JUMP_RECORDS,
+        .requires_patch = FPS_UNLOCK_NAME,
     },
     BuiltinPatch{
         .name = "Dynamic FPS by Dark (built-in)",
@@ -410,8 +770,16 @@ constexpr std::array BUILTIN_PATCHES{
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = DYNAMIC_FPS_RECORDS,
-        .state_offset = 0x4E9FE00,
-        .state_size = 0x98,
+        .states = DYNAMIC_FPS_STATES,
+    },
+    BuiltinPatch{
+        .name = "OoT day/night clock (FPS Unlock)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = CLOCK_CARRY_RECORDS,
+        .states = CLOCK_CARRY_STATE,
+        .requires_patch = FPS_UNLOCK_NAME,
     },
     // The NVIDIA DLSS quality lowers Ocarina's render resolution under Max Resolution, since DLSS
     // replaces the game's own 1440p -> 4K upscale and takes whatever the game renders.
@@ -439,7 +807,90 @@ constexpr std::array BUILTIN_PATCHES{
         .records = RENDER_ULTRA_RECORDS,
         .dlss_quality = Settings::NvidiaDlssQuality::UltraPerformance,
     },
+    // Text speed: off until checked in Add-Ons; with more than one checked, the fastest wins.
+    BuiltinPatch{
+        .name = "Text Speed Instant (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = TEXT_SPEED_INSTANT_RECORDS,
+        .off_by_default = true,
+        .group = "Text Speed",
+    },
+    BuiltinPatch{
+        .name = "Text Speed 4x (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = TEXT_SPEED_4X_RECORDS,
+        .off_by_default = true,
+        .group = "Text Speed",
+    },
+    BuiltinPatch{
+        .name = "Text Speed 2x (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = TEXT_SPEED_2X_RECORDS,
+        .off_by_default = true,
+        .group = "Text Speed",
+    },
+    BuiltinPatch{
+        .name = "Deku Tree floor web (FPS Unlock)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = WEB_CARRY_RECORDS,
+        .states = WEB_CARRY_STATE,
+        .requires_patch = FPS_UNLOCK_NAME,
+    },
+    BuiltinPatch{
+        .name = TEXTURE_COMPACTION_NAME,
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = TEXTURE_COMPACTION_RECORDS,
+        .states = TEXTURE_COMPACTION_STATE,
+        .off_by_default = true,
+        .skip_on_cheat_overlap = true,
+        .description = "Limits requests for new texture heap compaction rounds to once per guest "
+                       "second. This may increase heap fragmentation. Restart the game to apply.",
+    },
+    BuiltinPatch{
+        .name = "Full Scene Resolution with FXAA (built-in)",
+        .title_id = 0x0400245021D2C000,
+        .module = "main",
+        .build_id = "893C30E75521AFB8B23326EB6AA0E2DC",
+        .records = YOSHI_SCENE_PROFILE_RECORDS,
+        .off_by_default = true,
+        .description = "Yoshi and the Mysterious Book 2.0.0 only. Renders gameplay at full "
+                       "scene resolution with FXAA instead of temporal AA for a sharper image. "
+                       "Expect more aliasing in motion and likely higher GPU cost.",
+    },
 };
+
+} // Anonymous namespace
+
+std::string EnabledAddonKey(std::string_view name) {
+    return fmt::format("+{}", name);
+}
+
+std::vector<std::string> StoredDisabledAddons(u64 title_id, std::vector<std::string> unchecked) {
+    for (const auto& patch : BUILTIN_PATCHES) {
+        if (patch.title_id != title_id || !patch.off_by_default) {
+            continue;
+        }
+        const auto it = std::find(unchecked.begin(), unchecked.end(), patch.name);
+        if (it != unchecked.end()) {
+            unchecked.erase(it);
+        } else {
+            unchecked.push_back(EnabledAddonKey(patch.name));
+        }
+    }
+    return unchecked;
+}
+
+namespace {
 
 enum class TitleVersionFormat : u8 {
     ThreeElements, ///< vX.Y.Z
@@ -556,7 +1007,73 @@ std::string GetUpdateVersionStringFromSlot(const ContentProvider* provider, u64 
 LICHII_NO_INLINE std::optional<u64> GetParentApplicationId(const ContentProvider* provider, u64 title_id) {
     return provider == nullptr ? std::nullopt : provider->GetParentApplicationId(title_id);
 }
+std::vector<BuiltinCheatOverlap> FindBuiltinCheatOverlaps(
+    u64 title_id, std::span<const std::string_view> applied_patches,
+    std::span<const Core::Memory::CheatEntry> cheats,
+    std::span<const InstalledBuiltinHook> installed_hooks) {
+    const auto stores =
+        Core::Memory::DmntCheatVm::MainStaticStores({cheats.begin(), cheats.end()});
+    std::vector<BuiltinCheatOverlap> overlaps;
+    for (std::size_t index = 0; index < cheats.size(); ++index) {
+        const auto& cheat = cheats[index];
+        std::vector<std::pair<u64, u64>> ranges;
+        for (const auto& store : stores) {
+            if (store.cheat == index) {
+                ranges.emplace_back(store.begin, store.end);
+            }
+        }
+        if (ranges.empty()) {
+            continue;
+        }
+        std::ranges::sort(ranges);
+        std::vector<std::pair<u64, u64>> merged;
+        for (const auto& range : ranges) {
+            if (!merged.empty() && range.first <= merged.back().second) {
+                merged.back().second = std::max(merged.back().second, range.second);
+            } else {
+                merged.push_back(range);
+            }
+        }
+        const std::string name{cheat.definition.readable_name.data(),
+                               strnlen(cheat.definition.readable_name.data(),
+                                       cheat.definition.readable_name.size())};
+        for (const auto& patch : BUILTIN_PATCHES) {
+            if (patch.title_id != title_id || patch.module != "main" ||
+                std::ranges::find(applied_patches, patch.name) == applied_patches.end()) {
+                continue;
+            }
+            const auto check = [&](u64 begin, u64 end, bool state) {
+                for (const auto& [cheat_begin, cheat_end] : merged) {
+                    if (cheat_begin < end && begin < cheat_end) {
+                        overlaps.push_back({name, patch.name, state, cheat_begin, cheat_end, begin,
+                                            end});
+                    }
+                }
+            };
+            for (const auto& record : patch.records) {
+                check(record.module_offset, record.module_offset + record.bytes.size(), false);
+            }
+            for (const auto& state : patch.states) {
+                check(state.offset, state.offset + state.size, true);
+            }
+            for (const auto& hook : installed_hooks) {
+                if (hook.patch == patch.name) {
+                    check(hook.site, hook.site + sizeof(u32), false);
+                    check(hook.cave, hook.cave + hook.cave_size, false);
+                }
+            }
+        }
+    }
+    return overlaps;
+}
+
 } // Anonymous namespace
+
+std::vector<BuiltinCheatOverlap> FindBuiltinCheatOverlaps(
+    u64 title_id, std::span<const std::string_view> applied_patches,
+    std::span<const Core::Memory::CheatEntry> cheats) {
+    return FindBuiltinCheatOverlaps(title_id, applied_patches, cheats, {});
+}
 
 PatchManager::PatchManager(u64 title_id_,
                            const Service::FileSystem::FileSystemController& fs_controller_,
@@ -587,6 +1104,15 @@ std::vector<std::string> PatchManager::GetDisabledAddons() const {
     if (parent_title_id) {
         const auto& shared = Settings::values.disabled_addons[*parent_title_id];
         disabled.insert(disabled.end(), shared.begin(), shared.end());
+    }
+    if (!Settings::values.online_service_redirect.GetValue()) {
+        if (const auto load_dir = GetModificationLoadRoot()) {
+            for (const auto& mod : load_dir->GetSubdirectories()) {
+                if (mod->GetName().starts_with(HostRedirectModPrefix)) {
+                    disabled.push_back(mod->GetName());
+                }
+            }
+        }
     }
     return disabled;
 }
@@ -789,6 +1315,12 @@ std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualD
     for (const auto& subdir : patch_dirs) {
         if (std::find(disabled.cbegin(), disabled.cend(), subdir->GetName()) != disabled.cend())
             continue;
+        if (subdir->GetName().starts_with(HostRedirectModPrefix)) {
+            LOG_WARNING(Loader,
+                        "Host redirect: loading mod \"{}\", which changes how the game checks "
+                        "the servers it connects to",
+                        subdir->GetName());
+        }
 
         auto exefs_dir = FindSubdirectoryCaseless(subdir, "exefs");
         if (exefs_dir != nullptr) {
@@ -810,7 +1342,8 @@ std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualD
     return out;
 }
 
-std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::string& name) const {
+std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::string& name,
+                                       bool* frame_rate_unlocked) const {
     if (name == "main") {
         Settings::SetAppliedOcarinaRenderScale(std::nullopt);
     }
@@ -874,12 +1407,37 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
 
     const auto disabled = GetDisabledAddons();
     std::vector<std::string_view> replaced;
+    std::vector<std::string_view> applied_groups;
+    std::vector<std::string_view> applied;
+    std::vector<InstalledBuiltinHook> installed_hooks;
+    std::optional<std::vector<Core::Memory::CheatEntry>> cheats;
+    const auto load_cheats = [&]() -> const auto& {
+        if (!cheats) {
+            cheats = CreateCheatList(header.build_id);
+        }
+        return *cheats;
+    };
     for (const auto& patch : BUILTIN_PATCHES) {
         if (patch.title_id != title_id || patch.module != name) {
             continue;
         }
-        if (std::find(disabled.cbegin(), disabled.cend(), patch.name) != disabled.cend()) {
+        if (!patch.requires_patch.empty() &&
+            std::ranges::find(applied, patch.requires_patch) == applied.end()) {
+            continue;
+        }
+        if (patch.off_by_default) {
+            if (std::find(disabled.cbegin(), disabled.cend(), EnabledAddonKey(patch.name)) ==
+                disabled.cend()) {
+                continue;
+            }
+        } else if (std::find(disabled.cbegin(), disabled.cend(), patch.name) != disabled.cend()) {
             LOG_INFO(Loader, "    - Skipping \"{}\": disabled in Add-Ons", patch.name);
+            continue;
+        }
+        if (!patch.group.empty() && std::find(applied_groups.cbegin(), applied_groups.cend(),
+                                              patch.group) != applied_groups.cend()) {
+            LOG_INFO(Loader, "    - Skipping \"{}\": another {} built-in is applied", patch.name,
+                     patch.group);
             continue;
         }
         if (std::find(replaced.cbegin(), replaced.cend(), patch.name) != replaced.cend()) {
@@ -909,29 +1467,34 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
                    offset <= data.size() - sizeof(Loader::NSOHeader) &&
                    size <= data.size() - sizeof(Loader::NSOHeader) - offset;
         };
-        if (patch.state_size != 0) {
+        bool apply = true;
+        for (const auto& state : patch.states) {
             const auto& data = header.segments[2];
             const u64 bss_start = u64{data.location} + data.size;
             const u64 bss_end = bss_start + data.bss_size;
-            if (patch.state_offset < bss_start || patch.state_offset > bss_end ||
-                patch.state_size > bss_end - patch.state_offset ||
-                !fits(nso, patch.state_offset, patch.state_size) ||
-                !fits(out, patch.state_offset, patch.state_size)) {
-                LOG_WARNING(Loader, "    - Skipping \"{}\": timer state is outside BSS",
-                            patch.name);
-                continue;
+            if (state.offset < bss_start || state.offset > bss_end ||
+                state.size > bss_end - state.offset || !fits(nso, state.offset, state.size) ||
+                !fits(out, state.offset, state.size)) {
+                LOG_WARNING(Loader, "    - Skipping \"{}\": state at {}+{:#x} is outside BSS",
+                            patch.name, name, state.offset);
+                apply = false;
+                break;
             }
-            const size_t offset = sizeof(Loader::NSOHeader) + patch.state_offset;
-            if (!std::all_of(nso.begin() + offset, nso.begin() + offset + patch.state_size,
+            const size_t offset = sizeof(Loader::NSOHeader) + state.offset;
+            if (!std::all_of(nso.begin() + offset, nso.begin() + offset + state.size,
                              [](u8 byte) { return byte == 0; }) ||
-                !std::equal(nso.begin() + offset, nso.begin() + offset + patch.state_size,
+                !std::equal(nso.begin() + offset, nso.begin() + offset + state.size,
                             out.begin() + offset)) {
-                LOG_WARNING(Loader, "    - Skipping \"{}\": timer state is not zero-filled",
-                            patch.name);
-                continue;
+                LOG_WARNING(Loader,
+                            "    - Skipping \"{}\": state at {}+{:#x} is not zero-filled",
+                            patch.name, name, state.offset);
+                apply = false;
+                break;
             }
         }
-        bool apply = true;
+        if (!apply) {
+            continue;
+        }
         for (const auto& record : patch.records) {
             if (!fits(nso, record.module_offset, record.bytes.size()) ||
                 !fits(out, record.module_offset, record.bytes.size()) ||
@@ -975,17 +1538,104 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         if (!apply) {
             continue;
         }
+        if (!patch.requires_patch.empty() || patch.skip_on_cheat_overlap) {
+            const auto overlaps =
+                FindBuiltinCheatOverlaps(title_id, std::span{&patch.name, 1}, load_cheats());
+            if (!overlaps.empty()) {
+                LOG_INFO(Loader, "    - Skipping \"{}\": cheat \"{}\" overlaps the patch",
+                         patch.name, overlaps.front().cheat);
+                continue;
+            }
+        }
         for (const auto& record : patch.records) {
             std::memcpy(out.data() + sizeof(Loader::NSOHeader) + record.module_offset,
                         record.bytes.data(), record.bytes.size());
         }
+        for (const auto& hook : patch.hooks) {
+            const auto& text = header.segments[0];
+            const u64 text_end = u64{text.location} + text.size;
+            const u64 executable_end = (text_end + 0xFFF) & ~u64{0xFFF};
+            const u64 function_end =
+                (std::min<u64>)(hook.function_offset + hook.function_size, text_end);
+            size_t site = 0;
+            size_t found = 0;
+            for (u64 at = hook.function_offset;
+                 at + hook.pattern.size() <= function_end && fits(nso, at, hook.pattern.size());
+                 at += sizeof(u32)) {
+                if (std::equal(hook.pattern.begin(), hook.pattern.end(),
+                               nso.begin() + sizeof(Loader::NSOHeader) + at)) {
+                    site = at;
+                    ++found;
+                }
+            }
+            const size_t cave = sizeof(Loader::NSOHeader) + hook.cave_offset;
+            const auto untouched = [&](size_t offset, size_t size) {
+                return std::equal(nso.begin() + offset, nso.begin() + offset + size,
+                                  out.begin() + offset);
+            };
+            const char* problem = nullptr;
+            if (found != 1) {
+                problem = found == 0 ? "its instruction is not in the function"
+                                     : "its instruction is in the function more than once";
+            } else if (hook.cave_offset < text_end ||
+                       hook.cave_offset + hook.cave.size() > executable_end ||
+                       hook.cave_offset + hook.cave.size() > header.segments[1].location ||
+                       !fits(nso, hook.cave_offset, hook.cave.size()) ||
+                       !fits(out, hook.cave_offset, hook.cave.size()) ||
+                       !std::all_of(nso.begin() + cave, nso.begin() + cave + hook.cave.size(),
+                                    [](u8 byte) { return byte == 0; })) {
+                problem = "its code cave is not executable padding";
+            } else if (!fits(out, site, hook.pattern.size()) ||
+                       !untouched(cave, hook.cave.size()) ||
+                       !untouched(sizeof(Loader::NSOHeader) + site, hook.pattern.size())) {
+                problem = "a user mod already patched it";
+            }
+            if (problem != nullptr) {
+                LOG_WARNING(Loader, "    - \"{}\" leaves out its {} hook in {}+{:#x}: {}",
+                            patch.name, hook.name, name, hook.function_offset, problem);
+                continue;
+            }
+            const auto branch = [](u64 from, u64 to) {
+                const auto words = static_cast<s64>(to - from) >> 2;
+                return static_cast<u32>(0x14000000 | (words & 0x03FFFFFF));
+            };
+            const u64 back = hook.cave_offset + hook.cave.size() - sizeof(u32);
+            const u32 to_cave = branch(site, hook.cave_offset);
+            const u32 to_site = branch(back, site + sizeof(u32));
+            std::memcpy(out.data() + cave, hook.cave.data(), hook.cave.size() - sizeof(u32));
+            std::memcpy(out.data() + sizeof(Loader::NSOHeader) + back, &to_site, sizeof(u32));
+            std::memcpy(out.data() + sizeof(Loader::NSOHeader) + site, &to_cave, sizeof(u32));
+            installed_hooks.push_back({patch.name, site, hook.cave_offset, hook.cave.size()});
+            LOG_INFO(Loader, "    - \"{}\": {} hook at {}+{:#x}", patch.name, hook.name, name,
+                     site);
+        }
         LOG_INFO(Loader, "    - Applying built-in patch \"{}\" ({} records) to {}", patch.name,
                  patch.records.size(), name);
+        applied.push_back(patch.name);
         if (!patch.replaces.empty()) {
             replaced.push_back(patch.replaces);
         }
+        if (patch.unlocks_frame_rate && frame_rate_unlocked != nullptr) {
+            *frame_rate_unlocked = true;
+        }
         if (patch.dlss_quality) {
             Settings::SetAppliedOcarinaRenderScale(patch.dlss_quality);
+        }
+        if (!patch.group.empty()) {
+            applied_groups.push_back(patch.group);
+        }
+    }
+
+    if (!applied.empty()) {
+        for (const auto& overlap :
+             FindBuiltinCheatOverlaps(title_id, applied, load_cheats(), installed_hooks)) {
+            LOG_WARNING(Loader,
+                        "Cheat \"{}\" writes {}+{:#x}..{:#x}, which built-in patch \"{}\" uses "
+                        "for its {} at {}+{:#x}..{:#x}. The cheat still runs and overwrites it; "
+                        "turn one of them off if the game misbehaves",
+                        overlap.cheat, name, overlap.cheat_begin, overlap.cheat_end, overlap.patch,
+                        overlap.state ? "state" : "code", name, overlap.patch_begin,
+                        overlap.patch_end);
         }
     }
 
@@ -1004,7 +1654,14 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
     LOG_INFO(Loader, "Querying NSO patch existence for build_id={}, name={}", build_id, name);
 
     if (std::ranges::any_of(BUILTIN_PATCHES, [&](const BuiltinPatch& patch) {
-            return patch.title_id == title_id && patch.module == name;
+            if (patch.title_id != title_id || patch.module != name || patch.build_id != build_id) {
+                return false;
+            }
+            if (!patch.off_by_default) {
+                return true;
+            }
+            const auto disabled = GetDisabledAddons();
+            return std::ranges::find(disabled, EnabledAddonKey(patch.name)) != disabled.end();
         })) {
         return true;
     }
@@ -1546,7 +2203,7 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
     }
 
     for (const auto& patch : BUILTIN_PATCHES) {
-        if (patch.title_id != title_id || patch.dlss_quality) {
+        if (patch.title_id != title_id || patch.dlss_quality || !patch.requires_patch.empty()) {
             continue;
         }
         const auto is_disabled = [&](std::string_view name) {
@@ -1559,7 +2216,8 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
             return other.title_id == title_id && other.replaces == patch.name &&
                    !is_disabled(other.name);
         });
-        out.push_back({.enabled = !is_disabled(patch.name),
+        out.push_back({.enabled = patch.off_by_default ? is_disabled(EnabledAddonKey(patch.name))
+                                                       : !is_disabled(patch.name),
                        .name = std::string{patch.name},
                        .version = replacing != BUILTIN_PATCHES.end()
                                       ? fmt::format("IPS, replaced by {} when it applies",
@@ -1568,7 +2226,9 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
                        .type = PatchType::Mod,
                        .program_id = title_id,
                        .title_id = title_id,
-                       .source = PatchSource::Unknown});
+                       .source = PatchSource::Unknown,
+                       .off_by_default = patch.off_by_default,
+                       .description = std::string{patch.description}});
     }
 
     // DLC
@@ -1580,13 +2240,19 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
     const auto dlc_entries_with_origin =
         content_union->ListEntriesFilterOrigin(std::nullopt, TitleType::AOC, ContentRecordType::Data);
 
+    std::vector<u64> add_on_content;
+    add_on_content.reserve(dlc_entries_with_origin.size());
+    for (const auto& [slot, entry] : dlc_entries_with_origin) {
+        add_on_content.push_back(entry.title_id);
+    }
+    const u64 add_on_base = GetAddOnApplicationID(title_id, add_on_content);
+
     dlc_match.reserve(dlc_entries_with_origin.size());
     for (const auto& [slot, entry] : dlc_entries_with_origin) {
         const auto base_tid = GetBaseTitleID(entry.title_id);
-        const bool matches_base = base_tid == title_id;
-        if (!matches_base) {
+        if (base_tid != add_on_base) {
             LOG_DEBUG(Loader, "DLC {:016X} base {:016X} doesn't match title {:016X}",
-                      entry.title_id, base_tid, title_id);
+                      entry.title_id, base_tid, add_on_base);
             continue;
         }
 

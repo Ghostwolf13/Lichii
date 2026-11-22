@@ -78,6 +78,7 @@ struct Profile {
     /// branch chain (#619). AMD lowers the NonUniform access to a waterfall loop, which spills in
     /// vertex and mesh shaders that already use every register, so it keeps the chain.
     bool select_global_memory_buffer{};
+    bool route_single_candidates{};
 
     bool warp_size_potentially_larger_than_guest{};
 

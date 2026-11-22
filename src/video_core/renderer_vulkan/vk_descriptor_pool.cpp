@@ -31,7 +31,8 @@ bool DescriptorBankInfo::IsSuperset(const DescriptorBankInfo& subset) const noex
     return uniform_buffers >= subset.uniform_buffers && storage_buffers >= subset.storage_buffers &&
            texture_buffers >= subset.texture_buffers && image_buffers >= subset.image_buffers &&
            textures >= subset.textures && images >= subset.images &&
-           sampled_images >= subset.sampled_images && samplers >= subset.samplers;
+           sampled_images >= subset.sampled_images && samplers >= subset.samplers &&
+           update_after_bind == subset.update_after_bind;
 }
 
 template <typename Descriptors>
@@ -43,8 +44,8 @@ static u32 Accumulate(const Descriptors& descriptors) {
     return count;
 }
 
-static DescriptorBankInfo MakeBankInfo(std::span<const Shader::Info> infos) {
-    DescriptorBankInfo bank;
+static DescriptorBankInfo MakeBankInfo(std::span<const Shader::Info> infos, bool update_after_bind) {
+    DescriptorBankInfo bank{.update_after_bind = update_after_bind};
     for (const Shader::Info& info : infos) {
         bank.uniform_buffers += Accumulate(info.constant_buffer_descriptors);
         bank.storage_buffers += Accumulate(info.storage_buffers_descriptors);
@@ -82,7 +83,9 @@ static void AllocatePool(const Device& device, DescriptorBank& bank) {
     bank.pools.push_back(device.GetLogical().CreateDescriptorPool({
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .pNext = nullptr,
-        .flags = 0,
+        .flags = info.update_after_bind
+                     ? VkDescriptorPoolCreateFlags{VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT}
+                     : VkDescriptorPoolCreateFlags{},
         .maxSets = sets_per_pool,
         .poolSizeCount = static_cast<u32>(pool_cursor),
         .pPoolSizes = std::data(pool_sizes),
@@ -130,12 +133,12 @@ vk::DescriptorSets DescriptorAllocator::AllocateDescriptors(size_t count) {
 DescriptorPool::DescriptorPool(const Device& device_, Scheduler& scheduler) {}
 DescriptorPool::~DescriptorPool() = default;
 
-DescriptorAllocator DescriptorPool::Allocator(const Device& device, Scheduler& scheduler, VkDescriptorSetLayout layout, std::span<const Shader::Info> infos) {
-    return Allocator(device, scheduler, layout, MakeBankInfo(infos));
+DescriptorAllocator DescriptorPool::Allocator(const Device& device, Scheduler& scheduler, VkDescriptorSetLayout layout, std::span<const Shader::Info> infos, bool update_after_bind) {
+    return Allocator(device, scheduler, layout, MakeBankInfo(infos, update_after_bind));
 }
 
-DescriptorAllocator DescriptorPool::Allocator(const Device& device, Scheduler& scheduler, VkDescriptorSetLayout layout, const Shader::Info& info) {
-    return Allocator(device, scheduler, layout, MakeBankInfo(std::array{info}));
+DescriptorAllocator DescriptorPool::Allocator(const Device& device, Scheduler& scheduler, VkDescriptorSetLayout layout, const Shader::Info& info, bool update_after_bind) {
+    return Allocator(device, scheduler, layout, MakeBankInfo(std::array{info}, update_after_bind));
 }
 
 DescriptorAllocator DescriptorPool::Allocator(const Device& device, Scheduler& scheduler, VkDescriptorSetLayout layout, const DescriptorBankInfo& info) {

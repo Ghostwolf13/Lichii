@@ -7,11 +7,15 @@
 #include <cstring>
 
 #include "common/logging.h"
+#include "common/settings.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/program_metadata.h"
+#include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/vfs/vfs_vector.h"
@@ -51,7 +55,12 @@ void CopyDeveloperToEntry(FileSys::LanguageEntry& entry, std::string_view develo
 }
 
 std::unique_ptr<FileSys::NACP> BuildNacp(const NupContainer::PackageInfo& base,
-                                         const std::string& version) {
+                                       const std::string& version,
+                                       const std::vector<u8>& raw_control) {
+    if (!raw_control.empty()) {
+        return std::make_unique<FileSys::NACP>(
+            std::make_shared<FileSys::VectorVfsFile>(raw_control, "control.nacp"));
+    }
     const std::string& effective_title =
         !base.title_name.empty() ? base.title_name : base.source_dump;
     if (effective_title.empty() && base.localized_titles.empty() && base.publisher.empty() &&
@@ -110,30 +119,22 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
 
     const auto base_index = nup->FindBasePackage();
     const auto update_index = nup->FindBestUpdatePackage();
-
-    // The program comes from the base package; a standalone update container
-    // (SPEC §4.1.2) carries a complete patched tree and boots on its own.
-    std::optional<std::size_t> program_index;
-    std::optional<std::size_t> exefs_index;
-    if (base_index && nup->GetExeFSDir(*base_index) != nullptr) {
-        program_index = base_index;
-        exefs_index = update_index && nup->GetExeFSDir(*update_index) != nullptr
-                          ? update_index
-                          : base_index;
-    } else if (update_index && nup->GetExeFSDir(*update_index) != nullptr) {
-        LOG_INFO(Loader,
-                 "NUP container is a standalone update; booting the update program directly");
-        program_index = update_index;
-        exefs_index = update_index;
-    }
-    if (!program_index || !exefs_index) {
+    const auto selected = nup->SelectProgram();
+    if (!selected) {
         LOG_ERROR(Loader, "NUP container has no package with a usable ExeFS");
         return;
     }
 
-    const auto& program = nup->GetPackages()[*program_index];
-    base_title_id = program.title_id;
+    const auto program_index = base_index && nup->GetExeFSDir(*base_index) != nullptr
+                                   ? *base_index
+                                   : selected->package_index;
+    const auto& program = nup->GetPackages()[program_index];
+    base_title_id = selected->program_id;
+    if (selected->embedded_program_id) {
+        embedded_program_package = selected->package_index;
+    }
 
+    const auto* raw_control = &program.nacp;
     NupContainer::PackageInfo meta;
     meta.title_id = program.title_id;
     meta.title_name = program.title_name;
@@ -142,8 +143,11 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
     meta.publisher = program.publisher;
     meta.icon = program.icon;
     meta.localized_icons = program.localized_icons;
-    if (base_index && *base_index != *program_index) {
+    if (base_index && *base_index != program_index) {
         const auto& base = nup->GetPackages()[*base_index];
+        if (raw_control->empty()) {
+            raw_control = &base.nacp;
+        }
         if (!base.title_name.empty()) {
             meta.title_name = base.title_name;
         }
@@ -167,25 +171,30 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
             display_title = name;
         }
     }
-    has_program = true;
-
-    const auto exefs = nup->GetExeFSDir(*exefs_index);
-    if (exefs == nullptr || exefs->GetFile("main") == nullptr ||
-        exefs->GetFile("main.npdm") == nullptr) {
-        LOG_ERROR(Loader, "NUP package has no usable ExeFS");
-        return;
+    const auto exefs = selected->exefs;
+    if (nup->FindPackage(NupContainer::PackageKind::Addon)) {
+        FileSys::ProgramMetadata program_metadata;
+        if (program_metadata.Load(exefs->GetFile("main.npdm")) == ResultStatus::Success &&
+            program_metadata.IsSwitch2()) {
+            upgrade_program_id = program_metadata.GetTitleID();
+        }
     }
     secondary_loader = std::make_unique<AppLoader_DeconstructedRomDirectory>(exefs, true, false);
+    has_program = true;
 
     if (update_index) {
         const auto& update = nup->GetPackages()[*update_index];
+        if (update.title_id == program.title_id && !update.nacp.empty()) {
+            raw_control = &update.nacp;
+        }
         display_version = update.display_version.empty() ? DecodeVersion(update.version)
                                                          : update.display_version;
     } else {
         display_version = program.display_version.empty() ? DecodeVersion(program.version)
                                                           : program.display_version;
     }
-    nacp_file = BuildNacp(meta, display_version);
+    nacp_file = BuildNacp(meta, display_version, *raw_control);
+    display_publisher = std::move(meta.publisher);
     if (!meta.icon.empty()) {
         icon_file = std::make_shared<FileSys::VectorVfsFile>(meta.icon, "icon.dat");
     } else {
@@ -198,18 +207,6 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
             icon_file = std::make_shared<FileSys::VectorVfsFile>(
                 meta.localized_icons.front().second, "icon.dat");
         }
-    }
-
-    const auto addon_count = std::count_if(nup->GetPackages().begin(), nup->GetPackages().end(),
-                                           [](const auto& package) {
-                                               return package.kind ==
-                                                      NupContainer::PackageKind::Addon;
-                                           });
-    if (addon_count > 0) {
-        LOG_WARNING(Loader,
-                    "NUP container has {} add-on content package(s); AoC mounting is not "
-                    "supported yet",
-                    addon_count);
     }
 }
 
@@ -240,8 +237,31 @@ AppLoader::LoadResult AppLoader_NUP::Load(Kernel::KProcess& process, Core::Syste
         std::make_shared<FileSys::RomFSFactory>(*this, system.GetContentProvider(),
                                                 system.GetFileSystemController()));
 
+    // The frontend owns this provider, as for NX archives; aoc lists its add-ons and fsp opens
+    // them from it.
+    if (const auto* slot = system.GetContentProviderUnion().GetSlotProvider(
+            FileSys::ContentProviderUnionSlot::FrontendManual)) {
+        RegisterContent(*const_cast<FileSys::ManualContentProvider*>(
+            static_cast<const FileSys::ManualContentProvider*>(slot)));
+    }
+
     is_loaded = true;
     return result;
+}
+
+void AppLoader_NUP::RegisterContent(FileSys::ManualContentProvider& provider) const {
+    const auto& packages = nup->GetPackages();
+    const auto addon_count = std::ranges::count(packages, NupContainer::PackageKind::Addon,
+                                                &NupContainer::PackageInfo::kind);
+    if (addon_count == 0) {
+        return;
+    }
+    if (provider.AddEntriesFromContainer(file, true, base_title_id)) {
+        LOG_INFO(Loader, "NUP add-on content registered for {:016X}", base_title_id);
+    } else {
+        LOG_WARNING(Loader, "NUP container has {} add-on package(s), none usable by {:016X}",
+                    addon_count, base_title_id);
+    }
 }
 
 ResultStatus AppLoader_NUP::VerifyIntegrity(
@@ -260,7 +280,27 @@ ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
         update_index ? nup->GetRomFSDir(*update_index) : FileSys::VirtualDir{};
     // A standalone update carries the complete merged tree; a base+update pair
     // overlays the update onto the base (SPEC §4.1.4).
-    const auto merged = FileSys::NupContainer::MergeShadowDirs(base_romfs, update_romfs);
+    const auto native_romfs =
+        embedded_program_package
+            ? nup->GetPackageSubdirectory(*embedded_program_package, "program1/romfs")
+            : FileSys::VirtualDir{};
+    auto merged = FileSys::NupContainer::MergeShadowDirs(base_romfs, update_romfs);
+    const auto dlc_disabled = [](u64 id) {
+        const auto& disabled = Settings::values.disabled_addons;
+        const auto it = disabled.find(id);
+        return it != disabled.end() && std::ranges::find(it->second, "DLC") != it->second.end();
+    };
+    if (upgrade_program_id != 0 && !dlc_disabled(base_title_id) &&
+        !dlc_disabled(upgrade_program_id) &&
+        !dlc_disabled(FileSys::GetBaseTitleID(upgrade_program_id))) {
+        if (const auto pack = nup->FindUpgradePack(upgrade_program_id);
+            pack && (merged || native_romfs)) {
+            merged = FileSys::NupContainer::MergeShadowDirs(merged, nup->GetRomFSDir(*pack));
+            LOG_INFO(Loader, "NUP upgrade pack {:016X} layered over the program RomFS",
+                     nup->GetPackages()[*pack].title_id);
+        }
+    }
+    merged = NupContainer::MergeShadowDirs(merged, native_romfs);
     if (merged == nullptr) {
         return ResultStatus::ErrorNoRomFS;
     }
@@ -323,11 +363,42 @@ ResultStatus AppLoader_NUP::ReadControlData(FileSys::NACP& control) {
     return ResultStatus::Success;
 }
 
+ResultStatus AppLoader_NUP::ReadDeveloper(std::string& developer) {
+    if (!display_publisher.empty()) {
+        developer = display_publisher;
+        return ResultStatus::Success;
+    }
+    return AppLoader::ReadDeveloper(developer);
+}
+
+ResultStatus AppLoader_NUP::ReadDisplayVersion(std::string& version) {
+    if (!display_version.empty()) {
+        version = display_version;
+        return ResultStatus::Success;
+    }
+    return AppLoader::ReadDisplayVersion(version);
+}
+
 ResultStatus AppLoader_NUP::ReadNSOModules(Modules& modules) {
     if (secondary_loader == nullptr) {
         return ResultStatus::ErrorNotInitialized;
     }
     return secondary_loader->ReadNSOModules(modules);
+}
+
+ResultStatus AppLoader_NUP::ReadMainBuildId(Core::System& system,
+                                            std::array<u8, 0x20>& build_id) {
+    if (secondary_loader == nullptr) {
+        return ResultStatus::ErrorNotInitialized;
+    }
+    return secondary_loader->ReadMainBuildId(system, build_id);
+}
+
+std::optional<std::string> AppLoader_NUP::ReadContainerUpdateVersion() const {
+    if (!has_program || !nup->FindBestUpdatePackage()) {
+        return std::nullopt;
+    }
+    return display_version;
 }
 
 } // namespace Loader

@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/sockets/nextendo_redirect.h"
 #include "core/hle/service/sockets/nsd.h"
 
 #include "common/string_util.h"
@@ -62,16 +63,9 @@ NSD::NSD(Core::System& system_, const char* name) : ServiceFramework{system_, na
     RegisterHandlers(functions);
 }
 
-static std::string ResolveImpl(const std::string& fqdn_in) {
-    // The real implementation makes various substitutions.
-    // For now we just return the string as-is, which is good enough when not
-    // connecting to real Nintendo servers.
-    LOG_WARNING(Service, "(STUBBED) called, fqdn_in={}", fqdn_in);
-    return fqdn_in;
-}
-
 static Result ResolveCommon(const std::string& fqdn_in, std::array<char, 0x100>& fqdn_out) {
-    const auto res = ResolveImpl(fqdn_in);
+    const auto res = Nextendo::ResolveFqdn(fqdn_in);
+    LOG_DEBUG(Service, "{} resolves to {}", fqdn_in, res);
     if (res.size() >= fqdn_out.size()) {
         return ResultOverflow;
     }
@@ -103,19 +97,14 @@ void NSD::Resolve(HLERequestContext& ctx) {
 void NSD::ResolveEx(HLERequestContext& ctx) {
     const std::string fqdn_in = Common::StringFromBuffer(ctx.ReadBuffer(0));
 
-    std::array<char, 0x100> fqdn_out;
+    std::array<char, 0x100> fqdn_out{};
     const Result res = ResolveCommon(fqdn_in, fqdn_out);
 
-    if (res.IsError()) {
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(res);
-        return;
-    }
-
+    // ResolveEx reports the resolver's result as an output word, not as the IPC result.
     ctx.WriteBuffer(fqdn_out);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push(ResultSuccess);
+    rb.Push(res.raw);
 }
 
 void NSD::GetEnvironmentIdentifier(HLERequestContext& ctx) {

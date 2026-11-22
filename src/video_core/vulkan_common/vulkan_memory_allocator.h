@@ -118,12 +118,6 @@ namespace Vulkan {
         vk::Image CreateUnbackedImage(const VkImageCreateInfo &ci, bool aliased = false) const;
 
         /// Device memory to bind to part of a sparse resource. Null when there is none left.
-        /// Device-local buffers in their own VMA pool; false when it doesn't apply or failed.
-        bool CreateBufferInSeparatePool(const VkBufferCreateInfo& ci, MemoryUsage usage,
-                                        const VmaAllocationCreateInfo& alloc_ci, VkBuffer& handle,
-                                        VmaAllocation& allocation,
-                                        VmaAllocationInfo& alloc_info) const;
-
         VmaAllocation AllocateSparseMemory(const VkMemoryRequirements &requirements,
                                            VkDeviceMemory &memory, VkDeviceSize &offset) const;
 
@@ -149,6 +143,9 @@ namespace Vulkan {
         }
 
         vk::Buffer CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const;
+
+        /// CreateBuffer, but a null buffer instead of an exception when there is no memory for it.
+        vk::Buffer TryCreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const;
 
         vk::Buffer CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,
                                 VkDeviceSize min_alignment) const;
@@ -183,6 +180,17 @@ namespace Vulkan {
         VkResult AllocateImage(const VkImageCreateInfo &ci, bool dedicated, bool may_fail,
                                vk::Image &image) const;
 
+        /// CreateBuffer's fallbacks; the buffer is left null when the result is an error.
+        /// min_alignment over 1 aligns the allocation and skips the separate buffer pool.
+        VkResult AllocateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,
+                                VkDeviceSize min_alignment, vk::Buffer &buffer) const;
+
+        /// Device-local buffers in their own VMA pool; false when it doesn't apply or failed.
+        bool CreateBufferInSeparatePool(const VkBufferCreateInfo& ci,
+                                        const VmaAllocationCreateInfo& alloc_ci, VkBuffer& handle,
+                                        VmaAllocation& allocation,
+                                        VmaAllocationInfo& alloc_info) const;
+
         /// A device-local image or buffer that VMA quietly placed in host memory because the
         /// device heap was over its budget (VMA picks another memory type instead of failing).
         /// Adds its size to the bytes TakeSpilledBytes hands to the texture cache.
@@ -204,6 +212,21 @@ namespace Vulkan {
         /// Memory type of device-local buffers by usage and flags (CreateBufferInSeparatePool).
         mutable std::unordered_map<u64, u32> buffer_memory_types;
     };
+
+    /// create(), and once more after recover() when it threw for lack of memory.
+    template <typename Create, typename Recover>
+    auto CreateAfterRecovery(Create&& create, Recover&& recover) {
+        try {
+            return create();
+        } catch (const vk::Exception& exception) {
+            if (exception.GetResult() != VK_ERROR_OUT_OF_DEVICE_MEMORY &&
+                exception.GetResult() != VK_ERROR_OUT_OF_HOST_MEMORY) {
+                throw;
+            }
+            recover();
+        }
+        return create();
+    }
 
     /// Logs VMA's blocks and allocations per memory type, and each heap's budget.
     void LogMemoryStatistics(const Device& device);

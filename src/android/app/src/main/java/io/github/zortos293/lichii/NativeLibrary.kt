@@ -211,6 +211,8 @@ object NativeLibrary {
      */
     external fun getCpuBackend(): String
 
+    external fun isNceSupported(): Boolean
+
     /**
      * Returns the current GPU Driver.
      */

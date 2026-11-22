@@ -17,11 +17,13 @@
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/romfs_factory.h"
+#include "core/file_sys/vfs/vfs_layered.h"
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/service/filesystem/filesystem.h"
@@ -30,6 +32,7 @@
 
 #ifdef HAS_NCE
 #include "core/arm/nce/patcher.h"
+#include "core/device_memory.h"
 #endif
 
 #ifndef HAS_NCE
@@ -41,16 +44,13 @@ class Patcher {};
 namespace Loader {
 
 struct PatchCollection {
-    explicit PatchCollection(bool is_application_) : is_application{is_application_} {
+    explicit PatchCollection(bool is_native_) : is_native{is_native_} {
         module_patcher_indices.fill(-1);
         patchers.emplace_back();
     }
 
     std::vector<Core::NCE::Patcher>* GetPatchers() {
-        if (is_application && Settings::IsNceEnabled()) {
-            return &patchers;
-        }
-        return nullptr;
+        return is_native ? &patchers : nullptr;
     }
 
     size_t GetTotalPatchSize() const {
@@ -75,26 +75,116 @@ struct PatchCollection {
         return static_cast<s32>(patchers.size()) - 1;
     }
 
-    bool is_application;
+    bool is_native;
     std::vector<Core::NCE::Patcher> patchers;
     std::array<s32, 13> module_patcher_indices{};
 };
 
 namespace {
 
-FileSys::VirtualDir FindLooseRomFSDirectory(const FileSys::VirtualDir& parent) {
+constexpr std::array StaticModules = {"rtld",    "main",    "subsdk0", "subsdk1", "subsdk2",
+                                      "subsdk3", "subsdk4", "subsdk5", "subsdk6", "subsdk7",
+                                      "subsdk8", "subsdk9", "sdk"};
+constexpr size_t MainModuleIndex = 1;
+
+FileSys::VirtualDir FindLooseSubdirectory(const FileSys::VirtualDir& parent,
+                                          std::string_view name) {
     if (parent == nullptr) {
         return nullptr;
     }
-    if (const auto dir = parent->GetSubdirectory("romfs")) {
+    if (const auto dir = parent->GetSubdirectory(name)) {
         return dir;
     }
     for (const auto& dir : parent->GetSubdirectories()) {
-        const auto name = dir->GetName();
-        if (name.size() == 5 && std::equal(name.begin(), name.end(), "romfs", [](char a, char b) {
-                return std::tolower(static_cast<unsigned char>(a)) == b;
-            })) {
+        if (Common::ToLower(dir->GetName()) == name) {
             return dir;
+        }
+    }
+    return nullptr;
+}
+
+FileSys::VirtualDir FindLooseRomFSDirectory(const FileSys::VirtualDir& parent) {
+    return FindLooseSubdirectory(parent, "romfs");
+}
+
+FileSys::VirtualFile FindLooseRomFSFile(const FileSys::VirtualDir& exefs) {
+    if (exefs) {
+        for (const auto& file : exefs->GetFiles()) {
+            if (file->GetExtension() == "romfs") {
+                return file;
+            }
+        }
+    }
+    return nullptr;
+}
+
+FileSys::VirtualDir FindLooseExeFS(const FileSys::VirtualDir& package) {
+    if (package && package->GetFile("main")) {
+        return package;
+    }
+    if (auto exefs = FindLooseSubdirectory(package, "exefs"); exefs && exefs->GetFile("main")) {
+        return exefs;
+    }
+    return nullptr;
+}
+
+std::optional<u64> LooseUpdateVersion(const FileSys::VirtualDir& directory) {
+    const auto name = directory->GetName();
+    u64 version{};
+    const auto [end, error] = std::from_chars(name.data(), name.data() + name.size(), version);
+    if (error != std::errc{} || end != name.data() + name.size()) {
+        return std::nullopt;
+    }
+    return version;
+}
+
+std::optional<u64> ReadLooseEditionProgramId(const FileSys::VirtualDir& exefs) {
+    FileSys::ProgramMetadata metadata;
+    if (!exefs || !FileSys::IsDirectoryExeFS(exefs) ||
+        metadata.Load(exefs->GetFile("main.npdm")) != ResultStatus::Success ||
+        !metadata.IsSwitch2()) {
+        return std::nullopt;
+    }
+    const u64 id = metadata.GetTitleID();
+    if ((id >> 56) != 0x04 || id != FileSys::GetBaseTitleIDWithProgramIndex(id, 1)) {
+        return std::nullopt;
+    }
+    return id;
+}
+
+bool MatchesLooseEditionBase(const FileSys::VirtualDir& base_exefs, u64 edition_id) {
+    if (!base_exefs) {
+        return true;
+    }
+    const auto npdm = base_exefs->GetFile("main.npdm");
+    FileSys::ProgramMetadata base_metadata;
+    if (!npdm || base_metadata.Load(npdm) != ResultStatus::Success) {
+        return false;
+    }
+    const auto base_id = base_metadata.GetTitleID();
+    return base_metadata.IsSwitch2()
+               ? edition_id == base_id
+               : FileSys::GetSwitch1ApplicationID(FileSys::GetBaseTitleID(edition_id)) ==
+                     FileSys::GetSwitch1ApplicationID(FileSys::GetBaseTitleID(base_id));
+}
+
+FileSys::VirtualDir FindEditionVersion(const FileSys::VirtualDir& package) {
+    auto parent = package->GetParentDirectory();
+    if (!parent) {
+        return nullptr;
+    }
+    const auto name = Common::ToLower(package->GetName());
+    if (Common::ToLower(parent->GetName()) == "program" && (name == "1" || name == "program1")) {
+        parent = parent->GetParentDirectory();
+    } else if (name != "program1") {
+        return nullptr;
+    }
+    if (parent && LooseUpdateVersion(parent)) {
+        if (const auto storage = parent->GetParentDirectory()) {
+            const auto storage_name = Common::ToLower(storage->GetName());
+            if (storage_name == "updates" || storage_name == "upgrade") {
+                return parent;
+            }
         }
     }
     return nullptr;
@@ -106,28 +196,40 @@ FileSys::VirtualFile FindLooseRomFS(const FileSys::VirtualDir& exefs_dir) {
     if (exefs_dir == nullptr) {
         return nullptr;
     }
-    for (const auto& f : exefs_dir->GetFiles()) {
-        if (f->GetExtension() == "romfs") {
-            return f;
-        }
+    if (auto image = FindLooseRomFSFile(exefs_dir)) {
+        return image;
     }
 
-    const auto build_from = [](const FileSys::VirtualDir& romfs_dir) -> FileSys::VirtualFile {
-        if (romfs_dir == nullptr) {
-            return nullptr;
+    const auto build_from = [](std::vector<FileSys::VirtualDir> dirs,
+                               FileSys::VirtualFile base_image = nullptr) -> FileSys::VirtualFile {
+        if (dirs.empty()) {
+            return base_image;
         }
         // Building it walks every file and keeps an object for each (title 1: 206k files, ~150
         // MiB), so loaders of the same directory share one build while any of them holds it.
         static std::mutex cache_mutex;
-        static std::map<std::string, std::weak_ptr<FileSys::VfsFile>> cache;
+        static std::map<std::vector<std::string>, std::weak_ptr<FileSys::VfsFile>> cache;
+        std::vector<std::string> paths;
+        for (const auto& dir : dirs) {
+            paths.push_back(dir->GetFullPath());
+        }
+        if (base_image) {
+            paths.push_back(base_image->GetFullPath());
+        }
         std::scoped_lock lk{cache_mutex};
-        auto& cached = cache[romfs_dir->GetFullPath()];
+        auto& cached = cache[std::move(paths)];
         if (auto built = cached.lock()) {
             return built;
         }
         LOG_INFO(Loader, "Using RomFS directory next to the ExeFS");
         const auto started = std::chrono::steady_clock::now();
-        auto built = FileSys::CreateRomFS(romfs_dir);
+        if (base_image) {
+            if (auto extracted = FileSys::ExtractRomFS(base_image)) {
+                dirs.push_back(std::move(extracted));
+            }
+        }
+        auto built = FileSys::CreateRomFS(
+            FileSys::LayeredVfsDirectory::MakeLayeredDirectory(std::move(dirs)));
         LOG_INFO(Loader, "Loose RomFS image ready: elapsed_ms={}",
                  std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now() - started)
@@ -137,8 +239,39 @@ FileSys::VirtualFile FindLooseRomFS(const FileSys::VirtualDir& exefs_dir) {
     };
 
     if (const auto parent = exefs_dir->GetParentDirectory()) {
+        if (const auto version = FindEditionVersion(parent)) {
+            const auto storage = version->GetParentDirectory();
+            const auto game = storage->GetParentDirectory();
+            const auto base = FindLooseSubdirectory(game, "base");
+            if (const auto edition_id = ReadLooseEditionProgramId(exefs_dir)) {
+                FileSys::VirtualDir base_romfs;
+                FileSys::VirtualFile base_image;
+                const auto root_exefs = FindLooseExeFS(game);
+                const auto base_exefs = root_exefs ? root_exefs : FindLooseExeFS(base);
+                if (MatchesLooseEditionBase(base_exefs, *edition_id)) {
+                    base_image = FindLooseRomFSFile(base_exefs);
+                    if (!base_image) {
+                        base_romfs = FindLooseRomFSDirectory(root_exefs ? game : base);
+                        if (!base_romfs) {
+                            const auto& other = root_exefs ? base : game;
+                            if (MatchesLooseEditionBase(FindLooseExeFS(other), *edition_id)) {
+                                base_romfs = FindLooseRomFSDirectory(other);
+                            }
+                        }
+                    }
+                }
+                std::vector<FileSys::VirtualDir> tiers;
+                for (const auto& romfs : {FindLooseRomFSDirectory(parent),
+                                          FindLooseRomFSDirectory(version), base_romfs}) {
+                    if (romfs) {
+                        tiers.push_back(romfs);
+                    }
+                }
+                return build_from(std::move(tiers), std::move(base_image));
+            }
+        }
         if (const auto romfs_dir = FindLooseRomFSDirectory(parent)) {
-            return build_from(romfs_dir);
+            return build_from({romfs_dir});
         }
         // Some base dumps carry only the executable and leave every file in an update, so the
         // base has no romfs at all (Pokemon Pokopia: base/romfs does not exist, the 6.9 GB of
@@ -150,18 +283,12 @@ FileSys::VirtualFile FindLooseRomFS(const FileSys::VirtualDir& exefs_dir) {
                 FileSys::VirtualDir newest{};
                 u64 newest_version{0};
                 for (const auto& candidate : updates->GetSubdirectories()) {
-                    const std::string name = candidate->GetName();
-                    u64 version{0};
-                    const auto parsed =
-                        std::from_chars(name.data(), name.data() + name.size(), version);
                     // from_chars stops at the first non digit and still reports success, so a
                     // directory called "655360_old" or "999999.bak" would be accepted with its
                     // leading digits. Require the whole name to be the number.
-                    if (parsed.ec != std::errc{} || parsed.ptr != name.data() + name.size()) {
-                        continue;
-                    }
-                    if (version >= newest_version) {
-                        newest_version = version;
+                    if (const auto version = LooseUpdateVersion(candidate);
+                        version && *version >= newest_version) {
+                        newest_version = *version;
                         newest = candidate;
                     }
                 }
@@ -193,7 +320,7 @@ FileSys::VirtualFile FindLooseRomFS(const FileSys::VirtualDir& exefs_dir) {
                     }
                     LOG_INFO(Loader, "Base RomFS is absent, using the update RomFS (version {})",
                              newest_version);
-                    return build_from(romfs_dir);
+                    return build_from({romfs_dir});
                 }
             }
         }
@@ -282,6 +409,54 @@ std::vector<FileSys::VirtualDir> FindSidecarDirs(const FileSys::VirtualDir& exef
 
 } // namespace
 
+FileSys::VirtualFile ResolveLooseProgram(const FileSys::VirtualDir& directory) {
+    if (!directory) {
+        return nullptr;
+    }
+    FileSys::VirtualFile newest_edition;
+    u64 newest_version{};
+    const auto base = FindLooseSubdirectory(directory, "base");
+    const auto root_exefs = FindLooseExeFS(directory);
+    const auto base_exefs = root_exefs ? root_exefs : FindLooseExeFS(base);
+    for (const auto storage_name : {"updates", "upgrade"}) {
+        const auto storage = FindLooseSubdirectory(directory, storage_name);
+        if (!storage) {
+            continue;
+        }
+        for (const auto& version : storage->GetSubdirectories()) {
+            const auto number = LooseUpdateVersion(version);
+            if (!number || (newest_edition && *number <= newest_version)) {
+                continue;
+            }
+            const auto programs = FindLooseSubdirectory(version, "program");
+            for (const auto& package :
+                 {FindLooseSubdirectory(version, "program1"), FindLooseSubdirectory(programs, "1"),
+                  FindLooseSubdirectory(programs, "program1")}) {
+                const auto exefs = FindLooseSubdirectory(package, "exefs");
+                if (const auto edition_id = ReadLooseEditionProgramId(exefs);
+                    edition_id && MatchesLooseEditionBase(base_exefs, *edition_id)) {
+                    newest_edition = exefs->GetFile("main");
+                    newest_version = *number;
+                    break;
+                }
+            }
+        }
+    }
+    if (newest_edition) {
+        return newest_edition;
+    }
+    if (auto main = directory->GetFile("main")) {
+        return main;
+    }
+    for (const auto& package : {directory, base}) {
+        if (const auto exefs = FindLooseSubdirectory(package, "exefs");
+            exefs && FileSys::IsDirectoryExeFS(exefs)) {
+            return exefs->GetFile("main");
+        }
+    }
+    return nullptr;
+}
+
 AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys::VirtualFile file_, bool override_update_)
     : AppLoader(std::move(file_))
     , override_update(override_update_)
@@ -369,6 +544,48 @@ AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(
     romfs_exefs_dir = dir;
 }
 
+AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(
+    ExeFSModules modules_, FileSys::ProgramMetadata program)
+    : AppLoader(modules_[MainModuleIndex]), metadata(std::move(program)), romfs_resolved(true),
+      title_id(metadata.GetTitleID()), override_update(false), exact_modules(std::move(modules_)) {}
+
+std::pair<ResultStatus, std::unique_ptr<AppLoader_DeconstructedRomDirectory>>
+AppLoader_DeconstructedRomDirectory::CreateNativeHomeExecutable(
+    const FileSys::VirtualDir& immutable_verified_exefs) {
+    constexpr u64 NativeHomeId = 0x0400000000001000ULL;
+    if (!immutable_verified_exefs) {
+        return {ResultStatus::ErrorNoExeFS, nullptr};
+    }
+
+    const auto npdm = immutable_verified_exefs->GetFile("main.npdm");
+    if (!npdm) {
+        return {ResultStatus::ErrorMissingNPDM, nullptr};
+    }
+    FileSys::ProgramMetadata program;
+    if (const auto result = program.Load(npdm); result != ResultStatus::Success) {
+        return {result, nullptr};
+    }
+    const auto pool = program.GetPoolPartition();
+    if (!program.IsSwitch2() || program.GetTitleID() != NativeHomeId ||
+        (pool != FileSys::PoolPartition::Applet && pool != FileSys::PoolPartition::System &&
+         pool != FileSys::PoolPartition::SystemNonSecure)) {
+        return {ResultStatus::ErrorNativeHomeProgramMismatch, nullptr};
+    }
+
+    ExeFSModules modules;
+    static_assert(StaticModules.size() == modules.size());
+    for (size_t i = 0; i < modules.size(); ++i) {
+        modules[i] = immutable_verified_exefs->GetFile(StaticModules[i]);
+    }
+    if (!modules[MainModuleIndex]) {
+        return {ResultStatus::ErrorNoExeFS, nullptr};
+    }
+
+    return {ResultStatus::Success,
+            std::unique_ptr<AppLoader_DeconstructedRomDirectory>(
+                new AppLoader_DeconstructedRomDirectory(std::move(modules), std::move(program)))};
+}
+
 // Loaders made only for metadata (the game list, title lookups) never need the RomFS, and several
 // of them were alive with a whole copy each.
 const FileSys::VirtualFile& AppLoader_DeconstructedRomDirectory::LooseRomFS() {
@@ -395,8 +612,8 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
 
     // Loaded directly from a loose ExeFS (not wrapped by the NCA/NSP loaders, which register
     // the process with the filesystem controller themselves).
-    const bool standalone = dir == nullptr;
-    if (dir == nullptr) {
+    const bool standalone = !exact_modules && dir == nullptr;
+    if (standalone) {
         if (file == nullptr) {
             return {ResultStatus::ErrorNullFile, {}};
         }
@@ -404,32 +621,33 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
         dir = file->GetContainingDirectory();
     }
 
-    // Read meta to determine title ID
-    FileSys::VirtualFile npdm = dir->GetFile("main.npdm");
-    if (npdm == nullptr) {
-        return {ResultStatus::ErrorMissingNPDM, {}};
-    }
+    if (!exact_modules) {
+        FileSys::VirtualFile npdm = dir->GetFile("main.npdm");
+        if (npdm == nullptr) {
+            return {ResultStatus::ErrorMissingNPDM, {}};
+        }
 
-    const ResultStatus result = metadata.Load(npdm);
-    if (result != ResultStatus::Success) {
-        return {result, {}};
-    }
+        const ResultStatus result = metadata.Load(npdm);
+        if (result != ResultStatus::Success) {
+            return {result, {}};
+        }
 
-    if (override_update) {
-        const FileSys::PatchManager patch_manager(
-            metadata.GetTitleID(), system.GetFileSystemController(), system.GetContentProvider());
-        dir = patch_manager.PatchExeFS(dir, apply_installed_update);
-    }
+        if (override_update) {
+            const FileSys::PatchManager patch_manager(metadata.GetTitleID(),
+                                                      system.GetFileSystemController(),
+                                                      system.GetContentProvider());
+            dir = patch_manager.PatchExeFS(dir, apply_installed_update);
+        }
 
-    // Reread in case PatchExeFS affected the main.npdm
-    npdm = dir->GetFile("main.npdm");
-    if (npdm == nullptr) {
-        return {ResultStatus::ErrorMissingNPDM, {}};
-    }
+        npdm = dir->GetFile("main.npdm");
+        if (npdm == nullptr) {
+            return {ResultStatus::ErrorMissingNPDM, {}};
+        }
 
-    const ResultStatus result2 = metadata.Reload(npdm);
-    if (result2 != ResultStatus::Success) {
-        return {result2, {}};
+        const ResultStatus result2 = metadata.Reload(npdm);
+        if (result2 != ResultStatus::Success) {
+            return {result2, {}};
+        }
     }
     metadata.Print();
 
@@ -447,30 +665,35 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
         }
     }
 
-    // Enable NCE only for applications with 39-bit address space.
-    const bool is_39bit =
-        metadata.GetAddressSpaceType() == FileSys::ProgramAddressSpaceType::Is39Bit;
+#ifdef HAS_NCE
     const bool is_application = metadata.GetPoolPartition() == FileSys::PoolPartition::Application;
-    Settings::SetNceEnabled(is_39bit);
+    const bool is_39bit = metadata.Is64BitProgram() &&
+                          metadata.GetAddressSpaceType() == FileSys::ProgramAddressSpaceType::Is39Bit;
+    const u64 fastmem_base = is_application && !system.IsPoweredOn()
+                                ? system.DeviceMemory().PrepareNativeExecution(is_39bit)
+                                : 0;
+#else
+    constexpr u64 fastmem_base = 0;
+#endif
 
-    const std::array static_modules = {"rtld",    "main",    "subsdk0", "subsdk1", "subsdk2",
-                                       "subsdk3", "subsdk4", "subsdk5", "subsdk6", "subsdk7",
-                                       "subsdk8", "subsdk9", "sdk"};
+    const auto get_module = [&](size_t index) {
+        return exact_modules ? (*exact_modules)[index] : dir->GetFile(StaticModules[index]);
+    };
 
     std::size_t code_size{};
 
     // Define an nce patch context for each potential module.
-    PatchCollection patch_ctx{is_application};
+    PatchCollection patch_ctx{fastmem_base != 0};
 
     // Use the NSO module loader to figure out the code layout
-    for (size_t i = 0; i < static_modules.size(); i++) {
-        const auto& module = static_modules[i];
-        const FileSys::VirtualFile module_file{dir->GetFile(module)};
+    for (size_t i = 0; i < StaticModules.size(); i++) {
+        const auto& module = StaticModules[i];
+        const FileSys::VirtualFile module_file{get_module(i)};
         if (!module_file) {
             continue;
         }
 
-        const bool should_pass_arguments = std::strcmp(module, "rtld") == 0;
+        const bool should_pass_arguments = !exact_modules && std::strcmp(module, "rtld") == 0;
         const auto tentative_next_load_addr = AppLoader_NSO::LoadModule(
             process, system, *module_file, code_size, should_pass_arguments, false, {},
             patch_ctx.GetPatchers(), patch_ctx.GetLastIndex());
@@ -481,16 +704,6 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
         patch_ctx.SaveIndex(i);
         code_size = *tentative_next_load_addr;
     }
-
-    // Enable direct memory mapping in case of NCE.
-    const u64 fastmem_base = [&]() -> size_t {
-        if (is_application && Settings::IsNceEnabled()) {
-            auto& buffer = system.DeviceMemory().buffer;
-            buffer.EnableDirectMappedAddress();
-            return reinterpret_cast<u64>(buffer.VirtualBasePointer());
-        }
-        return 0;
-    }();
 
     // Add patch size to the total module size
     code_size += patch_ctx.GetTotalPatchSize();
@@ -508,17 +721,20 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
     modules.clear();
     const VAddr base_address{GetInteger(process.GetEntryPoint())};
     VAddr next_load_addr{base_address};
-    const FileSys::PatchManager pm{metadata.GetTitleID(), system.GetFileSystemController(),
-                                   system.GetContentProvider()};
-    for (size_t i = 0; i < static_modules.size(); i++) {
-        const auto& module = static_modules[i];
-        const FileSys::VirtualFile module_file{dir->GetFile(module)};
+    std::optional<FileSys::PatchManager> pm;
+    if (!exact_modules) {
+        pm.emplace(metadata.GetTitleID(), system.GetFileSystemController(),
+                   system.GetContentProvider());
+    }
+    for (size_t i = 0; i < StaticModules.size(); i++) {
+        const auto& module = StaticModules[i];
+        const FileSys::VirtualFile module_file{get_module(i)};
         if (!module_file) {
             continue;
         }
 
         const VAddr load_addr{next_load_addr};
-        const bool should_pass_arguments = std::strcmp(module, "rtld") == 0;
+        const bool should_pass_arguments = !exact_modules && std::strcmp(module, "rtld") == 0;
         const auto tentative_next_load_addr = AppLoader_NSO::LoadModule(
             process, system, *module_file, load_addr, should_pass_arguments, true, pm,
             patch_ctx.GetPatchers(), patch_ctx.GetIndex(i));
@@ -607,6 +823,34 @@ ResultStatus AppLoader_DeconstructedRomDirectory::ReadNSOModules(Modules& out_mo
 
     out_modules = this->modules;
     return ResultStatus::Success;
+}
+
+ResultStatus AppLoader_DeconstructedRomDirectory::ReadMainBuildId(
+    Core::System& system, std::array<u8, 0x20>& build_id) {
+    if (exact_modules) {
+        return AppLoader_NSO(file).ReadMainBuildId(system, build_id);
+    }
+    auto exefs = dir ? dir : (file ? file->GetContainingDirectory() : nullptr);
+    if (!exefs) {
+        return ResultStatus::ErrorNoExeFS;
+    }
+    if (override_update) {
+        auto program_id = title_id;
+        if (const auto npdm = exefs->GetFile("main.npdm")) {
+            FileSys::ProgramMetadata program;
+            if (program.Load(npdm) == ResultStatus::Success) {
+                program_id = program.GetTitleID();
+            }
+        }
+        const FileSys::PatchManager manager(program_id, system.GetFileSystemController(),
+                                            system.GetContentProvider());
+        exefs = manager.PatchExeFS(exefs, apply_installed_update);
+    }
+    const auto main = exefs ? exefs->GetFile("main") : nullptr;
+    if (!main) {
+        return ResultStatus::ErrorNoExeFS;
+    }
+    return AppLoader_NSO(main).ReadMainBuildId(system, build_id);
 }
 
 } // namespace Loader

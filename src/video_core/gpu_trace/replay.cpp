@@ -350,7 +350,7 @@ bool Replayer::BringUp(std::string& error) {
         const auto& header = state.As<StateRecord>();
         const auto it = channels.find(header.channel);
         auto* const channel = it != channels.end() ? it->second.get() : nullptr;
-        if (!StateAccess::Restore(state, channel, any_channel, syncpoints)) {
+        if (!StateAccess::Restore(state, reader.Version(), channel, any_channel, syncpoints)) {
             error = fmt::format("state record (kind {}, channel {}) doesn't fit this build",
                                 header.kind, header.channel);
             return false;

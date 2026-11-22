@@ -8,9 +8,7 @@
 
 namespace Service::Set {
 
-SystemSettings DefaultSystemSettings() {
-    SystemSettings settings{};
-
+void InitializeDefaultSystemSettings(SystemSettings& settings) {
     settings.version = 0x140000;
     settings.flags = 7;
 
@@ -69,8 +67,6 @@ SystemSettings DefaultSystemSettings() {
     if (key_code != language_to_layout.end()) {
         settings.keyboard_layout = key_code->second;
     }
-
-    return settings;
 }
 
 } // namespace Service::Set

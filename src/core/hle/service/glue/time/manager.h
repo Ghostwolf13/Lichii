@@ -6,6 +6,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
 
 #include "common/common_types.h"
@@ -28,7 +29,7 @@ class StaticService;
 namespace Service::Glue::Time {
 class TimeManager {
 public:
-    explicit TimeManager(Core::System& system);
+    explicit TimeManager(Core::System& system, std::shared_ptr<TimeZoneBinary> isolated_time_zone);
     ~TimeManager() = default;
 
     std::shared_ptr<Service::Set::ISystemSettingsServer> m_set_sys;
@@ -37,7 +38,7 @@ public:
     std::shared_ptr<Service::PSC::Time::StaticService> m_time_sm{};
     StandardSteadyClockResource m_steady_clock_resource;
     FileTimestampWorker m_file_timestamp_worker;
-    TimeZoneBinary m_time_zone_binary;
+    const std::shared_ptr<TimeZoneBinary> m_time_zone_binary;
     TimeWorker m_worker;
 
 private:

@@ -60,6 +60,11 @@ struct NcaCompressionConfiguration {
 };
 static_assert(std::is_trivial_v<NcaCompressionConfiguration>);
 
+enum class NcaHeaderSignaturePolicy {
+    AllowUnverified,
+    RequireVerified,
+};
+
 constexpr inline s32 KeyAreaEncryptionKeyCount =
     NcaCryptoConfiguration::KeyAreaEncryptionKeyIndexCount *
     NcaCryptoConfiguration::KeyGenerationMax;
@@ -100,7 +105,9 @@ public:
     ~NcaReader();
 
     Result Initialize(VirtualFile base_storage, const NcaCryptoConfiguration& crypto_cfg,
-                      const NcaCompressionConfiguration& compression_cfg);
+                      const NcaCompressionConfiguration& compression_cfg,
+                      NcaHeaderSignaturePolicy signature_policy =
+                          NcaHeaderSignaturePolicy::AllowUnverified);
 
     VirtualFile GetSharedBodyStorage();
     u32 GetMagic() const;
@@ -153,7 +160,7 @@ private:
     bool m_is_software_aes_prioritized;
     bool m_is_available_sw_key;
     NcaHeader::EncryptionType m_header_encryption_type;
-    bool m_is_header_sign1_signature_valid;
+    bool m_is_header_sign1_signature_valid{};
     GetDecompressorFunction m_get_decompressor;
 };
 

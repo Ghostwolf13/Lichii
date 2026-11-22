@@ -60,12 +60,16 @@ enum class ImageFlagBits : u32 {
     /// device memory when the guest memory under it can hold data (Image::BindTiles), and only
     /// the parts written are uploaded.
     SparseTiles = 1 << 23,
+    /// Its own address space mapped it to more than one device range when it was made (with
+    /// Sparse only when the texture says so).
+    NonContiguous = 1 << 24,
+    GuestReplacedContents = 1 << 25,
     /// A render target its lookup created (Switch 2 titles); deleted early once it goes unused
     /// while the cache is over its expected size (TextureCache::EvictDeadRenderTargets).
-    TransientTarget = 1 << 24,
+    TransientTarget = 1 << 26,
     /// Made over pages an early-deleted render target left; cleared at its first sampling, which
     /// tells whether the game read those pages back (TextureCache::FillImageViews).
-    EvictBorn = 1 << 25,
+    EvictBorn = 1 << 27,
 };
 DECLARE_ENUM_FLAG_OPERATORS(ImageFlagBits)
 
@@ -139,6 +143,16 @@ struct ImageBase {
     /// At least the newest modification_tick among aliased_images (raised when an alias's tick is
     /// set or an alias is added): SynchronizeAliases has nothing to do while it is not newer.
     u64 newest_alias_tick = 0;
+    /// The cache's modification counter when the image took its contents from guest memory or
+    /// other images (made, or uploaded again), or a clear replaced all of them: write-backs noted
+    /// after it are bytes it holds older copies of, unless it rendered over them itself (which the
+    /// cache can't tell from a render elsewhere in it).
+    u64 load_tick = 0;
+    /// frame_tick + 1 of the first frame a render pass other than a clear wrote it, or 0.
+    u64 first_written_frame = 0;
+    /// Levels whose every layer a shader last wrote through a storage view. Any other GPU write
+    /// (render pass, clear, copy, alias copy) and an upload from guest memory clear them.
+    u32 storage_written_levels = 0;
     size_t lru_index = SIZE_MAX;
 
     std::array<u32, MAX_MIP_LEVELS> mip_level_offsets{};
@@ -182,9 +196,18 @@ struct ImageAllocBase {
 
 bool AddImageAlias(ImageBase& lhs, ImageBase& rhs, ImageId lhs_id, ImageId rhs_id);
 
+/// Records a shader's storage write through `range`, given the levels written before it: a write
+/// over every layer adds its levels, a partial one keeps what the other layers held.
+void NoteStorageWrite(ImageBase& image, u32 levels_before, const SubresourceRange& range) noexcept;
+
+/// Whether every level `range` covers holds a shader's storage writes and nothing newer.
+[[nodiscard]] bool HoldsStorageWrites(const ImageBase& image,
+                                      const SubresourceRange& range) noexcept;
+
 /// Sets an image's modification tick and raises its aliases' newest_alias_tick to it.
 template <typename Images>
 void SetModificationTick(Images& images, ImageBase& image, u64 tick) {
+    image.flags &= ~ImageFlagBits::GuestReplacedContents;
     image.modification_tick = tick;
     for (const AliasedImage& alias : image.aliased_images) {
         u64& newest = images[alias.id].newest_alias_tick;

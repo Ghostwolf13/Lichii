@@ -18,6 +18,7 @@
 
 namespace Kernel {
 class KernelCore;
+class KProcess;
 }
 
 namespace Common {
@@ -54,7 +55,7 @@ public:
         gpu_barrier->Sync();
     }
 
-    void Initialize();
+    bool Initialize(Kernel::KProcess* process = nullptr);
     void Shutdown();
 
     std::function<void()> GetGuestActivateFunc(Kernel::KernelCore& kernel) {

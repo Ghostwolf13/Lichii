@@ -151,7 +151,7 @@ public:
         // clang-format off
         static const FunctionInfo functions[] = {
             {1, nullptr, "ListenAll"},
-            {2, nullptr, "ListenTo"},
+            {2, C<&INpnsUser::ListenTo>, "ListenTo"},
             {3, nullptr, "Receive"},
             {4, nullptr, "ReceiveRaw"},
             {5, C<&INpnsUser::GetReceiveEvent>, "GetReceiveEvent"},
@@ -178,6 +178,11 @@ public:
     }
 
 private:
+    Result ListenTo(u64 program_id) {
+        LOG_WARNING(Service_NPNS, "(STUBBED) called, program_id={:016X}", program_id);
+        R_SUCCEED();
+    }
+
     Result ListenToByName(InBuffer<BufferAttr_HipcMapAlias> name_buffer) {
         const std::string name(reinterpret_cast<const char*>(name_buffer.data()), name_buffer.size());
         LOG_DEBUG(Service_NPNS, "called, name={}", name);

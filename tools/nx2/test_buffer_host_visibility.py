@@ -13,7 +13,7 @@ from pathlib import Path
 import shlex
 import subprocess
 
-from test_fsr3_shaders import VulkanTest
+from test_frame_gen_shaders import VulkanTest
 from vulkan import *
 
 

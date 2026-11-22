@@ -47,11 +47,11 @@ struct DlssgSession {
 }
 
 /// The frame generation that runs: the chosen type, except that NVIDIA DLSS Frame Generation
-/// gives way to the built-in optical flow interpolation (FSR3) while it is blocked.
+/// gives way to Lichii Optical Flow Frame Generation while it is blocked.
 [[nodiscard]] constexpr Settings::FrameGenType ActiveFrameGenType(Settings::FrameGenType chosen,
                                                                   DlssgBlock block) {
     if (chosen == Settings::FrameGenType::NvidiaDlssG && block != DlssgBlock::None) {
-        return Settings::FrameGenType::Fsr3;
+        return Settings::FrameGenType::OpticalFlow;
     }
     return chosen;
 }

@@ -27,6 +27,11 @@
 namespace Core::Crypto {
 
 NczCache::NczCache() {
+    Open();
+}
+
+bool NczCache::Open() {
+    Close();
     std::error_code ec;
 #ifdef __ANDROID__
     // Android sets no temporary directory variable, and the fallback isn't writable by apps.
@@ -37,13 +42,13 @@ NczCache::NczCache() {
     const auto directory = std::filesystem::temp_directory_path(ec);
 #endif
     if (ec) {
-        return;
+        return false;
     }
 #ifdef _WIN32
     PSECURITY_DESCRIPTOR descriptor{};
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;OW)", SDDL_REVISION_1,
                                                               &descriptor, nullptr)) {
-        return;
+        return false;
     }
     SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
     HANDLE handle = INVALID_HANDLE_VALUE;
@@ -66,12 +71,12 @@ NczCache::NczCache() {
     }
     LocalFree(descriptor);
     if (handle == INVALID_HANDLE_VALUE) {
-        return;
+        return false;
     }
     const int fd = _open_osfhandle(reinterpret_cast<intptr_t>(handle), _O_BINARY | _O_RDWR);
     if (fd == -1) {
         CloseHandle(handle);
-        return;
+        return false;
     }
     file = _fdopen(fd, "w+b");
     if (!file) {
@@ -83,14 +88,14 @@ NczCache::NczCache() {
     name.push_back('\0');
     const int fd = mkstemp(name.data());
     if (fd == -1) {
-        return;
+        return false;
     }
     const bool private_file =
         fchmod(fd, S_IRUSR | S_IWUSR) == 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0;
     const bool unlinked = unlink(name.data()) == 0;
     if (!private_file || !unlinked) {
         close(fd);
-        return;
+        return false;
     }
     file = fdopen(fd, "w+b");
     if (!file) {
@@ -104,11 +109,17 @@ NczCache::NczCache() {
             file = nullptr;
         }
     }
+    return file != nullptr;
 }
 
 NczCache::~NczCache() {
+    Close();
+}
+
+void NczCache::Close() {
     if (file) {
         std::fclose(file);
+        file = nullptr;
     }
 }
 

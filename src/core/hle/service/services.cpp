@@ -5,6 +5,9 @@
 
 #include "core/hle/service/services.h"
 
+#include <functional>
+#include <utility>
+
 #include "core/hle/service/acc/acc.h"
 #include "core/hle/service/am/am.h"
 #include "core/hle/service/aoc/addon_content_manager.h"
@@ -71,10 +74,15 @@
 namespace Service {
 
 Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system,
-                   std::stop_token token) {
+                   std::stop_token token,
+                   std::shared_ptr<const SystemDataView> isolated_system_data,
+                   std::shared_ptr<Glue::Time::TimeZoneBinary> isolated_time_zone,
+                   u64 isolated_process_id) {
     auto& kernel = system.Kernel();
 
-    system.GetFileSystemController().CreateFactories(*system.GetFilesystem(), false);
+    if (!isolated_system_data && isolated_process_id == 0) {
+        system.GetFileSystemController().CreateFactories(*system.GetFilesystem(), false);
+    }
 
     // Just a quick C++ lesson
     // Capturing lambdas will silently create new variables for the objects referenced via <ident> = <expr>
@@ -90,8 +98,10 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
     // audio and vi wait in sm for services from the guest cores: they are kept, and joined before
     // the service manager is destroyed (see ~Services).
     audio_worker = kernel.RunOnHostCoreProcess("audio", [&system] { Audio::LoopProcess(system); });
+    kernel.RunOnHostCoreProcess("FS", [&system, isolated_system_data, isolated_process_id] {
+        FileSystem::LoopProcess(system, isolated_system_data, isolated_process_id);
+    }).detach();
     for (auto const& e : std::vector<std::pair<std::string_view, void (*)(Core::System&)>>{
-        {"FS",         &FileSystem::LoopProcess},
         {"ldn",        &LDN::LoopProcess},
         {"nvservices", &Nvidia::LoopProcess},
         {"bsdsocket",  &Sockets::LoopProcess},
@@ -99,7 +109,8 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
         kernel.RunOnHostCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); }).detach();
     vi_worker = kernel.RunOnHostCoreProcess("vi", [&, token] { VI::LoopProcess(system, token); });
     // Avoid cold clones of lambdas -- succintly
-    for (auto const& e : std::vector<std::pair<std::string_view, void (*)(Core::System&)>>{
+    for (auto& [name, run] :
+         std::vector<std::pair<std::string_view, std::function<void(Core::System&)>>>{
         {"sm",         &SM::LoopProcess},
         {"account",    &Account::LoopProcess},
         {"am",         &AM::LoopProcess},
@@ -116,9 +127,13 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
         {"fatal",      &Fatal::LoopProcess},
         {"fgm",        &FGM::LoopProcess},
         {"friends",    &Friend::LoopProcess},
-        {"settings",   &Set::LoopProcess},
+        {"settings",   [isolated_system_data](Core::System& s) {
+                           Set::LoopProcess(s, isolated_system_data);
+                       }},
         {"psc",        &PSC::LoopProcess},
-        {"glue",       &Glue::LoopProcess},
+        {"glue",       [time_zone = std::move(isolated_time_zone)](Core::System& s) {
+                           Glue::LoopProcess(s, time_zone);
+                       }},
         {"grc",        &GRC::LoopProcess},
         {"hid",        &HID::LoopProcess},
         {"jit",        &JIT::LoopProcess},
@@ -137,7 +152,9 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
         {"nim",        &NIM::LoopProcess},
         {"nvnflinger", &Nvnflinger::LoopProcess},
         {"npns",       &NPNS::LoopProcess},
-        {"ns",         &NS::LoopProcess},
+        {"ns",         [isolated_system_data](Core::System& s) {
+                           NS::LoopProcess(s, isolated_system_data.get());
+                       }},
         {"olsc",       &OLSC::LoopProcess},
         {"omm",        &OMM::LoopProcess},
         {"pcie",       &PCIe::LoopProcess},
@@ -155,7 +172,8 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
         {"i2c",        &I2C::LoopProcess},
         {"gpio",        &GPIO::LoopProcess},
     })
-        kernel.RunOnGuestCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); });
+        kernel.RunOnGuestCoreProcess(std::string(name),
+                                     [&system, loop = std::move(run)] { loop(system); });
 }
 
 } // namespace Service

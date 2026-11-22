@@ -44,6 +44,17 @@ include directory. The enabled tracker was syntax-checked against these
 real SDK headers on Linux; a Windows build and runtime check are still
 required.
 
+## Build in CI
+
+Run release-binaries by hand with `nsight_aftermath` on and `publish_release`
+off. The Windows builds fetch the SDK above, check its SHA256, keep only
+`include/` and configure with `-DENABLE_NSIGHT_AFTERMATH=ON`. Their
+artifacts are named `lichii-windows-x86_64[-pgo]-aftermath-<sha>` and hold
+no NVIDIA files, so the tester puts `GFSDK_Aftermath_Lib.x64.dll` from his
+own SDK download beside `lichii.exe`. Without it the log shows
+`Failed to load Nsight Aftermath DLL` and no dumps are written. The run
+refuses to publish a release.
+
 ## Assemble the private portable launch
 
 Place the unmodified `GFSDK_Aftermath_Lib.x64.dll` beside `lichii.exe` in

@@ -330,6 +330,7 @@ void NPad::InitNewlyAddedController(Kernel::KernelCore& kernel, u64 aruid, Core:
         shared_memory->system_properties.is_charging_joy_left.Assign(
             battery_level.left.is_charging);
         shared_memory->applet_footer_type = AppletFooterUiType::JoyLeftHorizontal;
+        shared_memory->assignment_mode = NpadJoyAssignmentMode::Single;
         shared_memory->sixaxis_left_properties.is_newly_assigned.Assign(1);
         break;
     case Core::HID::NpadStyleIndex::JoyconRight:
@@ -345,6 +346,7 @@ void NPad::InitNewlyAddedController(Kernel::KernelCore& kernel, u64 aruid, Core:
         shared_memory->system_properties.is_charging_joy_right.Assign(
             battery_level.right.is_charging);
         shared_memory->applet_footer_type = AppletFooterUiType::JoyRightHorizontal;
+        shared_memory->assignment_mode = NpadJoyAssignmentMode::Single;
         shared_memory->sixaxis_right_properties.is_newly_assigned.Assign(1);
         break;
     case Core::HID::NpadStyleIndex::GameCube:

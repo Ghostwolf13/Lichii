@@ -9,8 +9,11 @@ namespace Core {
 class System;
 }
 
-namespace Service::NS {
+namespace Service {
+class SystemDataView;
 
-void LoopProcess(Core::System& system);
+namespace NS {
+void LoopProcess(Core::System& system, const SystemDataView* isolated_system_data);
 
-} // namespace Service::NS
+} // namespace NS
+} // namespace Service

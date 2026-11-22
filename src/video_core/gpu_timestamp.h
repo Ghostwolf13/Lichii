@@ -4,6 +4,7 @@
 #pragma once
 
 #include "common/common_types.h"
+#include "common/game_presets.h"
 #include "common/settings_enums.h"
 
 namespace Tegra {
@@ -18,6 +19,15 @@ namespace Tegra {
     default:
         return 1;
     }
+}
+
+/// Switch 2 titles that keep the pre-nanosecond timestamps (GPU ticks divided by the clock setting,
+/// the non-ampere path below). Mario Kart World sizes its dynamic resolution from GPU timestamps:
+/// with nanoseconds the emulator's GPU latency reads as a nearly full frame budget, the resolution
+/// changes every few frames, and each change recreates and re-uploads its render targets (~20 fps
+/// instead of ~28-30 on an RX 6700S, 16x the texture cache image creations).
+[[nodiscard]] constexpr bool UsesLegacyAmpereTimestamps(u64 program_id) {
+    return program_id == Settings::MarioKartWorldProgramId;
 }
 
 /// The last present's CoreTiming time and the GPU clock latched with it, packed into one word so

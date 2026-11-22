@@ -23,6 +23,7 @@
 #include <QGuiApplication>
 #include <QStringLiteral>
 #include "core/frontend/emu_window.h"
+#include "qt_common/util/game.h"
 #include "qt_common/util/meta.h"
 
 #include <QFile>
@@ -218,7 +219,7 @@ void Init(QWidget* root) {
 
     system = std::make_unique<Core::System>();
     vfs = std::make_unique<FileSys::RealVfsFilesystem>();
-    provider = std::make_unique<FileSys::ManualContentProvider>();
+    provider = std::make_unique<FileSys::ManualContentProvider>(Game::ReadHomeMenuArtwork);
 
     // initialization stuff
     Common::FS::CreateEdenPaths();

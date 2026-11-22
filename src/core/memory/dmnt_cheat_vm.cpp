@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <optional>
+
 #include "common/assert.h"
 #include "common/scope_exit.h"
 #include "core/memory/dmnt_cheat_types.h"
@@ -726,6 +729,105 @@ bool DmntCheatVm::LoadProgram(const std::vector<CheatEntry>& entries) {
     }
 
     return true;
+}
+
+std::vector<DmntCheatVm::MainStore> DmntCheatVm::MainStaticStores(
+    const std::vector<CheatEntry>& cheats) {
+    DmntCheatVm vm{nullptr};
+    if (!vm.LoadProgram(cheats)) {
+        return {};
+    }
+    vm.ResetState();
+
+    // Where each enabled cheat's opcodes end in the program.
+    std::vector<std::pair<std::size_t, std::size_t>> ends;
+    std::size_t end = 0;
+    for (std::size_t i = 0; i < cheats.size(); ++i) {
+        if (cheats[i].enabled) {
+            end += cheats[i].definition.num_opcodes;
+            ends.emplace_back(end, i);
+        }
+    }
+
+    std::vector<MainStore> stores;
+    std::array<std::optional<u64>, NumRegisters> values;
+    values.fill(0);
+    std::size_t loop_depth = 0;
+    std::size_t conditional_depth = 0;
+    std::size_t position = 0;
+    const auto change = [&](u32 reg) { values[reg & 0xF].reset(); };
+    const auto restores = [](SaveRestoreRegisterOpType type) {
+        return type == SaveRestoreRegisterOpType::Restore ||
+               type == SaveRestoreRegisterOpType::ClearRegs;
+    };
+    CheatVmOpcode opcode{};
+    while (true) {
+        const std::size_t start = vm.instruction_ptr;
+        if (!vm.DecodeNextOpcode(opcode)) {
+            break;
+        }
+        while (position < ends.size() && start >= ends[position].first) {
+            ++position;
+        }
+        if (const auto* store = std::get_if<StoreStaticOpcode>(&opcode.opcode)) {
+            const auto offset = values[store->offset_register & 0xF];
+            if (store->mem_type == MemoryAccessType::MainNso && loop_depth == 0 && offset &&
+                position < ends.size()) {
+                const u64 begin = store->rel_address + *offset;
+                stores.push_back({ends[position].second, begin, begin + store->bit_width});
+            }
+        } else if (std::holds_alternative<BeginConditionalOpcode>(opcode.opcode) ||
+                   std::holds_alternative<BeginKeypressConditionalOpcode>(opcode.opcode) ||
+                   std::holds_alternative<BeginRegisterConditionalOpcode>(opcode.opcode)) {
+            ++conditional_depth;
+        } else if (const auto* end_cond = std::get_if<EndConditionalOpcode>(&opcode.opcode)) {
+            if (!end_cond->is_else && conditional_depth) {
+                --conditional_depth;
+            }
+        } else if (const auto* loop = std::get_if<ControlLoopOpcode>(&opcode.opcode)) {
+            change(loop->reg_index);
+            loop_depth = loop->start_loop ? loop_depth + 1 : (loop_depth ? loop_depth - 1 : 0);
+        } else if (const auto* load = std::get_if<LoadRegisterStaticOpcode>(&opcode.opcode)) {
+            change(load->reg_index);
+            if (loop_depth == 0 && conditional_depth == 0) {
+                values[load->reg_index & 0xF] = load->value;
+            }
+        } else if (const auto* read = std::get_if<LoadRegisterMemoryOpcode>(&opcode.opcode)) {
+            change(read->reg_index);
+        } else if (const auto* math = std::get_if<PerformArithmeticStaticOpcode>(&opcode.opcode)) {
+            change(math->reg_index);
+        } else if (const auto* math_reg =
+                       std::get_if<PerformArithmeticRegisterOpcode>(&opcode.opcode)) {
+            change(math_reg->dst_reg_index);
+        } else if (const auto* to_address =
+                       std::get_if<StoreStaticToAddressOpcode>(&opcode.opcode)) {
+            if (to_address->increment_reg) {
+                change(to_address->reg_index);
+            }
+        } else if (const auto* reg_to_address =
+                       std::get_if<StoreRegisterToAddressOpcode>(&opcode.opcode)) {
+            if (reg_to_address->increment_reg) {
+                change(reg_to_address->addr_reg_index);
+            }
+        } else if (const auto* save = std::get_if<SaveRestoreRegisterOpcode>(&opcode.opcode)) {
+            if (restores(save->op_type)) {
+                change(save->dst_index);
+            }
+        } else if (const auto* mask = std::get_if<SaveRestoreRegisterMaskOpcode>(&opcode.opcode)) {
+            if (restores(mask->op_type)) {
+                for (u32 reg = 0; reg < NumRegisters; ++reg) {
+                    if (mask->should_operate[reg]) {
+                        change(reg);
+                    }
+                }
+            }
+        } else if (const auto* rw = std::get_if<ReadWriteStaticRegisterOpcode>(&opcode.opcode)) {
+            if (rw->static_idx < NumReadableStaticRegisters) {
+                change(rw->idx);
+            }
+        }
+    }
+    return stores;
 }
 
 void DmntCheatVm::Execute(const CheatProcessMetadata& metadata) {

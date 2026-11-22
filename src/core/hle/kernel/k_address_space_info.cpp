@@ -56,7 +56,11 @@ std::size_t KAddressSpaceInfo::GetAddressSpaceStart(size_t width, KAddressSpaceI
     return GetAddressSpaceInfo(width, type).address;
 }
 
-std::size_t KAddressSpaceInfo::GetAddressSpaceSize(size_t width, KAddressSpaceInfo::Type type) {
+std::size_t KAddressSpaceInfo::GetAddressSpaceSize(size_t width, KAddressSpaceInfo::Type type,
+                                               u64 switch2_program_id) {
+    if (width == 39 && type == Type::Alias && switch2_program_id == 0x0400E95004038001ULL) {
+        return 128_GiB;
+    }
     return GetAddressSpaceInfo(width, type).size;
 }
 

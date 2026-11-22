@@ -23,7 +23,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include "common/scope_exit.h"
-#include "common/settings.h"
 
 #if defined(__linux__)
 #include <sys/random.h>
@@ -264,12 +263,22 @@ public:
         }
         const size_t virtual_end = virtual_offset + length;
 
+        // Nearly every call protects a range inside one mapped view, which VirtualProtect does
+        // whole without the lock. It refuses a range that reaches a placeholder or a second view
+        // (one Map or Unmap is making or taking apart, or a range across views): those take the
+        // lock below, which gives the whole range the same flags. Map and Unmap hold the lock
+        // across their kernel calls, which slow down when a game maps memory in bulk (zone
+        // changes): write-trap protections, thousands a second, then queued behind them.
+        DWORD old_flags{};
+        if (VirtualProtect(virtual_base + virtual_offset, length, new_flags, &old_flags)) {
+            return;
+        }
+
         std::scoped_lock lock{placeholder_mutex};
         auto [it, end] = placeholders.equal_range({virtual_offset, virtual_end});
         while (it != end) {
             const size_t offset = (std::max)(it->lower(), virtual_offset);
             const size_t protect_length = (std::min)(it->upper(), virtual_end) - offset;
-            DWORD old_flags{};
             if (!VirtualProtect(virtual_base + offset, protect_length, new_flags, &old_flags)) {
                 LOG_CRITICAL(HW_Memory, "Failed to change virtual memory protect rules");
             }
@@ -277,23 +286,27 @@ public:
         }
     }
 
-    /// Backing offset the view page at virtual_offset maps, or nullopt when it is not mapped.
-    std::optional<size_t> BackingOffset(size_t virtual_offset) {
-        std::scoped_lock lock{placeholder_mutex};
-        const auto it = placeholders.find(virtual_offset);
-        if (it == placeholders.end()) {
-            return std::nullopt;
-        }
-        const auto host_pointer_it = placeholder_host_pointers.find(it->lower());
-        if (host_pointer_it == placeholder_host_pointers.end()) {
-            return std::nullopt;
-        }
-        return host_pointer_it->second + virtual_offset - it->lower();
-    }
+    struct BackingRun {
+        size_t virtual_offset;
+        size_t length;
+        size_t backing_offset;
+    };
 
-    void EnableDirectMappedAddress() {
-        // TODO
-        UNREACHABLE();
+    /// Appends the mapped parts of [virtual_offset, virtual_offset + length) with the backing
+    /// offsets they map, looked up under one lock.
+    void FindBackingRuns(size_t virtual_offset, size_t length, std::vector<BackingRun>& runs) {
+        const size_t virtual_end = virtual_offset + length;
+        std::scoped_lock lock{placeholder_mutex};
+        auto [it, end] = placeholders.equal_range({virtual_offset, virtual_end});
+        for (; it != end; ++it) {
+            const auto host_pointer_it = placeholder_host_pointers.find(it->lower());
+            if (host_pointer_it == placeholder_host_pointers.end()) {
+                continue;
+            }
+            const size_t begin = (std::max)(it->lower(), virtual_offset);
+            const size_t run_end = (std::min)(it->upper(), virtual_end);
+            runs.push_back({begin, run_end - begin, host_pointer_it->second + begin - it->lower()});
+        }
     }
 
     const size_t backing_size; ///< Size of the backing memory in bytes
@@ -480,21 +493,21 @@ private:
 static void* ChooseVirtualBase(size_t virtual_size) {
     constexpr uintptr_t Map39BitSize = (1ULL << 39);
     constexpr uintptr_t Map36BitSize = (1ULL << 36);
-
-    // A reservation too large for the window between 36 and 39 bits goes where the kernel puts
-    // it, which on a 48-bit address space is above 36 bits too.
-    if (virtual_size > Map39BitSize - Map36BitSize) {
-        return mmap(nullptr, virtual_size, PROT_READ | PROT_WRITE,
+    const auto reserve = [virtual_size](void* hint) {
+        return mmap(hint, virtual_size, PROT_READ | PROT_WRITE,
                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_NOCORE, -1, 0);
-    }
-
-    // This is not a cryptographic application, we just want something random.
-    std::mt19937_64 rng;
+    };
 
     // We want to ensure we are allocating at an address aligned to the L2 block size.
     // For Qualcomm devices, we must also allocate memory above 36 bits.
-    const size_t lower = Map36BitSize / HugePageSize;
-    const size_t upper = (Map39BitSize - virtual_size) / HugePageSize;
+    constexpr size_t lower = Map36BitSize / HugePageSize;
+    const size_t upper =
+        virtual_size < Map39BitSize ? (Map39BitSize - virtual_size) / HugePageSize : 0;
+    if (upper <= lower) {
+        return reserve(nullptr);
+    }
+
+    std::mt19937_64 rng;
     const size_t range = upper - lower;
 
     // Try up to 64 times to allocate memory at random addresses in the range.
@@ -504,9 +517,7 @@ static void* ChooseVirtualBase(size_t virtual_size) {
 
         // Try to map.
         // Note: we may be able to take advantage of MAP_FIXED_NOREPLACE here.
-        void* map_pointer =
-            mmap(reinterpret_cast<void*>(hint_address), virtual_size, PROT_READ | PROT_WRITE,
-                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_NOCORE, -1, 0);
+        void* map_pointer = reserve(reinterpret_cast<void*>(hint_address));
 
         // If we successfully mapped, we're done.
         if (reinterpret_cast<uintptr_t>(map_pointer) == hint_address) {
@@ -519,7 +530,7 @@ static void* ChooseVirtualBase(size_t virtual_size) {
         }
     }
 
-    return MAP_FAILED;
+    return reserve(nullptr);
 }
 
 #else
@@ -610,12 +621,6 @@ public:
             LOG_WARNING(Common_Memory, "Host page size {:#x} does not support fastmem", page_size);
             return false;
         }
-#ifdef HAS_NCE
-        if (page_size != static_cast<long>(PageAlignment) && Settings::IsNceEnabled()) {
-            LOG_WARNING(Common_Memory, "Host page size {:#x} does not support fastmem with NCE", page_size);
-            return false;
-        }
-#endif
         host_page_size = static_cast<size_t>(page_size);
         // Backing memory initialization
 #if defined(__sun__) || defined(__HAIKU__) || defined(__NetBSD__) || defined(__DragonFly__)
@@ -648,7 +653,11 @@ public:
         fd = memfd_create("HostMemory", 0);
 #endif
         bool use_anon = false;
+#ifdef HAS_NCE
+        if (fd < 0) {
+#else
         if (fd <= 0) {
+#endif
             LOG_WARNING(Common_Memory, "memfd_create: {}", strerror(errno));
             use_anon = true;
         }
@@ -661,12 +670,16 @@ public:
             }
         }
         if (use_anon) {
+#ifdef HAS_NCE
+            return false;
+#else
             LOG_WARNING(Common_Memory, "Using private mappings instead of shared ones");
             backing_base = static_cast<u8*>(mmap(nullptr, backing_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_NOCORE, -1, 0));
             if (fd > 0) {
                 fd = -1;
                 close(fd);
             }
+#endif
         } else {
             backing_base = static_cast<u8*>(mmap(nullptr, backing_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_NOCORE, fd, 0));
         }
@@ -676,7 +689,7 @@ public:
         }
 
         // Virtual memory initialization
-        virtual_base = virtual_map_base = static_cast<u8*>(ChooseVirtualBase(virtual_size));
+        virtual_base = static_cast<u8*>(ChooseVirtualBase(virtual_size));
         if (virtual_base == MAP_FAILED) {
             LOG_CRITICAL(HW_Memory, "mmap failed: {}", strerror(errno));
             return false;
@@ -726,13 +739,6 @@ public:
     }
 
     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms) {
-        // Intersect the range with our address space.
-        const size_t intended_offset = virtual_offset;
-        AdjustMap(&virtual_offset, &length);
-        if (length != 0) {
-            host_offset += virtual_offset - intended_offset;
-        }
-
         if (page_states) {
             if (length == 0) {
                 return;
@@ -770,9 +776,6 @@ public:
         // The method name is wrong. We're still talking about the virtual range.
         // We don't want to unmap, we want to reserve this memory.
 
-        // Intersect the range with our address space.
-        AdjustMap(&virtual_offset, &length);
-
         if (page_states) {
             if (length == 0) {
                 return;
@@ -792,9 +795,6 @@ public:
     }
 
     void Protect(size_t virtual_offset, size_t length, bool read, bool write, bool execute) {
-        // Intersect the range with our address space.
-        AdjustMap(&virtual_offset, &length);
-
         if (page_states) {
             if (length == 0) {
                 return;
@@ -826,16 +826,25 @@ public:
         ASSERT_MSG(ret == 0, "mprotect failed: {}", strerror(errno));
     }
 
-    void EnableDirectMappedAddress() {
-        virtual_base = nullptr;
+#ifdef HAS_NCE
+    bool PrepareDirectMapping(size_t offset, size_t length) {
+        if (fd < 0 || host_page_size != PageAlignment) {
+            return false;
+        }
+        auto* const test = mmap(nullptr, PageAlignment, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+        if (test == MAP_FAILED) {
+            return false;
+        }
+        munmap(test, PageAlignment);
+        return mprotect(virtual_base + offset, length, PROT_NONE) == 0;
     }
+#endif
 
     const size_t backing_size; ///< Size of the backing memory in bytes
     const size_t virtual_size; ///< Size of the virtual address placeholder in bytes
 
     u8* backing_base{reinterpret_cast<u8*>(MAP_FAILED)};
     u8* virtual_base{reinterpret_cast<u8*>(MAP_FAILED)};
-    u8* virtual_map_base{reinterpret_cast<u8*>(MAP_FAILED)};
 
 private:
     /// Release all resources in the object
@@ -844,8 +853,8 @@ private:
             munmap(page_states, page_states_size);
         }
 
-        if (virtual_map_base != MAP_FAILED) {
-            int ret = munmap(virtual_map_base, virtual_size);
+        if (virtual_base != MAP_FAILED) {
+            int ret = munmap(virtual_base, virtual_size);
             ASSERT_MSG(ret == 0, "munmap failed: {}", strerror(errno));
         }
 
@@ -857,27 +866,6 @@ private:
         if (fd != -1) {
             int ret = close(fd);
             ASSERT_MSG(ret == 0, "close failed: {}", strerror(errno));
-        }
-    }
-
-    void AdjustMap(size_t* virtual_offset, size_t* length) {
-        if (virtual_base != nullptr) {
-            return;
-        }
-
-        // If we are direct mapped, we want to make sure we are operating on a region
-        // that is in range of our virtual mapping.
-        size_t intended_start = *virtual_offset;
-        size_t intended_end = intended_start + *length;
-        size_t address_space_start = reinterpret_cast<size_t>(virtual_map_base);
-        size_t address_space_end = address_space_start + virtual_size;
-
-        if (address_space_start > intended_end || intended_start > address_space_end) {
-            *virtual_offset = 0;
-            *length = 0;
-        } else {
-            *virtual_offset = (std::max)(intended_start, address_space_start);
-            *length = (std::min)(intended_end, address_space_end) - *virtual_offset;
         }
     }
 
@@ -917,8 +905,7 @@ private:
     };
 
     size_t StateIndex(size_t virtual_offset) const {
-        const size_t base = virtual_base != nullptr ? 0 : reinterpret_cast<size_t>(virtual_map_base);
-        return (virtual_offset - base) / PageAlignment;
+        return virtual_offset / PageAlignment;
     }
 
     HostPage ResolveHostPage(size_t virtual_offset) const {
@@ -1055,6 +1042,9 @@ void HostMemory::Swap(HostMemory& other) noexcept {
     std::swap(backing_base, other.backing_base);
     std::swap(virtual_base, other.virtual_base);
     std::swap(virtual_base_offset, other.virtual_base_offset);
+#ifdef HAS_NCE
+    std::swap(direct_mapped, other.direct_mapped);
+#endif
     std::swap(granules, other.granules);
     std::swap(num_granules, other.num_granules);
     std::swap(fallback_buffer, other.fallback_buffer);
@@ -1066,6 +1056,11 @@ std::atomic<u64> g_mapped_bytes{};
 
 void HostMemory::Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms, bool separate_heap) {
 #if !(defined(__OPENORBIS__) || defined(__managarm__))
+#ifdef HAS_NCE
+    if (!NormalizeVirtualOffset(virtual_offset, length)) {
+        UNREACHABLE_MSG("Native map outside the fastmem arena");
+    }
+#endif
     ASSERT(virtual_offset % PageAlignment == 0);
     ASSERT(host_offset % PageAlignment == 0);
     ASSERT(length % PageAlignment == 0);
@@ -1081,6 +1076,11 @@ void HostMemory::Map(size_t virtual_offset, size_t host_offset, size_t length, M
 
 void HostMemory::Unmap(size_t virtual_offset, size_t length, bool separate_heap) {
 #if !(defined(__OPENORBIS__) || defined(__managarm__))
+#ifdef HAS_NCE
+    if (!NormalizeVirtualOffset(virtual_offset, length)) {
+        UNREACHABLE_MSG("Native unmap outside the fastmem arena");
+    }
+#endif
     ASSERT(virtual_offset % PageAlignment == 0);
     ASSERT(length % PageAlignment == 0);
     ASSERT(virtual_offset + length <= virtual_size);
@@ -1094,6 +1094,11 @@ void HostMemory::Unmap(size_t virtual_offset, size_t length, bool separate_heap)
 
 void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission perm) {
 #if !(defined(__OPENORBIS__) || defined(__managarm__))
+#ifdef HAS_NCE
+    if (!NormalizeVirtualOffset(virtual_offset, length)) {
+        UNREACHABLE_MSG("Native protection change outside the fastmem arena");
+    }
+#endif
     ASSERT(virtual_offset % PageAlignment == 0);
     ASSERT(length % PageAlignment == 0);
     ASSERT(virtual_offset + length <= virtual_size);
@@ -1126,7 +1131,11 @@ void HostMemory::HintCold(size_t physical_offset, size_t length,
 #endif
     };
     hint(backing_base + physical_offset);
-    if (virtual_offset && virtual_base != nullptr && *virtual_offset + length <= virtual_size) {
+    if (virtual_offset && virtual_base != nullptr &&
+#ifdef HAS_NCE
+        NormalizeVirtualOffset(*virtual_offset, length) &&
+#endif
+        *virtual_offset + length <= virtual_size) {
         hint(virtual_base + *virtual_offset);
     }
 }
@@ -1202,19 +1211,40 @@ std::pair<size_t, size_t> HostMemory::TrimZeroPages() const {
             zero_bytes += PageAlignment;
         }
     }
-    for (const uintptr_t page : view_pages) {
-        const auto offset = impl->BackingOffset(page - view_begin);
-        if (!offset || *offset >= backing_size) {
-            continue;
+    // The views behind each run of resident view pages (2 MiB at most) are looked up under one
+    // lock, released before the pages are read: guest map, unmap and protect calls wait for one
+    // short lookup at most, and a pass over 5 GB takes the lock a few thousand times instead of
+    // about a million.
+    constexpr size_t MaxRunPages = 512;
+    std::sort(view_pages.begin(), view_pages.end());
+    std::vector<Impl::BackingRun> runs;
+    for (size_t i = 0; i < view_pages.size();) {
+        size_t j = i + 1;
+        while (j < view_pages.size() && j - i < MaxRunPages &&
+               view_pages[j] == view_pages[j - 1] + PageAlignment) {
+            ++j;
         }
-        const uintptr_t backing_page = backing_begin + *offset;
-        if (IsZeroPage(reinterpret_cast<const u8*>(backing_page))) {
-            trim.push_back(page);
-            zero_bytes += PageAlignment;
-        }
-        // Reading it put the backing page in the working set: take it out again.
-        if (!std::binary_search(backing_pages.begin(), backing_pages.end(), backing_page)) {
-            trim.push_back(backing_page);
+        runs.clear();
+        impl->FindBackingRuns(view_pages[i] - view_begin,
+                              view_pages[j - 1] + PageAlignment - view_pages[i], runs);
+        i = j;
+        for (const auto& run : runs) {
+            for (size_t offset = 0; offset < run.length; offset += PageAlignment) {
+                if (run.backing_offset + offset >= backing_size) {
+                    break;
+                }
+                const uintptr_t page = view_begin + run.virtual_offset + offset;
+                const uintptr_t backing_page = backing_begin + run.backing_offset + offset;
+                if (IsZeroPage(reinterpret_cast<const u8*>(backing_page))) {
+                    trim.push_back(page);
+                    zero_bytes += PageAlignment;
+                }
+                // Reading it put the backing page in the working set: take it out again.
+                if (!std::binary_search(backing_pages.begin(), backing_pages.end(),
+                                        backing_page)) {
+                    trim.push_back(backing_page);
+                }
+            }
         }
     }
     std::sort(trim.begin(), trim.end());
@@ -1229,9 +1259,11 @@ std::pair<size_t, size_t> HostMemory::TrimZeroPages() const {
             VirtualUnlock(reinterpret_cast<void*>(page), PageAlignment);
         }
     };
+    constexpr size_t MaxUnlockPages = (size_t{1} << 20) / PageAlignment;
     for (size_t i = 0; i < trim.size();) {
         size_t j = i + 1;
-        while (j < trim.size() && trim[j] == trim[j - 1] + PageAlignment) {
+        while (j < trim.size() && j - i < MaxUnlockPages &&
+               trim[j] == trim[j - 1] + PageAlignment) {
             ++j;
         }
         unlock(trim[i], trim[j - 1] + PageAlignment);
@@ -1317,12 +1349,44 @@ void HostMemory::ForgetContents() {
     }
 }
 
-void HostMemory::EnableDirectMappedAddress() {
-#if !(defined(__OPENORBIS__) || defined(__managarm__))
-    if (impl) {
-        impl->EnableDirectMappedAddress();
-        virtual_size += reinterpret_cast<uintptr_t>(virtual_base);
+#ifdef HAS_NCE
+bool HostMemory::EnableDirectMappedAddress() {
+    constexpr size_t AddressSpaceStart = 1ULL << 36;
+    constexpr size_t AddressSpaceEnd = 1ULL << 39;
+    const auto base = reinterpret_cast<size_t>(virtual_base);
+    if (!impl || base < AddressSpaceStart || base >= AddressSpaceEnd ||
+        virtual_size > AddressSpaceEnd - base) {
+        return false;
     }
+    if (!direct_mapped) {
+        direct_mapped = impl->PrepareDirectMapping(virtual_base_offset, virtual_size);
+    }
+    return direct_mapped;
+}
+
+bool HostMemory::NormalizeVirtualOffset(size_t& address, size_t length) const noexcept {
+    if (!direct_mapped) {
+        return true;
+    }
+    const auto base = reinterpret_cast<size_t>(virtual_base);
+    if (address < base || length > virtual_size || address - base > virtual_size - length) {
+        return false;
+    }
+    address -= base;
+    return true;
+}
+#endif
+
+void HostMemory::ResetVirtualMappings() {
+    size_t address = 0;
+#ifdef HAS_NCE
+    if (direct_mapped) {
+        address = reinterpret_cast<size_t>(virtual_base);
+    }
+#endif
+    Unmap(address, virtual_size, false);
+#ifdef HAS_NCE
+    direct_mapped = false;
 #endif
 }
 

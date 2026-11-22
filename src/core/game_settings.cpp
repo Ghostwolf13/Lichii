@@ -123,6 +123,7 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
     const auto env = DetectEnvironment(renderer);
 
     Settings::values.force_reactive_flushing = false;
+    Settings::values.keep_cpu_inner_invalidation = false;
     switch (static_cast<TitleID>(program_id)) {
         case TitleID::NinjaGaidenRagebound:
             Settings::values.use_squashed_iterated_blend = true;
@@ -132,6 +133,12 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             // back on the CPU. Without reactive flushing it reads stale ones and the whole picture
             // brightens and darkens every few frames.
             Settings::values.force_reactive_flushing = true;
+            break;
+        case TitleID::DonkeyKongBananza:
+            // Gold pieces in the dirt read buffers that the GPU engines' inner writes update. With
+            // "Skip CPU Inner Invalidation" those buffers keep stale data, the main pass writes NaN
+            // there, and the bloom spreads it into large glows with black dots (#1418, #1739).
+            Settings::values.keep_cpu_inner_invalidation = true;
             break;
         default:
             break;

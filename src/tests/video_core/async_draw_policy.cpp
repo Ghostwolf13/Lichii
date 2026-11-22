@@ -51,3 +51,22 @@ TEST_CASE("Legacy pending draws retain the async heuristic", "[video_core][async
     REQUIRE_FALSE(Vulkan::CanDiscardPendingDraw(false, false, 100, 6));
     REQUIRE_FALSE(Vulkan::CanDiscardPendingDraw(false, false, 0, 0));
 }
+
+TEST_CASE("A native draw needs history on every render target it writes, through the RT map",
+          "[video_core][async_draw]") {
+    const auto identity = [](u32 i) { return i; };
+    const auto to_rt1 = [](u32) { return 1u; };
+    const auto writes_all = [](u32) { return true; };
+    const auto rt0_only = [](u32 rt) { return rt == 0; };
+    const auto none = [](u32) { return false; };
+    // Output 0 maps to RT1: RT0's history must not let a first write into RT1 be skipped.
+    REQUIRE_FALSE(Vulkan::ColorWritesHaveHistory(1, to_rt1, writes_all, rt0_only));
+    REQUIRE(Vulkan::ColorWritesHaveHistory(1, to_rt1, writes_all, writes_all));
+    REQUIRE(Vulkan::ColorWritesHaveHistory(1, identity, writes_all, rt0_only));
+    // Two outputs, one into a target first written this frame.
+    REQUIRE_FALSE(Vulkan::ColorWritesHaveHistory(2, identity, writes_all, rt0_only));
+    // A masked output needs no history; a draw that writes no color is not skippable.
+    REQUIRE(Vulkan::ColorWritesHaveHistory(2, identity, rt0_only, rt0_only));
+    REQUIRE_FALSE(Vulkan::ColorWritesHaveHistory(2, identity, none, writes_all));
+    REQUIRE_FALSE(Vulkan::ColorWritesHaveHistory(0, identity, writes_all, writes_all));
+}

@@ -155,6 +155,27 @@ void ImageBase::CheckAliasState() {
     flags &= ~ImageFlagBits::Alias;
 }
 
+namespace {
+[[nodiscard]] u32 LevelMask(const SubresourceRange& range) noexcept {
+    const u32 levels = (std::min)(static_cast<u32>(range.extent.levels), 32U);
+    const u32 mask = levels >= 32 ? ~0U : (1U << levels) - 1;
+    return range.base.level >= 32 ? 0 : mask << range.base.level;
+}
+} // Anonymous namespace
+
+void NoteStorageWrite(ImageBase& image, u32 levels_before, const SubresourceRange& range) noexcept {
+    const bool every_layer =
+        range.base.layer == 0 && range.extent.layers >= image.info.resources.layers;
+    image.storage_written_levels = levels_before | (every_layer ? LevelMask(range) : 0);
+}
+
+bool HoldsStorageWrites(const ImageBase& image, const SubresourceRange& range) noexcept {
+    const u32 mask = LevelMask(range);
+    return True(image.flags & ImageFlagBits::GpuModified) &&
+           False(image.flags & ImageFlagBits::CpuModified) && mask != 0 &&
+           (image.storage_written_levels & mask) == mask;
+}
+
 bool AddImageAlias(ImageBase& lhs, ImageBase& rhs, ImageId lhs_id, ImageId rhs_id) {
     static constexpr auto OPTIONS = RelaxedOptions::Size | RelaxedOptions::Format;
     ASSERT(lhs.info.type == rhs.info.type);

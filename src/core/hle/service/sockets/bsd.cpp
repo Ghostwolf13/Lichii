@@ -32,6 +32,7 @@
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/sockets/bsd.h"
+#include "core/hle/service/sockets/nextendo_redirect.h"
 #include "core/hle/service/sockets/sockets_translate.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/socket_proxy.h"
@@ -73,6 +74,28 @@ void PutValue(std::span<u8> buffer, const T& t) {
 void PutSockAddr(std::vector<u8>& buffer, const SockAddrIn& addr) {
     buffer.resize((std::min)(buffer.size(), static_cast<size_t>(addr.len)));
     PutValue(buffer, addr);
+}
+
+/// The IPPROTO_IPV6 option the host takes for a guest's, nullopt for one stored instead.
+std::optional<Network::Ipv6Option> TranslateIpv6Option(OptName optname) {
+    switch (static_cast<Ipv6OptName>(optname)) {
+    case Ipv6OptName::V6ONLY:
+        return Network::Ipv6Option::V6Only;
+    case Ipv6OptName::UNICAST_HOPS:
+        return Network::Ipv6Option::UnicastHops;
+    case Ipv6OptName::MULTICAST_HOPS:
+        return Network::Ipv6Option::MulticastHops;
+    case Ipv6OptName::MULTICAST_LOOP:
+        return Network::Ipv6Option::MulticastLoop;
+    default:
+        return std::nullopt;
+    }
+}
+
+/// Whether a guest socket address of size bytes holds its whole family's address: an INET6 one
+/// takes the 28 bytes of a sockaddr_in6. Other families take the 16 every caller already checks.
+bool AddressFits(const SockAddrIn& addr, size_t size) {
+    return static_cast<Domain>(addr.family) != Domain::INET6 || size >= sizeof(SockAddrIn6);
 }
 
 /// Whether a guest fd_set holds descriptor fd. Its fd_mask words are little-endian, so fd is bit
@@ -1364,17 +1387,17 @@ void BSD_USA::ExecuteWork(HLERequestContext& ctx, Work work) {
 }
 
 std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol protocol) {
-    // This network backend supports IPv4 only. Let callers fall back instead of returning a
-    // descriptor backed by a failed host socket.
-    if (domain != Domain::Unspecified && domain != Domain::INET) {
-        LOG_INFO(Service, "Refusing socket domain={} type={} protocol={}: only IPv4 is supported",
+    // Let callers fall back instead of returning a descriptor backed by a failed host socket.
+    if (domain != Domain::Unspecified && domain != Domain::INET && domain != Domain::INET6) {
+        LOG_INFO(Service, "Refusing socket domain={} type={} protocol={}: unsupported domain",
                  static_cast<u32>(domain), static_cast<u32>(type), static_cast<u32>(protocol));
         return {-1, Errno::AFNOSUPPORT};
     }
 
     // user bsd:u has restrictions on SOCK_SEQPACKET and SOCK_RAW
     if (is_user && (type == Type::SEQPACKET || type == Type::RAW)) {
-        if (type == Type::RAW && domain == Domain::INET && protocol == Protocol::ICMP) {
+        if (type == Type::RAW && ((domain == Domain::INET && protocol == Protocol::ICMP) ||
+                                  (domain == Domain::INET6 && protocol == Protocol::ICMPV6))) {
             // fine, can use on bsd:s and bsd:u
         } else {
             return {-1, Errno::INVAL};
@@ -1394,11 +1417,24 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
     std::shared_ptr<Network::SocketBase> socket;
     auto room_member = Network::GetRoomMember().lock();
     if (room_member && room_member->IsConnected() && !Network::IsDirectLanActive()) {
+        // A room carries IPv4 alone.
+        if (domain != Domain::INET) {
+            LOG_INFO(Service, "Refusing non-IPv4 socket domain={} in a room",
+                     static_cast<u32>(domain));
+            return {-1, Errno::AFNOSUPPORT};
+        }
         socket = std::make_shared<Network::ProxySocket>();
     } else {
         socket = std::make_shared<Network::Socket>();
     }
-    socket->Initialize(Translate(domain), Translate(type), Translate(protocol));
+    const Network::Errno init_errno =
+        socket->Initialize(Translate(domain), Translate(type), Translate(protocol));
+    // A host without IPv6 fails here, with EAFNOSUPPORT, before the socket takes an fd.
+    if (domain == Domain::INET6 && init_errno != Network::Errno::SUCCESS) {
+        LOG_INFO(Service, "Host refused an IPv6 socket type={} protocol={}",
+                 static_cast<u32>(type), static_cast<u32>(protocol));
+        return {-1, Translate(init_errno)};
+    }
 
     // Publish the socket only once it is set up, since the room thread delivers packets to it
     std::scoped_lock lock{file_descriptors_mutex};
@@ -1411,6 +1447,7 @@ std::pair<s32, Errno> BSD_USA::SocketImpl(Domain domain, Type type, Protocol pro
     file_descriptors[fd] = FileDescriptor{
         .socket = std::move(socket),
         .is_connection_based = IsConnectionBased(type),
+        .domain = domain,
     };
 
     LOG_INFO(Service, "New socket fd={}", fd);
@@ -1739,6 +1776,7 @@ std::pair<s32, Errno> BSD_USA::AcceptImpl(s32 fd, std::vector<u8>& write_buffer)
         file_descriptors[new_fd] = FileDescriptor{
             .socket = std::move(result.socket),
             .is_connection_based = descriptor->is_connection_based,
+            .domain = descriptor->domain,
             // As in FreeBSD, an accepted socket takes the listening socket's timeouts.
             .receive_timeout = descriptor->receive_timeout,
             .send_timeout = descriptor->send_timeout,
@@ -1759,6 +1797,9 @@ Errno BSD_USA::BindImpl(s32 fd, std::span<const u8> addr) {
     ASSERT(addr.size() >= 16);
 
     auto addr_in = GetValue<SockAddrIn>(addr);
+    if (!AddressFits(addr_in, addr.size())) {
+        return Errno::INVAL;
+    }
 
     return Translate(descriptor->socket->Bind(Translate(addr_in)));
 }
@@ -1771,9 +1812,20 @@ Errno BSD_USA::ConnectImpl(s32 fd, std::span<const u8> addr) {
 
     ASSERT(addr.size() >= 16);
 
-    auto addr_in = GetValue<SockAddrIn>(addr);
+    const auto guest_target = GetValue<SockAddrIn>(addr);
+    if (!AddressFits(guest_target, addr.size())) {
+        return Errno::INVAL;
+    }
+    auto target = Translate(guest_target);
+    if (descriptor->is_connection_based) {
+        if (const auto routed =
+                Nextendo::RouteGamesync(system.GetApplicationProcessProgramID(), target)) {
+            LOG_INFO(Service, "Nextendo: Gamesync fd={} routed to port {}", fd, routed->portno);
+            target = *routed;
+        }
+    }
 
-    const Errno result = Translate(descriptor->socket->Connect(Translate(addr_in)));
+    const Errno result = Translate(descriptor->socket->Connect(target));
 
     if (result == Errno::ISCONN) {
         LOG_DEBUG(Service, "returned ISCONN - socket already connected");
@@ -1883,26 +1935,52 @@ Errno BSD_USA::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8
         put_value(u32{enabled ? 1U : 0U});
         return Errno::SUCCESS;
     };
+    // An option the host does not take reads back what the guest set, such as the 8 bytes
+    // Splatoon 3 sets for 0x80000001 after each connect.
+    const auto put_stored = [&] {
+        if (const auto& options = descriptor->stored_options) {
+            if (const auto stored = options->find({level, static_cast<u32>(optname)});
+                stored != options->end()) {
+                optval.resize((std::min)(optval.size(), stored->second.size()));
+                std::copy_n(stored->second.begin(), optval.size(), optval.begin());
+                return Errno::SUCCESS;
+            }
+        }
+        LOG_WARNING(Service, "(STUBBED) getsockopt level={:#x} optname={:#x} was never set", level,
+                    static_cast<u32>(optname));
+        return Errno::SUCCESS;
+    };
 
     if (level == static_cast<u32>(SocketLevel::TCP)) {
         switch (static_cast<TcpOptName>(optname)) {
         case TcpOptName::NODELAY:
             return put_flag(socket->GetNoDelay());
         default:
-            UNIMPLEMENTED_MSG("Unimplemented TCP getsockopt optname={:#x}",
-                              static_cast<u32>(optname));
-            return Errno::SUCCESS;
+            return put_stored();
         }
     }
 
+    if (level == static_cast<u32>(SocketLevel::IPV6) && descriptor->domain == Domain::INET6) {
+        if (const auto option = TranslateIpv6Option(optname)) {
+            const auto [value, getsockopt_err] = socket->GetIpv6Option(*option);
+            if (getsockopt_err != Network::Errno::SUCCESS) {
+                return Translate(getsockopt_err);
+            }
+            put_value(value);
+            return Errno::SUCCESS;
+        }
+        return put_stored();
+    }
+
     if (level != static_cast<u32>(SocketLevel::SOCKET)) {
-        UNIMPLEMENTED_MSG("Unknown getsockopt level");
-        return Errno::SUCCESS;
+        return put_stored();
     }
 
     switch (optname) {
     case OptName::REUSEADDR:
         return put_flag(socket->GetReuseAddr());
+    case OptName::REUSEPORT:
+        return put_flag(socket->GetReusePort());
     case OptName::ERROR_: {
         auto [pending_err, getsockopt_err] = socket->GetPendingError();
         if (getsockopt_err == Network::Errno::SUCCESS) {
@@ -1911,8 +1989,7 @@ Errno BSD_USA::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8
         return Translate(getsockopt_err);
     }
     default:
-        UNIMPLEMENTED_MSG("Unimplemented optname={}", optname);
-        return Errno::SUCCESS;
+        return put_stored();
     }
 }
 
@@ -1934,8 +2011,17 @@ Errno BSD_USA::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<cons
         return Translate(socket->SetNoDelay(GetValue<u32>(optval) != 0));
     }
 
+    if (level == static_cast<u32>(SocketLevel::IPV6) && descriptor->domain == Domain::INET6) {
+        if (const auto option = TranslateIpv6Option(optname)) {
+            if (optval.size() < sizeof(s32)) {
+                return Errno::INVAL;
+            }
+            return Translate(socket->SetIpv6Option(*option, GetValue<s32>(optval)));
+        }
+    }
+
     if (level != static_cast<u32>(SocketLevel::SOCKET)) {
-        LOG_WARNING(Service, "(STUBBED) setsockopt with level={}, optname={}", level, optname);
+        StoreSockOpt(descriptor->socket, level, optname, optval);
         return Errno::SUCCESS;
     }
 
@@ -1958,6 +2044,8 @@ Errno BSD_USA::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<cons
     case OptName::REUSEADDR:
         ASSERT(value == 0 || value == 1);
         return Translate(socket->SetReuseAddr(value != 0));
+    case OptName::REUSEPORT:
+        return Translate(socket->SetReusePort(value != 0));
     case OptName::KEEPALIVE:
         ASSERT(value == 0 || value == 1);
         return Translate(socket->SetKeepAlive(value != 0));
@@ -2003,10 +2091,32 @@ Errno BSD_USA::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<cons
     }
     case OptName::NOSIGPIPE:
         LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", value);
+        StoreSockOpt(descriptor->socket, level, optname, optval);
         return Errno::SUCCESS;
     default:
-        UNIMPLEMENTED_MSG("Unimplemented optname={}", optname);
+        StoreSockOpt(descriptor->socket, level, optname, optval);
         return Errno::SUCCESS;
+    }
+}
+
+void BSD_USA::StoreSockOpt(const std::shared_ptr<Network::SocketBase>& socket, u32 level,
+                           OptName optname, std::span<const u8> optval) {
+    LOG_DEBUG(Service, "Storing setsockopt level={:#x} optname={:#x} len={} without applying it",
+              level, static_cast<u32>(optname), optval.size());
+    std::scoped_lock lock{file_descriptors_mutex};
+    std::shared_ptr<const StoredSockOpts> updated;
+    for (std::optional<FileDescriptor>& entry : file_descriptors) {
+        if (!entry || entry->socket != socket) {
+            continue;
+        }
+        if (!updated) {
+            auto options = entry->stored_options
+                               ? std::make_shared<StoredSockOpts>(*entry->stored_options)
+                               : std::make_shared<StoredSockOpts>();
+            (*options)[{level, static_cast<u32>(optname)}].assign(optval.begin(), optval.end());
+            updated = std::move(options);
+        }
+        entry->stored_options = updated;
     }
 }
 
@@ -2082,6 +2192,9 @@ std::pair<s32, Errno> BSD_USA::SendToImpl(s32 fd, u32 flags, std::span<const u8>
     if (!addr.empty()) {
         ASSERT(addr.size() >= 16);
         auto guest_addr_in = GetValue<SockAddrIn>(addr);
+        if (!AddressFits(guest_addr_in, addr.size())) {
+            return {-1, Errno::INVAL};
+        }
         addr_in = Translate(guest_addr_in);
         p_addr_in = &addr_in;
     }
@@ -2359,14 +2472,20 @@ std::optional<std::pair<s32, Errno>> BSD_USA::SendMMsgImpl(HLERequestContext& ct
         if (message.name.empty()) {
             return Errno::SUCCESS;
         }
-        // An IPv4 address takes 16 bytes, as in a sockaddr_in; up to the whole storage is accepted.
+        // An IPv4 address takes 16 bytes, as in a sockaddr_in, and an IPv6 one 28, as in a
+        // sockaddr_in6; up to the whole storage is accepted.
         if (message.name.size() < 16 || message.name.size() > sizeof(SockAddrIn)) {
             return Errno::INVAL;
         }
-        // Only IPv4 translates: an address of another family fails, as SocketImpl does, rather
-        // than being sent to as an IPv4 address.
-        if (static_cast<Domain>(GetValue<SockAddrIn>(message.name).family) != Domain::INET) {
+        // Only IPv4 and IPv6 translate: an address of another family fails, as SocketImpl does,
+        // rather than being sent to as an IPv4 address.
+        const SockAddrIn name = GetValue<SockAddrIn>(message.name);
+        const Domain family = static_cast<Domain>(name.family);
+        if (family != Domain::INET && family != Domain::INET6) {
             return Errno::AFNOSUPPORT;
+        }
+        if (!AddressFits(name, message.name.size())) {
+            return Errno::INVAL;
         }
         return Errno::SUCCESS;
     };

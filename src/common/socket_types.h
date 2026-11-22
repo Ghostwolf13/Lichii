@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <array>
 #include <optional>
 #include <string>
 
@@ -16,6 +17,7 @@ namespace Network {
 enum class Domain : u8 {
     Unspecified, ///< Represents 0, used in getaddrinfo hints
     INET,        ///< Address family for IPv4
+    INET6,       ///< Address family for IPv6
 };
 
 /// Socket types
@@ -154,11 +156,19 @@ enum class ShutdownHow {
 /// Array of IPv4 address
 using IPv4Address = std::array<u8, 4>;
 
-/// Cross-platform sockaddr structure
+/// IPv6 address in network byte order
+using IPv6Address = std::array<u8, 16>;
+
+/// Cross-platform sockaddr structure. An INET address is ip and portno; an INET6 one is ip6,
+/// portno, flowinfo and scope_id, with ip unused.
 struct SockAddrIn {
     Domain family;
     IPv4Address ip;
     u16 portno;
+    IPv6Address ip6{};
+    /// In host byte order.
+    u32 flowinfo = 0;
+    u32 scope_id = 0;
 };
 
 constexpr u32 FLAG_MSG_PEEK = 0x2;

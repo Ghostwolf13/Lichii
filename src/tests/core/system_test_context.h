@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include "common/fs/path_util.h"
 #include "common/settings.h"
+#include "tests/common/restore_eden_path.h"
 
 class ScopedSystemTestContext {
 public:
@@ -21,7 +22,7 @@ public:
     }
 
     ~ScopedSystemTestContext() {
-        Common::FS::SetEdenPath(Common::FS::EdenPath::NANDDir, previous_nand);
+        Tests::RestoreEdenPath(Common::FS::EdenPath::NANDDir, previous_nand);
         Settings::values.current_user = previous_user;
         Settings::values.memory_layout_mode.SetValue(previous_memory);
         Settings::values.use_multi_core.SetValue(previous_multicore);

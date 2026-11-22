@@ -13,14 +13,27 @@ worker pool. The old "Graphics pipeline built on the GPU thread" timing measures
 part, not the driver compile.
 
 `use_asynchronous_shaders` controls `BuiltPipeline`'s discard policy, not the Vulkan worker pool.
-It defaults off. With it on, legacy draws may be discarded when depth is enabled or both draw
-counts exceed six. That heuristic tries to preserve small, one-time texture-generation draws.
-It does not prove that a draw's output is temporary.
+With it on, legacy draws may be discarded when depth is enabled or both draw counts exceed six.
+That heuristic tries to preserve small, one-time texture-generation draws. It does not prove that
+a draw's output is temporary.
 
-`CanDiscardPendingDraw` therefore rejects discarding **every native draw**, regardless of size or
-depth. Native draws may create persistent lighting, storage data, compute inputs, copied render
-targets, or readback sources. There is no reliable native classification for safe-to-skip draws.
-This track retains that policy whether asynchronous shaders are enabled or disabled.
+Native work follows `native_async_draws` (Wait, Bounded or Skip) and only skips what redraws an
+earlier frame's output: skipping leaves that output a frame old, while skipping work that fills
+something once would lose it for the session.
+
+- A draw may be skipped only when it is depth-tested, writes color, is not a mesh draw, and its
+  render target 0 was first written in an earlier frame (Eglantine #874). Mario Kart World bakes
+  terrain once with depth-tested draws; Star Fox draws each font glyph once without depth.
+- A dispatch (`PipelineCache::SkipUnbuiltDispatch`) may be skipped only when every byte of every
+  buffer range it would mark written already holds GPU writes (a DMA clear or CPU write removes
+  them), and every storage image level it writes was last written by a shader through a storage
+  view, over every layer (`ImageBase::storage_written_levels`; a clear, render pass, copy, alias
+  copy or CPU write resets it). Its outputs then hold earlier shader results; otherwise they would
+  keep a clear value or what the guest left there, which later work might read as counts or
+  indices.
+
+Bounded waits for a skippable draw or dispatch up to what is left of `native_pipeline_wait_ms` this
+frame, then skips. Everything else waits for its build on the Vulkan worker, as before.
 
 ## What runs where
 

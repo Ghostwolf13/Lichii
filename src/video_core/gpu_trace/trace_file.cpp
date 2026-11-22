@@ -173,11 +173,12 @@ Reader::Reader(const std::filesystem::path& path) : impl{std::make_unique<Impl>(
         error = path.string() + " is not a GPU trace";
         return;
     }
-    if (header.version != FormatVersion) {
+    if (header.version < OldestFormatVersion || header.version > FormatVersion) {
         error = "trace format version " + std::to_string(header.version) + ", this build reads " +
-                std::to_string(FormatVersion);
+                std::to_string(OldestFormatVersion) + " to " + std::to_string(FormatVersion);
         return;
     }
+    version = header.version;
     if (header.header_size > sizeof(header)) {
         std::fseek(impl->file.get(), static_cast<long>(header.header_size), SEEK_SET);
     }

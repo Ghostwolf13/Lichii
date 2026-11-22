@@ -10,6 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/debugger/nx2_zip.h"
+#include "tests/common/temp_dir.h"
 
 using Core::Nx2Debug::ZipWriter;
 
@@ -22,7 +23,8 @@ std::vector<u8> Bytes(std::string_view text) {
 } // Anonymous namespace
 
 TEST_CASE("Bug bundle zip sizes match what is written", "[core][nx2_zip]") {
-    const auto path = std::filesystem::temp_directory_path() / "lichii-nx2-zip-test.zip";
+    const Tests::TempDir directory{"lichii-nx2-zip-test"};
+    const auto path = directory / "bundle.zip";
     const std::vector<u8> repeated = Bytes(std::string(4096, 'a'));
     const std::vector<u8> short_text = Bytes("ab");
 
@@ -44,7 +46,6 @@ TEST_CASE("Bug bundle zip sizes match what is written", "[core][nx2_zip]") {
     std::ifstream file{path, std::ios::binary};
     const std::vector<char> written{std::istreambuf_iterator<char>{file}, {}};
     file.close();
-    std::filesystem::remove(path);
     REQUIRE(written.size() == size);
     REQUIRE(std::string(written.data(), 4) == "PK\x03\x04");
     REQUIRE(std::string(written.data() + written.size() - 22, 4) == "PK\x05\x06");

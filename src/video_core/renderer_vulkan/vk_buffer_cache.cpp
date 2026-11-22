@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <cstdlib>
 #include <span>
@@ -19,11 +20,14 @@
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
+#include "video_core/renderer_vulkan/vk_texel_buffer_range.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/texture_cache/util.h"
+
+#include <vulkan/utility/vk_format_utils.h>
 
 namespace Vulkan {
 namespace {
@@ -74,8 +78,8 @@ size_t BytesPerIndex(VkIndexType index_type) {
     }
 }
 
-vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allocator, u64 size,
-                        VkDeviceSize sparse_alignment) {
+vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allocator,
+                        StagingBufferPool& staging_pool, u64 size, VkDeviceSize sparse_alignment) {
     VkBufferUsageFlags flags =
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
         VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
@@ -101,11 +105,26 @@ vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allo
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
     };
-    if (sparse_alignment > 1) {
-        return memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal, sparse_alignment);
-    }
-    return memory_allocator.CreateBuffer(
-        buffer_ci, device.IsMoltenVK() ? MemoryUsage::Stream : MemoryUsage::DeviceLocal);
+    // The staging pool holds most of the memory that can be freed now (#262: 926 MiB of an Intel
+    // UHD's 3.2 GB heap when a 128 KiB buffer had no room after a scene change).
+    return CreateAfterRecovery(
+        [&] {
+            if (sparse_alignment > 1) {
+                return memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal,
+                                                     sparse_alignment);
+            }
+            return memory_allocator.CreateBuffer(
+                buffer_ci, device.IsMoltenVK() ? MemoryUsage::Stream : MemoryUsage::DeviceLocal);
+        },
+        [&] {
+            static u32 logged{};
+            if (logged++ < 32) {
+                LOG_WARNING(Render_Vulkan,
+                            "No memory for a {} byte buffer; freeing staging buffers and retrying",
+                            size);
+            }
+            staging_pool.ReleaseMemory();
+        });
 }
 } // Anonymous namespace
 
@@ -126,7 +145,7 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
                bool sparse_compatible_)
     : VideoCommon::BufferBase(cpu_addr_, size_bytes_), device{&runtime.device},
       scheduler{&runtime.scheduler},
-      buffer{CreateBuffer(*device, runtime.memory_allocator, SizeBytes(),
+      buffer{CreateBuffer(*device, runtime.memory_allocator, runtime.staging_pool, SizeBytes(),
                           runtime.SparseAlignmentFor(sparse_compatible_))},
       tracker{SizeBytes()} {
     sparse_compatible = sparse_compatible_;
@@ -144,7 +163,7 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
                                    0, barrier);
         });
     }
-    if (runtime.device.HasDebuggingToolAttached()) {
+    if (runtime.device.NamesObjects()) {
         buffer.SetObjectNameEXT(fmt::format("Buffer {:#x}", CpuAddr()).c_str());
     }
     if (device->IsBufferDeviceAddressSupported()) {
@@ -157,36 +176,39 @@ void Buffer::MarkUsage(u64 offset, u64 size) noexcept {
     last_usage_tick = scheduler->CurrentTick();
 }
 
-VkBufferView Buffer::View(u32 offset, u32 size, VideoCore::Surface::PixelFormat format) {
-    if (!device) {
-        // Null buffer supported, return a null descriptor
-        return VK_NULL_HANDLE;
-    } else if (is_null) {
-        // Null buffer not supported, adjust offset and size
-        offset = 0;
-        size = 0;
-    }
+VkBufferView Buffer::View(VkDeviceSize offset, VkDeviceSize size, VkFormat format) {
     const auto it{std::ranges::find_if(views, [offset, size, format](const BufferView& view) {
         return offset == view.offset && size == view.size && format == view.format;
     })};
     if (it != views.end()) {
         return *it->handle;
     }
-    views.push_back({
-        .offset = offset,
-        .size = size,
-        .format = format,
-        .handle = device->GetLogical().CreateBufferView({
+    try {
+        auto view = device->GetLogical().CreateBufferView({
             .sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
             .buffer = *buffer,
-            .format = MaxwellToVK::SurfaceFormat(*device, FormatType::Buffer, false, format).format,
+            .format = format,
             .offset = offset,
             .range = size,
-        }),
-    });
-    return *views.back().handle;
+        });
+        views.push_back({offset, size, format, std::move(view)});
+        return *views.back().handle;
+    } catch (const vk::Exception& exception) {
+        static std::atomic<u32> logged{};
+        const auto result = exception.GetResult();
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 32 || result == VK_ERROR_DEVICE_LOST) {
+            LOG_ERROR(Render_Vulkan,
+                      "vkCreateBufferView failed: VkResult={} buffer={:#x} format={} offset={} range={}",
+                      static_cast<s32>(result), reinterpret_cast<u64>(*buffer), format,
+                      offset, size);
+        }
+        if (result == VK_ERROR_DEVICE_LOST) {
+            device->ReportLoss();
+        }
+        return VK_NULL_HANDLE;
+    }
 }
 
 class QuadIndexBuffer {
@@ -232,7 +254,7 @@ public:
             .pQueueFamilyIndices = nullptr,
         };
         buffer = memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal);
-        if (device.HasDebuggingToolAttached()) {
+        if (device.NamesObjects()) {
             buffer.SetObjectNameEXT("Quad LUT");
         }
 
@@ -396,7 +418,8 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, MemoryAllocator& m
                                        ComputePassDescriptorQueue& compute_pass_descriptor_queue,
                                        DescriptorPool& descriptor_pool)
     : device{device_}, memory_allocator{memory_allocator_}, scheduler{scheduler_},
-      staging_pool{staging_pool_}, guest_descriptor_queue{guest_descriptor_queue_},
+      master_semaphore{scheduler_.GetMasterSemaphore()}, staging_pool{staging_pool_},
+      guest_descriptor_queue{guest_descriptor_queue_},
       quad_index_pass(device, scheduler, descriptor_pool, staging_pool,
                       compute_pass_descriptor_queue),
       multi_range_buffers(device_) {
@@ -416,8 +439,11 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, MemoryAllocator& m
     limit_dynamic_storage_buffers = driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
                                     driver_id == VK_DRIVER_ID_ARM_PROPRIETARY;
     if (limit_dynamic_storage_buffers) {
-        max_dynamic_storage_buffers = device.GetMaxDescriptorSetStorageBuffersDynamic();
-    }    
+        // Guest storage buffers are bound as plain VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, so the
+        // per-stage limit applies, not the much lower dynamic one (16 on Adreno 830, which left
+        // Ocarina of Time's compute shaders with half their buffers unbound).
+        max_dynamic_storage_buffers = device.GetMaxPerStageDescriptorStorageBuffers();
+    }
     if (device.SupportsUint8Indices()) {
         uint8_pass = std::make_unique<Uint8Pass>(device, scheduler, descriptor_pool, staging_pool,
                                                  compute_pass_descriptor_queue);
@@ -448,8 +474,58 @@ StagingBufferRef BufferCacheRuntime::DownloadStagingBuffer(size_t size, bool def
     return staging_pool.Request(size, MemoryUsage::Download, deferred);
 }
 
-VkFormat BufferCacheRuntime::TexelBufferFormat(VideoCore::Surface::PixelFormat format) const {
-    return MaxwellToVK::SurfaceFormat(device, FormatType::Buffer, false, format).format;
+void BufferCacheRuntime::BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
+                                           VideoCore::Surface::PixelFormat format) {
+    const bool is_null = buffer.IsNull();
+    if (is_null && device.HasNullDescriptor()) {
+        guest_descriptor_queue.AddTexelBuffer(VK_NULL_HANDLE, 0, 0, 0, VK_FORMAT_R8_UNORM);
+        return;
+    }
+    if (format == VideoCore::Surface::PixelFormat::Invalid) {
+        format = VideoCore::Surface::PixelFormat::R8_UNORM;
+    }
+    const auto host_format =
+        MaxwellToVK::SurfaceFormat(device, FormatType::Buffer, false, format).format;
+    constexpr VkFormatFeatureFlags features =
+        VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT | VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT;
+    const u32 block_size = vkuFormatTexelBlockSize(host_format);
+    const u32 texels_per_block = vkuFormatTexelsPerBlock(host_format);
+    const auto alignment = device.GetTexelBufferOffsetAlignment(
+        block_size % 3 == 0 ? block_size / 3 : block_size);
+    const auto buffer_size = is_null ? NullBufferSize() : buffer.SizeBytes();
+    const auto view_offset = is_null ? 0u : offset;
+    const bool descriptor_buffer = guest_descriptor_queue.UsesDescriptorBuffer();
+    const auto address = buffer.DeviceAddress();
+    const auto range = ClampTexelBufferRange(view_offset, is_null ? block_size : size, buffer_size,
+                                            descriptor_buffer ? 1 : alignment,
+                                            block_size, texels_per_block,
+                                            device.GetMaxTexelBufferElements());
+    const bool invalid_address =
+        descriptor_buffer &&
+        (address == 0 || alignment == 0 || (address + view_offset) % alignment != 0);
+    if (range == 0 || invalid_address ||
+        !device.IsFormatSupported(host_format, features, FormatType::Buffer)) {
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+            LOG_ERROR(Render_Vulkan,
+                      "Invalid texel buffer binding: format={} offset={} size={} buffer_size={} "
+                      "address={:#x} alignment={} max_elements={}",
+                      host_format, offset, size, buffer_size, address, alignment,
+                      device.GetMaxTexelBufferElements());
+        }
+        guest_descriptor_queue.RejectTexelBuffer();
+        return;
+    }
+    if (descriptor_buffer) {
+        guest_descriptor_queue.AddTexelBuffer(VK_NULL_HANDLE, address, view_offset, range,
+                                              host_format);
+        return;
+    }
+    if (const auto view = buffer.View(view_offset, range, host_format)) {
+        guest_descriptor_queue.AddTexelBuffer(view);
+    } else {
+        guest_descriptor_queue.RejectTexelBuffer();
+    }
 }
 
 void BufferCacheRuntime::FreeDeferredStagingBuffer(StagingBufferRef& ref) {
@@ -491,10 +567,6 @@ void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& slot_buffers) noe
             it->ResetUsageTracking();
         }
     }
-}
-
-u64 BufferCacheRuntime::CurrentTick() {
-    return scheduler.CurrentTick();
 }
 
 bool BufferCacheRuntime::IsFree(u64 tick) {
@@ -936,7 +1008,7 @@ void BufferCacheRuntime::ReserveNullBuffer() {
 }
 
 VkDeviceSize BufferCacheRuntime::NullBufferSize() const {
-    return device.IsMoltenVK() ? MOLTENVK_BUFFER_TAIL : 4;
+    return device.IsMoltenVK() ? MOLTENVK_BUFFER_TAIL : 16;
 }
 
 vk::Buffer BufferCacheRuntime::CreateNullBuffer() {
@@ -961,7 +1033,7 @@ vk::Buffer BufferCacheRuntime::CreateNullBuffer() {
         create_info.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
     vk::Buffer ret = memory_allocator.CreateBuffer(create_info, MemoryUsage::DeviceLocal);
-    if (device.HasDebuggingToolAttached()) {
+    if (device.NamesObjects()) {
         ret.SetObjectNameEXT("Null buffer");
     }
 

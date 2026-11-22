@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 #include <deque>
@@ -145,6 +146,8 @@ struct CommandWordsAllocator {
 struct CommandList final {
     CommandList() = default;
     explicit CommandList(std::size_t size) : command_lists(size) {}
+    CommandList(std::size_t size, boost::container::default_init_t)
+        : command_lists(size, boost::container::default_init) {}
     explicit CommandList(boost::container::small_vector<CommandHeader, 512>&& prefetch_command_list_)
         : prefetch_command_list{std::move(prefetch_command_list_)} {}
 
@@ -236,13 +239,17 @@ private:
     bool Step();
     /// Returns how many words were processed: fewer than given when a semaphore acquire
     /// suspended the channel.
-    size_t ProcessCommands(std::span<const CommandHeader> commands, size_t word_offset = 0);
+    size_t ProcessCommands(std::span<const CommandHeader> commands, size_t word_offset = 0,
+                           std::string_view source = {}, const CommandHeader* snapshot = nullptr);
     size_t command_resume_offset{}; ///< Words of the current entry done before a suspension
 
     void SetState(const CommandHeader& command_header);
 
     void CallMethod(u32 argument);
     void CallMultiMethod(const u32* base_start, u32 num_methods);
+    void CaptureMmeWords(std::span<const u32> words, size_t word_offset,
+                         std::string_view source, const CommandHeader* snapshot,
+                         u32 inline_header = 0) const;
     [[nodiscard]] bool WantsSegment() const;
     void ReportUnboundSubchannel();
     void WatchArgument(u32 method, u32 argument) const;
@@ -255,9 +262,13 @@ public:
     void RecordParsedEntry(const CommandListHeader& header, std::span<const CommandHeader> commands);
     /// Whether the entry lies on device pages the GPU has written (NX2).
     bool IsGpuWrittenCommands(GPUVAddr address, size_t size);
-    /// A copy engine method sent to the split's back: a launch that releases its semaphore tells
-    /// the front what it writes (GpuSplit::NoteSemaphoreWrite).
-    void NoteDmaSemaphore(u32 method, u32 argument);
+    /// A method sent to the split's back as it is: keeps the copy and inline-to-memory engines'
+    /// registers, as their CallMethod and ConsumeSink store them.
+    void ShadowEngineMethod(Engines::EngineTypes type, u32 method, u32 argument);
+    /// What the back writes running that method, with the registers ShadowEngineMethod kept:
+    /// copies and their semaphores, inline-to-memory uploads (GpuSplit::NoteWrite), and what a
+    /// copy's semaphore writes (GpuSplit::NoteSemaphoreWrite).
+    void NoteEngineWrites(Engines::EngineTypes type, u32 method);
     /// Copies the list's words from memory again, as of suspension count `now`, from entry
     /// `first_entry` on (the entries before it ran already). Waits for the list's copier job first.
     void RefreshSnapshot(CommandList& list, u64 now, size_t first_entry = 0);
@@ -284,8 +295,19 @@ public:
     /// flushes and reads guest memory. With `pending`, a copy the GPU has not finished sets
     /// `*pending` and pending_list_tick instead of waiting (the result is false then).
     bool ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pending = nullptr);
+    /// Takes a complete compute macro call's GPU-written parameters as slot placeholders when
+    /// a tagged dry run proves the front can leave their values to the host GPU.
+    bool TakeGpuWrittenListWords(const CommandListHeader& header);
     /// Brings command list words the GPU wrote (still only in host buffers) to guest memory.
     bool FlushGpuWrittenCommands(GPUVAddr address, size_t size);
+    /// A safe read of a command list on the split's front: the GPU-written list tracking follows
+    /// the buffer cache, so what the texture and query caches hold of the list (images, reports)
+    /// is written out on the back after the work sent before it, as a safe read flushes it. The
+    /// caches are asked once the work before the last host-level wait has run (WaitForSync). Only
+    /// a list that is read from memory (`live`) or that an image wrote is flushed. After an image
+    /// write every cache is flushed, the buffer cache too, and it returns true: the list is read
+    /// from guest memory, not from its submit-time copy or a buffer cache list copy.
+    bool FlushCachedCommands(GPUVAddr address, size_t size, bool live);
 
 private:
 
@@ -349,8 +371,13 @@ public:
 
     std::array<Engines::EngineInterface*, max_subchannels> subchannels{};
     std::array<Engines::EngineTypes, max_subchannels> subchannel_type;
-    /// The copy engine's semaphore address (high, low) and payload as sent (NoteDmaSemaphore).
-    std::array<u32, 3> dma_semaphore{};
+    /// The registers of the channel's copy engine (MaxwellDMA::RegisterCount) and its
+    /// inline-to-memory engine (KeplerMemory::Regs::NUM_REGS), as the methods sent left them
+    /// (ShadowEngineMethod): where the back's copies and uploads write.
+    static constexpr size_t DmaRegisterCount = 0x800;
+    static constexpr size_t InlineToMemoryRegisterCount = 0x7f;
+    std::array<u32, DmaRegisterCount> dma_registers{};
+    std::array<u32, InlineToMemoryRegisterCount> inline_to_memory_registers{};
 
     Engines::Puller puller;
     std::mutex sync_mutex;

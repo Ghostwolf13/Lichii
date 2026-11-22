@@ -10,18 +10,23 @@ This FAQ will serve as a general quick question and answer simple questions.
 No - The only emulator that has this kind of functionality is *Ryujinx* and it's forks.  This solution requires loading a custom module on a modded switch console to work.
 
 ### Can I Play Online Games?
-No - This would require hijacking requests to Nintendo's official servers to a custom server infrastructure built to emulate that functionality.  This is how services like [*Pretendo*](https://pretendo.network/) operate.  As such, you would not be able to play "Online", you can however play multiplayer games.
+Lichii's local-wireless rooms and third-party online services are separate features. Nextendo is
+an independently operated community service, not Nintendo's online service. When enabled,
+supported games connect to Nextendo and send it a Nextendo game token. Compatibility and account
+requirements depend on that service. This does not grant access to Nintendo's services or imply
+Nintendo's authorization or endorsement.
 
 Guest socket readiness operations (`select` and `poll`) are emulated, but this alone does not
 provide Nintendo's online services or guarantee compatibility with a particular game or server.
 
 ### What's the Difference Between Online and Multiplayer?
-I have chosen the wording carefully here for a reason.  
+- Local-wireless multiplayer uses the game's LDN mode through emulator rooms. It does not use
+  Nintendo's online service.
+- Third-party online play depends on an independently operated service supporting the game's
+  protocol. It is not the same as joining an LDN room.
 
-- Online: Games that connect to Nintendo's Official servers and allow games/functionality using that communication method are unsupported on any emulator currently (for obvious reasons).
-- Multiplayer:  The ability to play with multiple players on separate systems.  This is supported for games that support LDN Local Wireless.
-
-The rule of thumb here is simple: If a game supports the ability to communicate without a server (Local Wireless, LAN, etc.) you will be able to play with other users.  If it requires a server to function - it will not.  You will need to look up if your title support Local Wireless/LAN play as an option.
+Check the game's supported modes and the service's compatibility information. Neither an LDN
+room nor a network setting guarantees that a particular game will work.
 
 ### How Does Multiplayer Work on Eden Exactly?
 Eden's multiplayer works by emulating the Switch's local wireless (LDN) system, then tunneling that traffic over the internet through "rooms" that act like lobbies. Each player runs their own instance of the emulator, and as long as everyone joins the same room and the game supports local wireless multiplayer, the emulated consoles see each other as if they were on the same local network. This design avoids typical one-save netplay issues because every user keeps an independent save and console state while only the in-game wireless packets are forwarded through the room server.  In practice, you pick or host a room, configure your network interface/port forwarding if needed, then launch any LDN-capable game; from the game's perspective it is just doing standard local wireless, while the emulator handles discovery and communication over the internet or LAN.

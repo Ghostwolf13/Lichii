@@ -146,6 +146,16 @@
           </item>
          </layout>
         </item>
+        <item alignment="Qt::AlignLeft">
+         <widget class="QPushButton" name="iidb_api_key">
+          <property name="text">
+           <string>iiDB Artwork API Key...</string>
+          </property>
+          <property name="toolTip">
+           <string>Set, test or forget the personal key for browsing iiDB artwork in game Properties.</string>
+          </property>
+         </widget>
+        </item>
        </layout>
       </item>
      </layout>

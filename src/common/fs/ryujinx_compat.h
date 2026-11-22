@@ -3,39 +3,42 @@
 
 #pragma once
 
-#include "common/common_types.h"
 #include <filesystem>
+#include <string>
 #include <vector>
+
+#include "common/common_types.h"
+#include "common/fs/symlink.h"
 
 namespace Common::FS {
 
-constexpr const char IMEN_MAGIC[4] = {0x49, 0x4d, 0x45, 0x4e};
-constexpr const char IMKV_MAGIC[4] = {0x49, 0x4d, 0x4b, 0x56};
-constexpr const u8 IMEN_SIZE = 0x8c;
+enum class RyujinxSaveType : u8 { Account = 1, Device = 3 };
 
-std::filesystem::path GetKvdbPath();
-std::filesystem::path GetKvdbPath(const std::filesystem::path &path);
-std::filesystem::path GetRyuPathFromSavePath(const std::filesystem::path &path);
-std::filesystem::path GetRyuSavePath(const u64 &save_id);
-std::filesystem::path GetRyuSavePath(const std::filesystem::path &path, const u64 &save_id);
-
-enum class IMENReadResult {
-    Nonexistent,  // ryujinx not found
-    NoHeader,     // file isn't big enough for header
-    InvalidMagic, // no IMKV or IMEN header
-    Misaligned,   // file isn't aligned to expected IMEN boundaries
-    NoImens,      // no-op, there are no IMENs
-    Success,      // :)
-};
-
-struct IMEN
-{
-    u64 title_id;
+struct RyujinxSave {
     u64 save_id;
+    u128 user_id;
+    RyujinxSaveType type;
+    std::filesystem::path path;
 };
 
-static_assert(sizeof(IMEN) == 0x10, "IMEN has incorrect size.");
+enum class IMENReadResult { Nonexistent, NoHeader, InvalidMagic, Misaligned, NoImens, Success };
 
-IMENReadResult ReadKvdb(const std::filesystem::path &path, std::vector<IMEN> &imens);
+std::filesystem::path GetKvdbPath(const std::filesystem::path& root);
+IMENReadResult ReadRyujinxSaves(const std::filesystem::path& root, u64 program_id, u128 lichii_user,
+                                u128 ryujinx_user, std::vector<RyujinxSave>& saves);
+
+enum class RyujinxSaveOperation { FromRyujinx, FromLichii, Unlink };
+
+struct RyujinxSaveResult {
+    std::string error;
+    std::vector<std::filesystem::path> backups;
+};
+
+using RyujinxLinkCreator = bool (*)(std::filesystem::path, std::filesystem::path);
+
+RyujinxSaveResult UpdateRyujinxSave(const std::filesystem::path& lichii,
+                                    const std::filesystem::path& ryujinx,
+                                    RyujinxSaveOperation operation,
+                                    RyujinxLinkCreator create_link = CreateSymlink);
 
 } // namespace Common::FS

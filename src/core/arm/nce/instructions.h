@@ -16,6 +16,7 @@ enum SystemRegister : u32 {
     TpidrroEl0 = 0x5E83,
     CntfrqEl0 = 0x5F00,
     CntpctEl0 = 0x5F01,
+    CntvctEl0 = 0x5F02,
 };
 
 // https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/SVC--Supervisor-Call-
@@ -121,10 +122,15 @@ union Exclusive {
     constexpr explicit Exclusive(u32 raw_) : raw{raw_} {}
 
     constexpr bool Verify() {
-        if (this->GetSig() != 0x10) return false;
-        const bool pair = decltype(l)::ExtractValue(raw) & 1;
-        const bool fixed_rt2 = decltype(rt2)::ExtractValue(raw) == 0b11111;
-        return pair || fixed_rt2;
+        if (this->GetSig() != 0x10) {
+            return false;
+        }
+        const auto op = decltype(l)::ExtractValue(raw);
+        if ((op & 2) && decltype(rs)::ExtractValue(raw) != 31) {
+            return false;
+        }
+        return (op & 1) ? decltype(size)::ExtractValue(raw) >= 2
+                        : decltype(rt2)::ExtractValue(raw) == 31;
     }
 
     constexpr u32 GetSig() {
@@ -151,5 +157,9 @@ static_assert(Exclusive(0xC85FFC00).Verify());
 static_assert(Exclusive(0xC85FFC00).AsOrdered() == 0xC85FFC00);
 static_assert(Exclusive(0xC85F7C00).AsOrdered() == 0xC85FFC00);
 static_assert(Exclusive(0xC8200440).AsOrdered() == 0xC8208440);
+static_assert(Exclusive(0xC87F0440).Verify());
+static_assert(Exclusive(0xC8200861).Verify());
+static_assert(!Exclusive(0x48207C82).Verify());
+static_assert(!Exclusive(0x08607C82).Verify());
 
 } // namespace Core::NCE

@@ -22,7 +22,9 @@ the old way there.
 | Demoted fragments stop writing where the guest's control flow says | Moving demotes to the end of the program over nested returns let helper lanes keep writing; AMD drew a black scene | Nested returns are counted before demotes move | [#127] |
 | Fragment subgroup shuffles | AMD's proprietary driver gets them wrong | Broadcast fallback on that driver | [#273] |
 | Depth-compare samples | Undefined on colour or integer images; AMD returned green | Depth-compare images stay floating point. Binding the null image for depth-compare samples of uncomparable images is proposed in the open PR | [#273]; [#354] (open) |
+| Task and mesh programs | Native task/mesh draws hang RDNA2 GPUs (RX 6000 series). RADV faults the GPU and often resets it with the desktop session ([#1699]); AMD's Windows driver loses the device after a few minutes ([#871], [#1934]) | On RDNA2, with RADV or AMD's driver, task/mesh draws take the compute fallback, which skips mesh programs with per-primitive outputs. The Mesh Shaders setting (Graphics → Extensions, also per game) picks Native or Compute Fallback instead of Automatic. RDNA3 and RDNA4 keep native mesh shaders: RADV's hang there was fixed in Mesa 26.2.5 and worked around before it ([#1203]), and AMD's driver has no report from a current build | [#1732]; the setting is from [#814] |
 | Native FP16 arithmetic | Turned off on AMD as a driver workaround | Turned off on every AMD driver. An `EDEN_AMD_FP16=1` test switch was closed unmerged; keeping FP16 needs a driver-version policy backed by DKCR and Ocarina of Time evidence | [#378] (closed) |
+| A triangle whose vertices all have z = w (a sky on the far plane) is filled with exactly the far depth | AMD's rasterizer lands some pixels a step short, on Vulkan and OpenGL; two sky meshes then fail their EQUAL or LEQUAL test against each other in blocks (Mario Kart 8 Deluxe's Sky-High Sundae) | Vertex shaders that store one value to position z and w are marked, and their draws get a depth bias towards the far value plus depth clamping, so every pixel lands exactly on it | [#1905] |
 
 Not specific to AMD, but easy to mistake for an AMD bug:
 
@@ -47,9 +49,9 @@ Check these before filing a new one.
 
 ## Settings for AMD users
 
-- Keep the split GPU thread on (`EDEN_NX2_SPLIT=2`, the default in `nx2_switches.txt`) and GPU
-  accuracy below High, which turns the split off. Textures flickering in that setup on an RX 9070
-  XT ([#163]) were fixed by [#425].
+- Keep the split GPU thread on (`EDEN_NX2_SPLIT=2`, the default in `nx2_switches.txt`). It runs
+  at every GPU accuracy (High turned it off before #1765). Textures flickering with the split on an
+  RX 9070 XT ([#163]) were fixed by [#425].
 - Logging at `*:Info` costs CPU time in busy scenes. Use `*:Error` when you compare frame rates
   ([#403]).
 - The first run compiles every shader and can stall for minutes; later runs load the pipeline
@@ -80,6 +82,7 @@ Check these before filing a new one.
    bug, not an AMD one.
 
 [#127]: https://github.com/zortos293/Lichii/pull/127
+[#1905]: https://github.com/zortos293/Lichii/issues/1905
 [#163]: https://github.com/zortos293/Lichii/issues/163
 [#165]: https://github.com/zortos293/Lichii/issues/165
 [#200]: https://github.com/zortos293/Lichii/issues/200
@@ -98,3 +101,9 @@ Check these before filing a new one.
 [#425]: https://github.com/zortos293/Lichii/pull/425
 [#432]: https://github.com/zortos293/Lichii/pull/432
 [#462]: https://github.com/zortos293/Lichii/issues/462
+[#814]: https://github.com/zortos293/Lichii/pull/814
+[#871]: https://github.com/zortos293/Lichii/issues/871
+[#1203]: https://github.com/zortos293/Lichii/pull/1203
+[#1699]: https://github.com/zortos293/Lichii/issues/1699
+[#1732]: https://github.com/zortos293/Lichii/pull/1732
+[#1934]: https://github.com/zortos293/Lichii/issues/1934

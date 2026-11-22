@@ -2,6 +2,11 @@
 
 Use this guide to get started using the Eden emulator.
 
+This inherited guide describes Eden. For Lichii downloads and profile setup, start with the
+[Lichii README](../../README.md#downloads-and-setup). Use only software and system files you are
+authorized to copy and use. Lichii does not provide games, keys or firmware, or download sources
+for them. Dumping from your own console does not by itself establish permission for every use.
+
 **[See here](https://evilperson1337.notion.site/Eden-Quick-Start-2b057c2edaf6817b9859d8bcdb474017) for an illustrated guide.**
 
 ## Windows
@@ -33,7 +38,7 @@ Use this guide to get started using the Eden emulator.
     
     <aside>
 
-    ***INFO***: You may get a "*Windows protected your PC"* SmartScreen message that appears.  This is just Windows Defender saying it did not recognize the application and did not run it - Eden is completely safe.  Click **More info** and then **Run anyway** to dismiss this message.
+    ***INFO***: An unsigned or unfamiliar build may trigger a SmartScreen warning. Verify its source and any published checksum before deciding whether to run it. Do not bypass a warning for an untrusted download.
     
     </aside>
 4. Eden will now launch and notify you about missing Decryption keys. Close the dialog box by hitting **OK**.
@@ -84,7 +89,9 @@ Current macOS support is still experimental and very reliant on MoltenVK develop
 
 Users of macOS may wish to use [Asahi Linux](https://wiki.gentoo.org/wiki/Project:Asahi/Guide) for the rising KosmicKrisp support.
 
-As of writing, neither macOS nor Asahi has support for NCE; additionally Asahi has extraneous paging bugs with fastmem.
+On Apple Silicon, Lichii defaults to Dynarmic (JIT) and offers an experimental
+Hypervisor backend in the CPU settings. See [Architectures](Architectures.md) for its requirements.
+The Linux NCE backend requires 4 KiB host pages, so it is unavailable in a typical Asahi Linux setup.
 
 ### Allowing Eden to Run on MacOS
 

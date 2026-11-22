@@ -1,0 +1,26 @@
+From 5576a4ee3f44c3629a1f5214edfd7a3955994f34 Mon Sep 17 00:00:00 2001
+From: Sam Lantinga <slouken@libsdl.org>
+Date: Sun, 15 Nov 2026 15:31:14 -0800
+Subject: [PATCH] Fixed the sensor enabled value in the HIDAPI Switch 2 driver
+
+(cherry picked from commit a239a79c78764486359c6314fcf76f8caec02e45)
+---
+ src/joystick/hidapi/SDL_hidapi_switch2.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/joystick/hidapi/SDL_hidapi_switch2.c b/src/joystick/hidapi/SDL_hidapi_switch2.c
+index 7135b3825..987f82cc0 100644
+--- a/src/joystick/hidapi/SDL_hidapi_switch2.c
++++ b/src/joystick/hidapi/SDL_hidapi_switch2.c
+@@ -679,7 +679,7 @@ static bool HIDAPI_DriverSwitch2_SetJoystickSensorsEnabled(SDL_HIDAPI_Device *de
+         }
+         RecvBulkData(ctx, reply, sizeof(reply));
+     }
+-    ctx->sensors_enabled = true;
++    ctx->sensors_enabled = enabled;
+     return true;
+ }
+ 
+-- 
+2.56.0
+

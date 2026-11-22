@@ -3,6 +3,7 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <thread>
 
 #include "common/display_hdr.h"
@@ -14,6 +15,7 @@
 #include "common/windows/timer_resolution.h"
 #endif
 #include "core/frontend/emu_window.h"
+#include "video_core/host_vsync.h"
 #include "video_core/nx2_profile.h"
 #ifdef HAS_LSFG
 #include "video_core/renderer_vulkan/present/lsfg_common.h"
@@ -40,7 +42,7 @@ static_assert(MAX_FRAMES_IN_FLIGHT <= LSFG_MAX_TARGETS);
 #endif
 
 // Sleeps until the deadline, without spinning: it may pass by up to a timer tick (about 0.5 ms
-// on Windows), well within a refresh, and the next deadline counts from the actual present.
+// on Windows), well within a refresh, and the next deadline counts from this one.
 void SleepUntil(std::chrono::steady_clock::time_point deadline) {
     while (true) {
         const auto left = deadline - std::chrono::steady_clock::now();
@@ -52,6 +54,15 @@ void SleepUntil(std::chrono::steady_clock::time_point deadline) {
 #else
         std::this_thread::sleep_for(left);
 #endif
+    }
+}
+
+// Sleeps short of the deadline and yields through the last millisecond: for the start of the
+// game's frame (HostVsync), where a timer tick of overshoot would show as uneven frame times.
+void WaitUntil(std::chrono::steady_clock::time_point deadline) {
+    SleepUntil(deadline - std::chrono::milliseconds{1});
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
     }
 }
 
@@ -159,7 +170,10 @@ PresentManager::PresentManager(const vk::Instance& instance_,
     // emulator.
     , use_present_thread{Settings::values.async_presentation.GetValue() ||
                          Settings::values.frame_gen.GetValue()}
+    , present_wait{device.IsPresentWaitEnabled()}
 {
+    // No frame starter of an earlier boot is left for this presenter.
+    VideoCore::HostVsync::Reset();
     SetImageCount();
 
     auto& dld = device.GetLogical();
@@ -193,6 +207,10 @@ PresentManager::PresentManager(const vk::Instance& instance_,
 
     if (use_present_thread) {
         StartPresentThread();
+    }
+    if (present_wait) {
+        present_wait_thread =
+            std::jthread([this](std::stop_token token) { PresentWaitThread(token); });
     }
 }
 
@@ -257,6 +275,7 @@ Frame* PresentManager::GetRenderFrame() {
     frame->present_done.Reset();
     frame->color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     frame->present_spacing = {};
+    frame->game_frame_presents = 1;
 #ifdef EGLANTINE_STREAMLINE
     frame->frame_gen = false;
 #endif
@@ -288,6 +307,11 @@ void PresentManager::Present(Frame* frame) {
 
 size_t PresentManager::MaxExtraFrames() const {
     return image_count - 1;
+}
+
+size_t PresentManager::FreeFrames() {
+    std::scoped_lock lock{free_mutex};
+    return free_queue.size();
 }
 
 bool PresentManager::NeedsStorage(const Frame* frame, bool required) const {
@@ -443,14 +467,18 @@ void PresentManager::PresentThread(std::stop_token token) {
             // before the queue lock goes out of scope. This way the swapchain
             // lock in WaitPresent is guaranteed to occur after here.
             void(std::exchange(lock, std::unique_lock{swapchain_mutex}));
-            const bool trace = Common::DkbFrameTrace::Enabled();
-            const auto ready = trace ? std::chrono::steady_clock::now()
-                                     : std::chrono::steady_clock::time_point{};
-            SleepUntil(next_present);
+            const auto ready = std::chrono::steady_clock::now();
+            // The spacing counts from when this present was due, not from when it returned. A
+            // present that waits for vblank has already spent part of the spacing; counting it
+            // again cost each generated frame an extra refresh, which lengthened the measured
+            // frame interval and with it the spacing, until the game ran at a fraction of its
+            // speed (#1772).
+            const auto start = (std::max)(next_present, ready);
+            SleepUntil(start);
             CopyToSwapchain(frame);
-            const auto presented = std::chrono::steady_clock::now();
-            next_present = presented + frame->present_spacing;
-            if (trace) {
+            next_present = start + frame->present_spacing;
+            if (Common::DkbFrameTrace::Enabled()) {
+                const auto presented = std::chrono::steady_clock::now();
                 LogPacing(frame, presented - ready, presented);
             }
 
@@ -514,8 +542,10 @@ void PresentManager::SetImageCount() {
 #ifdef HAS_LSFG
     const size_t generations = Settings::FrameGenMaxGenerations();
     const size_t queued_composites = Settings::values.frame_gen_queue_target.GetValue() + 1;
+    // One frame more than the presents of the queued composites, for the next game frame
+    // (GenerationsWithoutWaiting).
     image_count =
-        std::clamp<size_t>((generations + 1) * queued_composites, swapchain.GetImageCount(),
+        std::clamp<size_t>((generations + 1) * queued_composites + 1, swapchain.GetImageCount(),
                            MAX_FRAMES_IN_FLIGHT);
 #else
     image_count = std::min<size_t>(swapchain.GetImageCount(), MAX_FRAMES_IN_FLIGHT);
@@ -582,6 +612,12 @@ void PresentManager::CopyToSwapchain(Frame* frame) {
 }
 
 void PresentManager::CopyToSwapchainImpl(Frame* frame) {
+    // The host's display starts the game's frames only while a session asks for it (a game whose
+    // frame rate is unlocked), and not with frame generation, which spaces its own presents. The
+    // swapchain is made with present ids the first time that happens, not before.
+    const bool host_vsync = present_wait && !Settings::values.frame_gen.GetValue() &&
+                            VideoCore::HostVsync::Active();
+    swapchain.RequestPresentIds(host_vsync);
 
     // Recreate for size changes, SDR/HDR10/scRGB transitions, or a suboptimal swapchain.
     const bool is_suboptimal = swapchain.NeedsRecreation() || swapchain.IsOutDated();
@@ -612,7 +648,10 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         return;
     }
 
-    while (swapchain.AcquireNextImage(!use_present_thread)) {
+    if (host_vsync) {
+        WaitForDisplay();
+    }
+    while (swapchain.AcquireNextImage(!use_present_thread, frame->game_frame_presents)) {
         if (!RecreateSwapchain(frame)) {
             return;
         }
@@ -754,7 +793,6 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
             break;
         case VK_ERROR_DEVICE_LOST:
             device.ReportLoss();
-            [[fallthrough]];
         default:
             vk::Check(result);
             break;
@@ -774,12 +812,108 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         });
     }
 #endif
-    swapchain.Present(render_semaphore);
+    PresentRecord record{
+        .generation = swapchain.Generation(),
+        .id = host_vsync && swapchain.WaitsForDisplay() ? ++last_present_id : 0,
+    };
+    record.accepted = swapchain.Present(render_semaphore, record.id);
 #ifdef EGLANTINE_STREAMLINE
     if (frame->frame_gen) {
         Streamline::FrameGenAfterPresent(frame->frame_gen_frame.index);
     }
 #endif
+    if (record.id == 0) {
+        return;
+    }
+    {
+        std::scoped_lock lock{wait_mutex};
+        wait_queue.push_back(record);
+    }
+    wait_cv.notify_one();
+}
+
+void PresentManager::WaitForDisplay() {
+    if (last_present_id < 2 || !swapchain.WaitsForDisplay() ||
+        display_silent.load(std::memory_order_acquire)) {
+        return;
+    }
+    // Long enough for any refresh rate, short enough that a window that shows nothing does not
+    // stall presentation.
+    constexpr std::chrono::milliseconds Timeout{100};
+    const u64 target = last_present_id - 1;
+    {
+        std::unique_lock lock{shown_mutex};
+        if (!shown_cv.wait_for(lock, Timeout, [this, target] {
+                return completed_present_id.load(std::memory_order_acquire) >= target;
+            })) {
+            display_silent.store(true, std::memory_order_release);
+            return;
+        }
+    }
+    if (shown_present_id.load(std::memory_order_acquire) < target) {
+        return;
+    }
+    // The present before the last is on screen: the game may start its next frame, once the FPS
+    // limit allows it. This thread holds its next present until then on purpose: the game has
+    // nothing new to show before that start, and the frame after it is acquired right behind it.
+    const auto start = VideoCore::HostVsync::NextStart(std::chrono::steady_clock::now());
+    if (!start) {
+        return;
+    }
+    WaitUntil(*start);
+    VideoCore::HostVsync::StartFrame();
+}
+
+void PresentManager::PresentWaitThread(std::stop_token token) {
+    Common::SetCurrentThreadName("VulkanPresentWait");
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
+    // Vulkan allows no acquire or present on a swapchain during a present wait, so the swapchain
+    // locks them out for each wait: short waits, which an acquire or a present gets in between
+    // (it waits 1 ms at most), until the present is shown or counts as not shown.
+    constexpr u64 WaitSliceNs = 1'000'000;
+    constexpr std::chrono::milliseconds WaitLimit{100};
+    while (!token.stop_requested()) {
+        PresentRecord record{};
+        {
+            std::unique_lock lock{wait_mutex};
+            if (!wait_cv.wait(lock, token, [this] { return !wait_queue.empty(); })) {
+                break;
+            }
+            record = wait_queue.front();
+            wait_queue.pop_front();
+            // While the display shows nothing, only the newest present is worth waiting for.
+            if (display_silent.load(std::memory_order_acquire) && !wait_queue.empty()) {
+                continue;
+            }
+        }
+        // Only the id of an accepted present can be waited for. One the driver refused (an
+        // out of date swapchain) went through the queue in order and counts as gone.
+        const auto began = std::chrono::steady_clock::now();
+        VkResult result = record.accepted ? VK_TIMEOUT : VK_ERROR_OUT_OF_DATE_KHR;
+        while (result == VK_TIMEOUT && !token.stop_requested() &&
+               std::chrono::steady_clock::now() - began < WaitLimit) {
+            result = swapchain.WaitForPresent(record.generation, record.id, WaitSliceNs);
+        }
+        // A present to a swapchain that is gone (VK_ERROR_OUT_OF_DATE_KHR), or that the driver
+        // refused, holds nothing back: the game's next frame starts as after a shown one, without
+        // a pause at each recreation.
+        const bool shown = result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
+        const bool gone = result == VK_ERROR_OUT_OF_DATE_KHR;
+        {
+            std::scoped_lock lock{shown_mutex};
+            completed_present_id.store(record.id, std::memory_order_release);
+            if (shown || gone) {
+                shown_present_id.store(record.id, std::memory_order_release);
+            }
+            if (shown) {
+                display_silent.store(false, std::memory_order_release);
+            } else if (!gone) {
+                // Not shown in time, or no present waits (a driver that ignored the timeout).
+                display_silent.store(true, std::memory_order_release);
+            }
+        }
+        shown_cv.notify_all();
+    }
 }
 
 } // namespace Vulkan

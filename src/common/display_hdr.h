@@ -30,8 +30,8 @@ std::optional<DisplayHdrInfo> QueryDisplayHdr(void* window);
 /// it: Microsoft's guidance is to re-read DXGI_OUTPUT_DESC1 once IDXGIFactory1::IsCurrent turns
 /// false, and to re-check when the window moves to another display. Windows HDR toggles and
 /// output changes invalidate the factory; the SDR content brightness and a new HDR calibration
-/// profile may not, so a background thread re-reads the whole state every 500 ms (keeping its
-/// DXGI factory while it is current). Readers only load the cached state.
+/// profile may not, so a background thread re-reads the whole state every 500 ms, each time through
+/// a new DXGI factory. Readers only load the cached state.
 class DisplayHdrMonitor {
 public:
     DisplayHdrMonitor();

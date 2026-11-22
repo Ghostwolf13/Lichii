@@ -37,6 +37,7 @@
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #include "video_core/textures/decoders.h"
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
+#include "video_core/vulkan_common/vulkan_address_map.h"
 #include "video_core/vulkan_common/vulkan_debug_callback.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_instance.h"
@@ -177,6 +178,8 @@ try
     // Create debug messenger if debug is enabled
     , debug_messenger(Settings::values.renderer_debug ? CreateDebugUtilsCallback(instance)
                                                     : vk::DebugUtilsMessenger{})
+    , address_messenger(AddressMap::Wanted() ? CreateAddressBindingCallback(instance, dld)
+                                             : vk::DebugUtilsMessenger{})
     // Create surface
     , surface(CreateSurface(instance, render_window.GetWindowInfo()))
     , device(CreateDevice(instance, dld, *surface))
@@ -320,6 +323,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
 
 #ifdef HAS_LSFG
     void(frame_gen.WantedGenerations(present_manager.MaxExtraFrames(),
+                                     present_manager.FreeFrames(),
                                      present_manager.TakeBlockedTime()));
 
     frame_gen.Process(device, frame, frame->image_format, GuestExtent(framebuffers));
@@ -330,10 +334,13 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     const auto spacing = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<f32>(std::min(frame_gen.FrameInterval(), 0.1f) /
                                    static_cast<f32>(generated_frames + 1)));
+    const u32 game_frame_presents = static_cast<u32>(generated_frames) + 1;
+    frame->game_frame_presents = game_frame_presents;
     for (size_t generation = 0; generation < generated_frames; ++generation) {
         Frame* generated = present_manager.GetRenderFrame();
         generated->color_space = output.color_space;
         generated->present_spacing = spacing;
+        generated->game_frame_presents = game_frame_presents;
         blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());
         frame_gen.GenerateInto(device, generated, generation);
         scheduler.Flush(*generated->render_ready);

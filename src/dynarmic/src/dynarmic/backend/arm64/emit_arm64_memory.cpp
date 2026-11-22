@@ -384,6 +384,7 @@ CodePtr EmitMemoryStr(oaknut::CodeGenerator& code, int value_idx, oaknut::XReg X
             break;
         case 128:
             code.DMB(oaknut::BarrierOp::ISH);
+            fastmem_location = code.xptr<CodePtr>();
             code.STR(oaknut::QReg{value_idx}, Xscratch0);
             code.DMB(oaknut::BarrierOp::ISH);
             break;

@@ -442,8 +442,7 @@ public:
                                    nro_info->base_address, nro_size, bss_size));
         R_TRY(SetNroPerms(context->GetProcess(), nro_info->base_address, rx_size, ro_size, rw_size + bss_size));
 #ifdef HAS_NCE
-        if (Settings::IsNceEnabled()) {
-            auto* process = context->GetProcess();
+        if (auto* process = context->GetProcess(); process->UsesNativeExecution()) {
             auto& memory = process->GetMemory();
             std::vector<u8> text(rx_size);
             memory.ReadBlock(nro_info->base_address, text.data(), text.size());

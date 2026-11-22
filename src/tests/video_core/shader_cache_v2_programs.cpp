@@ -171,8 +171,10 @@ void RequireSameCode(const VideoCommon::LoweredNativeCode& actual,
     REQUIRE(actual.source_size == expected.source_size);
     REQUIRE(actual.texture_bound == expected.texture_bound);
     REQUIRE(actual.trap_prefix.size() == expected.trap_prefix.size());
-    REQUIRE(std::memcmp(actual.trap_prefix.data(), expected.trap_prefix.data(),
-                        expected.trap_prefix.size() * sizeof(Instruction)) == 0);
+    // memcmp takes no null pointers, not even for zero bytes: an empty prefix has them.
+    REQUIRE((expected.trap_prefix.empty() ||
+             std::memcmp(actual.trap_prefix.data(), expected.trap_prefix.data(),
+                         expected.trap_prefix.size() * sizeof(Instruction)) == 0));
     REQUIRE(VideoCommon::NativeShaderHash(actual.code) ==
             VideoCommon::NativeShaderHash(expected.code));
 }

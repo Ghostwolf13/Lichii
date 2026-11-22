@@ -3,6 +3,8 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <charconv>
+
 #include "common/hex_util.h"
 #include "core/file_sys/savedata_factory.h"
 #include "core/hle/service/cmif_serialization.h"
@@ -112,6 +114,17 @@ void ISaveDataInfoReader::FindNormalSaves(FileSys::SaveDataSpaceId space,
             }
 
             for (const auto& title_id : user_id->GetSubdirectories()) {
+                const auto name = title_id->GetName();
+                if (name.size() != 16) {
+                    continue;
+                }
+                u64 program_id{};
+                const auto parsed =
+                    std::from_chars(name.data(), name.data() + name.size(), program_id, 16);
+                if (parsed.ec != std::errc{} || parsed.ptr != name.data() + name.size() ||
+                    program_id == 0) {
+                    continue;
+                }
                 const auto device = std::all_of(user_id_numeric.begin(), user_id_numeric.end(),
                                                 [](u8 val) { return val == 0; });
                 info.emplace_back(SaveDataInfo{
@@ -121,7 +134,7 @@ void ISaveDataInfoReader::FindNormalSaves(FileSys::SaveDataSpaceId space,
                     {},
                     user_id_numeric,
                     save_id_numeric,
-                    stoull_be(title_id->GetName()),
+                    program_id,
                     title_id->GetSize(),
                     {},
                     {},

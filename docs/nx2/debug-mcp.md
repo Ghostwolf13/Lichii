@@ -113,8 +113,10 @@ server is on but idle, its thread sleeps in `epoll`/IOCP.
 - **Writes only under the dump directory.** `EDEN_NX2_DEBUG_DIR`, by default
   `<log dir>/debug-server`. Clients never send paths. The server names every file itself:
   `capture-<session>-<n>/`, `screenshot-<session>-<n>.png`.
-- **Nothing the server returns comes from game files, keys or firmware.** It returns rendered
-  pixels, log lines, frame-dump manifests and shader hashes, which the owner already sends today.
+- **Captures and memory reads can contain game data.** Frame captures, bug bundles and memory
+  reads can expose game code, shaders, textures, buffers and personal information. Do not publish
+  them or add them to the repository. Ask a maintainer for handling instructions before sharing
+  the minimum necessary material, and share only what you have permission to disclose.
   The memory tools read only the application's guest virtual memory and GPU virtual memory,
   through their page tables, and never write either. They cannot reach host memory, the key area
   or the file system: an address resolves only through a page the guest has mapped. The adapter's `capture_image` reads only PNGs inside
@@ -387,7 +389,7 @@ Live switch classification, from the switches in `src/`:
 | Dumps | `SHADER_DUMP`, `VDEC_DUMP`, `TEXTURE_DUMP`, `PB_DUMP`, `MME_DUMP` | Yes, as on and off only, writing into a subdirectory of the debug dump directory. Clients never pass the path. |
 | Behaviour, cached | `REJECT`, `REJECT_HASH` (done), `EXPERIMENTAL_GEOMETRY`, `NO_MESH`, `NO_TENSOR`, `SKIP_VS`, `UNDEF_ZERO`, `FORCE_LOD0` | With invalidation. The first group changes lowering, so it needs the reject path above for every native program. `FORCE_LOD0` changes samplers, so it needs a sampler cache flush. |
 | Behaviour, A/B races | `PB_SNAPSHOT`, `FETCH_DRAIN`, `FLUSH_DRAWS`, `SYNC_SUBMIT`, `FENCE_FLUSH_US`, `IDLE_SPIN_US` | Probably, at a frame end. They change timing, not state, but the point of an A/B race test is a clean run, so a relaunch is often still the honest answer. |
-| Not live | `SPLIT` (thread topology set at boot, `gpu_split.cpp:89`), `CNTFRQ` (guest-visible clock rate, set in `Load`), `VRAM_LIMIT_MIB` (device creation), `SPARSE_*` and `PRIVATE_DEVICE_RANGES` (decided when memory is mapped), `EMPTY_SYSTEM_DATA`, `AUTO_STUB` (service setup), `MME_JIT` (compiled macros), `DLSS_REPLACEMENT` and `DLSS_PRESET` (pipelines and models built at first use), `FRAMES_AHEAD`, `SWAP_INTERVAL` and `VSYNC_HZ` (pacing state in `nx2_gsv.h`) | No. Changing them mid-run either has no effect or leaves state built under the old value. |
+| Not live | `SPLIT` (thread topology set at boot, `gpu_split.cpp:89`), `CNTFRQ` (guest-visible clock rate, set in `Load`), `VRAM_LIMIT_MIB` (device creation), `SPARSE_*` and `PRIVATE_DEVICE_RANGES` (decided when memory is mapped), `EMPTY_SYSTEM_DATA`, `AUTO_STUB` (service setup), `MME_JIT` (compiled macros), `DLSS_REPLACEMENT` and `DLSS_PRESET` (pipelines and models built at first use), `FRAMES_AHEAD`, `SWAP_INTERVAL` and `VSYNC_HZ` (pacing state in `nx2_gsv.h`), `EDEN_DKB_GPU_SITES` (read once at first use; the site query pool is made when the scheduler is built) | No. Changing them mid-run either has no effect or leaves state built under the old value. |
 
 ### Phase 3: memory, resources and timing (about 1 to 1.5 weeks)
 

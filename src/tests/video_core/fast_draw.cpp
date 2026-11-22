@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <memory>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 
@@ -36,12 +38,22 @@ public:
 class SerialRasterizer final : public VideoCore::RasterizerInterface {
 public:
     std::vector<u64> draws;
+    /// Each counter reset with the number of draws before it.
+    std::vector<std::pair<VideoCommon::QueryType, size_t>> resets;
+    bool accelerate_conditional = false;
+    u32 conditions = 0;
 
     void Draw(bool, u32) override { draws.push_back(FastDraw::Serial()); }
     void DrawTexture() override {}
     void Clear(u32) override {}
     void DispatchCompute() override {}
-    void ResetCounter(VideoCommon::QueryType) override {}
+    void ResetCounter(VideoCommon::QueryType type) override {
+        resets.emplace_back(type, draws.size());
+    }
+    bool AccelerateConditionalRendering() override {
+        ++conditions;
+        return accelerate_conditional;
+    }
     void Query(GPUVAddr, VideoCommon::QueryType, VideoCommon::QueryPropertiesFlags, u32,
                u32) override {}
     void BindGraphicsUniformBuffer(size_t, u32, GPUVAddr, u32) override {}
@@ -160,6 +172,105 @@ TEST_CASE("Fast draw breaks reuse on anything that changes what a draw binds", "
     CHECK(breaks([&] { f.Write(MAXWELL3D_REG_INDEX(clear_surface), 0x3c); }));
     CHECK(breaks([&] { f.Write(MAXWELL3D_REG_INDEX(tiled_cache_barrier), 0); }));
     CHECK(breaks([&] { FastDraw::Break(FastDraw::Reason::Fence); }));
+}
+
+TEST_CASE("Fast draw keeps draw reuse across occlusion counter resets, which reach the counter",
+          "[fast_draw]") {
+    FastDrawFixture f;
+    constexpr u32 clear_report = MAXWELL3D_REG_INDEX(clear_report_value);
+    constexpr u32 z_pass = static_cast<u32>(Maxwell3D::Regs::ClearReport::ZPassPixelCount);
+    constexpr u32 primitives = static_cast<u32>(Maxwell3D::Regs::ClearReport::PrimitivesGenerated);
+    using Reset = std::pair<VideoCommon::QueryType, size_t>;
+    f.DrawArrays(0, 3);
+    f.Write(clear_report, z_pass);
+    CHECK(f.rasterizer.resets ==
+          std::vector<Reset>{{VideoCommon::QueryType::ZPassPixelCount64, 1}});
+    f.DrawArrays(3, 3);
+    CHECK(f.Reusable());
+    // The same value again and another counter: each reset still runs, the chain still holds.
+    f.Write(clear_report, z_pass);
+    f.Write(clear_report, primitives);
+    f.DrawArrays(6, 3);
+    CHECK(f.Reusable());
+    CHECK(f.rasterizer.resets ==
+          std::vector<Reset>{{VideoCommon::QueryType::ZPassPixelCount64, 1},
+                             {VideoCommon::QueryType::ZPassPixelCount64, 2},
+                             {VideoCommon::QueryType::PrimitivesGenerated, 2}});
+}
+
+TEST_CASE("Fast draw keeps draw reuse across render enable modes, which the next draw obeys",
+          "[fast_draw]") {
+    using Mode = Maxwell3D::Regs::RenderEnable::Mode;
+    FastDrawFixture f;
+    // Unmapped, so the CPU reads a condition of zeros: Conditional fails (no initial sequence),
+    // IfEqual passes and IfNotEqual fails.
+    constexpr GPUVAddr condition = 0x600000;
+    f.Write(MAXWELL3D_REG_INDEX(render_enable.address_high), 0);
+    f.Write(MAXWELL3D_REG_INDEX(render_enable.address_low), static_cast<u32>(condition));
+    // Whether a draw after a mode write runs, and if so whether it could reuse the last one.
+    const auto draws_after = [&](Mode mode) {
+        f.Write(MAXWELL3D_REG_INDEX(render_enable.mode), static_cast<u32>(mode));
+        const size_t before = f.rasterizer.draws.size();
+        f.DrawArrays(0, 3);
+        const bool drawn = f.rasterizer.draws.size() != before;
+        if (drawn) {
+            CHECK(f.Reusable());
+        }
+        return drawn;
+    };
+    f.Write(MAXWELL3D_REG_INDEX(render_enable.mode), static_cast<u32>(Mode::True));
+    f.DrawArrays(0, 3);
+    REQUIRE(f.rasterizer.draws.size() == 1);
+    CHECK_FALSE(draws_after(Mode::False));
+    CHECK(draws_after(Mode::True));
+    CHECK_FALSE(draws_after(Mode::Conditional));
+    CHECK(draws_after(Mode::IfEqual));
+    CHECK_FALSE(draws_after(Mode::IfNotEqual));
+    CHECK(draws_after(Mode::IfEqual));
+    CHECK_FALSE(draws_after(Mode::False));
+    CHECK(draws_after(Mode::True));
+    // With host conditional rendering the rasterizer takes every mode and the draws run.
+    f.rasterizer.accelerate_conditional = true;
+    const u32 conditions = f.rasterizer.conditions;
+    CHECK(draws_after(Mode::False));
+    CHECK(draws_after(Mode::IfEqual));
+    CHECK(f.rasterizer.conditions == conditions + 2);
+}
+
+TEST_CASE("Fast draw still breaks reuse on state changed beside a counter reset or render mode",
+          "[fast_draw]") {
+    FastDrawFixture f;
+    constexpr u32 blend = MAXWELL3D_REG_INDEX(blend.enable[0]);
+    constexpr u32 clear_report = MAXWELL3D_REG_INDEX(clear_report_value);
+    constexpr u32 mode = MAXWELL3D_REG_INDEX(render_enable.mode);
+    constexpr u32 z_pass = static_cast<u32>(Maxwell3D::Regs::ClearReport::ZPassPixelCount);
+    constexpr u32 always = static_cast<u32>(Maxwell3D::Regs::RenderEnable::Mode::True);
+    const auto breaks = [&](auto&& change) {
+        f.DrawArrays(0, 3);
+        change();
+        f.DrawArrays(0, 3);
+        return !f.Reusable();
+    };
+    CHECK(breaks([&] {
+        f.Write(blend, f.Reg(blend) ^ 1);
+        f.Write(clear_report, z_pass);
+    }));
+    CHECK(breaks([&] {
+        f.Write(clear_report, z_pass);
+        f.Write(blend, f.Reg(blend) ^ 1);
+    }));
+    CHECK(breaks([&] {
+        f.Write(blend, f.Reg(blend) ^ 1);
+        f.Write(mode, always);
+    }));
+    CHECK(breaks([&] {
+        f.Write(mode, always);
+        f.Write(blend, f.Reg(blend) ^ 1);
+    }));
+    CHECK_FALSE(breaks([&] {
+        f.Write(clear_report, z_pass);
+        f.Write(mode, always);
+    }));
 }
 
 TEST_CASE("Fast draw serial never moves while disabled", "[fast_draw]") {
@@ -411,6 +522,7 @@ TEST_CASE("Fast draw keeps base vertex and instance as draw parameters", "[fast_
             f.Reg(MAXWELL3D_REG_INDEX(global_base_vertex_index)) + 64);
     f.Write(MAXWELL3D_REG_INDEX(global_base_instance_index),
             f.Reg(MAXWELL3D_REG_INDEX(global_base_instance_index)) + 1);
+    f.Write(MAXWELL3D_REG_INDEX(vertex_id_base), f.Reg(MAXWELL3D_REG_INDEX(vertex_id_base)) + 64);
     f.DrawArrays(0, 3);
     CHECK(f.Reusable());
 }
@@ -434,6 +546,32 @@ TEST_CASE("Fast draw keeps vertex stream addresses and sizes light", "[fast_draw
     CHECK_FALSE(light(stream(0, 0)));     // stride and enable
     CHECK_FALSE(light(stream(0, 3)));     // frequency
     CHECK_FALSE(light(0x600 / 4 + 64));   // past the sizes
+}
+
+TEST_CASE("Fast draw keeps vertex stream strides and divisors light only where they are dynamic",
+          "[fast_draw]") {
+    DeltaFixture f;
+    const auto stream = [](u32 index, u32 word) {
+        return static_cast<u32>(MAXWELL3D_REG_INDEX(vertex_streams) + index * 4 + word);
+    };
+    const auto light = [&](u32 method) {
+        FastDraw::g_delta = {};
+        const u64 serial = FastDraw::Serial();
+        f.Write(method, f.Reg(method) + 0x4);
+        return FastDraw::Serial() == serial;
+    };
+    const bool previous = FastDraw::g_dynamic_vertex_streams.exchange(false);
+    CHECK_FALSE(light(stream(0, 0))); // in the pipeline key
+    FastDraw::g_dynamic_vertex_streams.store(true);
+    CHECK(light(stream(0, 0)));  // stride and enable
+    CHECK(light(stream(31, 0)));
+    CHECK(light(stream(2, 3)));  // frequency
+    CHECK_FALSE(light(stream(31, 4))); // past the streams
+    f.DrawArrays(0, 3);
+    f.Write(stream(0, 0), f.Reg(stream(0, 0)) + 0x4);
+    f.DrawArrays(3, 3);
+    CHECK(f.Reusable());
+    FastDraw::g_dynamic_vertex_streams.store(previous);
 }
 
 TEST_CASE("Fast draw keeps vertex attribute formats light only with dynamic vertex input",
@@ -484,6 +622,29 @@ TEST_CASE("Fast draw breaks skip the add only on the drawing thread, after its f
     CHECK(current() == again + 1);
 }
 
+TEST_CASE("Syncs skip the add only on the thread that reads the sync serial, after its first",
+          "[fast_draw]") {
+    const auto current = [] { return FastDraw::g_sync_serial.load(std::memory_order_relaxed); };
+    const u64 read = FastDraw::SyncSerial();
+    FastDraw::Break(FastDraw::Reason::OtherEngine);
+    CHECK(current() == read + 1);
+    // More syncs before the next read change nothing the reader compares.
+    FastDraw::Break(FastDraw::Reason::OtherEngine);
+    FastDraw::NoteSync();
+    CHECK(current() == read + 1);
+    // A thread that never reads it (the front's puller) bumps every time.
+    std::thread other{[] {
+        FastDraw::NoteSync();
+        FastDraw::NoteSync();
+    }};
+    other.join();
+    CHECK(current() == read + 3);
+    const u64 again = FastDraw::SyncSerial();
+    CHECK(again == read + 3);
+    FastDraw::NoteSync();
+    CHECK(current() == again + 1);
+}
+
 TEST_CASE("Unsplit callbacks end draw reuse before they execute", "[fast_draw][unsplit_fast_draw]") {
     const bool previous_reads_serial = FastDraw::t_reads_serial;
     const bool previous_serial_bumped = FastDraw::t_serial_bumped;
@@ -492,7 +653,8 @@ TEST_CASE("Unsplit callbacks end draw reuse before they execute", "[fast_draw][u
         FastDraw::t_serial_bumped = previous_serial_bumped;
     };
     FastDrawFixture f;
-    VideoCommon::GpuSplit split;
+    const auto split_owner = std::make_unique<VideoCommon::GpuSplit>(); // Too big for the stack
+    VideoCommon::GpuSplit& split = *split_owner;
     REQUIRE_FALSE(split.Active());
     f.DrawArrays(0, 3);
     const u64 before = f.rasterizer.draws.back();

@@ -4,8 +4,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
+#include <system_error>
 
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/algorithm/string/find.hpp>
@@ -16,6 +18,7 @@
 #include "common/fs/fs_types.h"
 #include "common/fs/path_util.h"
 #include "common/fs/symlink.h"
+#include "common/nextendo.h"
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "core/file_sys/savedata_factory.h"
@@ -49,13 +52,23 @@ constexpr Result ERROR_ARGUMENT_IS_NULL(ErrorModule::Account, 20);
 
 constexpr char ACC_SAVE_AVATORS_BASE_PATH[] = "system/save/8000000000000010/su/avators";
 
-ProfileManager::ProfileManager() {
-    ParseUserSaveFile();
+ProfileManager::ProfileManager(ProfileStorage storage_) : storage{storage_} {
+    if (!IsScratch()) {
+        ParseUserSaveFile();
+    }
+    OpenCurrentUser();
+}
 
+void ProfileManager::OpenCurrentUser() {
     // Create an user if none are present
     if (user_count == 0) {
         CreateNewUser(UUID::MakeRandom(), "Eden");
         WriteUserSaveFile();
+    }
+
+    if (IsScratch()) {
+        OpenUser(*GetUser(0));
+        return;
     }
 
     auto current =
@@ -88,9 +101,15 @@ bool ProfileManager::RemoveProfileAtIndex(std::size_t index) {
         return false;
     }
 
+    if (!IsScratch()) {
+        Common::Nextendo::ClearAccount(profiles[index].user_uuid);
+    }
     profiles[index] = ProfileInfo{};
     std::stable_partition(profiles.begin(), profiles.end(),
                           [](const ProfileInfo& profile) { return profile.user_uuid.IsValid(); });
+    if (IsScratch()) {
+        --user_count;
+    }
 
     is_save_needed = true;
     WriteUserSaveFile();
@@ -395,6 +414,7 @@ bool ProfileManager::SetProfileBaseAndData(Common::UUID uuid, const ProfileBase&
 void ProfileManager::ParseUserSaveFile() {
     const auto save_path(FS::GetEdenPath(FS::EdenPath::NANDDir) / ACC_SAVE_AVATORS_BASE_PATH /
                          "profiles.dat");
+    user_save_file_read = false;
 
     const FS::IOFile save(save_path, FS::FileAccessMode::Read, FS::FileType::BinaryFile);
 
@@ -427,10 +447,11 @@ void ProfileManager::ParseUserSaveFile() {
 
     std::stable_partition(profiles.begin(), profiles.end(),
                           [](const ProfileInfo& profile) { return profile.user_uuid.IsValid(); });
+    user_save_file_read = user_count > 0;
 }
 
 void ProfileManager::WriteUserSaveFile() {
-    if (!is_save_needed) {
+    if (IsScratch() || !is_save_needed) {
         return;
     }
 
@@ -483,7 +504,15 @@ void ProfileManager::WriteUserSaveFile() {
 void ProfileManager::ResetUserSaveFile()
 {
     RemoveAllProfiles();
-    ParseUserSaveFile();
+    if (IsScratch()) {
+        stored_opened_profiles = {};
+        last_opened_user = {};
+    } else {
+        ParseUserSaveFile();
+    }
+    // ParseUserSaveFile adds every user closed: open the current one as the constructor does, or
+    // the eden-cli, which resets once the config names the NAND, left games no open user.
+    OpenCurrentUser();
 }
 
 std::vector<UUID> ProfileManager::FindExistingProfileUUIDs()
@@ -514,6 +543,10 @@ std::vector<std::string> ProfileManager::FindExistingProfileStrings()
 
 std::vector<std::string> ProfileManager::FindGoodProfiles()
 {
+    if (IsScratch()) {
+        return FindExistingProfileStrings();
+    }
+
     namespace fs = std::filesystem;
 
     std::vector<std::string> good_uuids;
@@ -538,6 +571,10 @@ std::vector<std::string> ProfileManager::FindGoodProfiles()
 
 std::vector<std::string> ProfileManager::FindOrphanedProfiles()
 {
+    if (IsScratch()) {
+        return {};
+    }
+
     std::vector<std::string> good_uuids = FindGoodProfiles();
 
     namespace fs = std::filesystem;
@@ -551,7 +588,20 @@ std::vector<std::string> ProfileManager::FindOrphanedProfiles()
     Common::FS::IterateDirEntries(
         path,
         [&good_uuids, &orphaned_profiles](const std::filesystem::directory_entry& entry) -> bool {
-            const std::string uuid = entry.path().stem().string();
+            const std::string uuid = entry.path().filename().string();
+
+            // Only a user ID names a profile folder here. Anything else, such as a title folder
+            // copied in by hand, is neither reported nor removed.
+            const auto is_hex = [](char c) {
+                return std::isxdigit(static_cast<unsigned char>(c)) != 0;
+            };
+            if (uuid.size() != 32 || !std::ranges::all_of(uuid, is_hex)) {
+                // Most often a title's save folder copied in one level too high: say where it is,
+                // as the game won't find it there.
+                LOG_WARNING(Service_ACC, "Ignoring {} in the user saves: not a user ID folder",
+                            Common::FS::PathToUTF8String(entry.path()));
+                return true;
+            }
 
             bool override = false;
 
@@ -572,16 +622,21 @@ std::vector<std::string> ProfileManager::FindOrphanedProfiles()
                         if (file.is_regular_file() || Common::FS::IsSymlink(file.path()))
                             return false;
                     }
-                } catch (const fs::filesystem_error& e) {
+                } catch (const fs::filesystem_error&) {
                     // if we get an error--no worries, just pretend it's not empty
-                    return true;
+                    return false;
                 }
 
                 return true;
             }();
 
             if (is_empty) {
-                fs::remove_all(entry);
+                std::error_code error;
+                fs::remove_all(entry, error);
+                if (error) {
+                    LOG_WARNING(Service_ACC, "Could not remove the empty profile folder {}: {}",
+                                Common::FS::PathToUTF8String(entry.path()), error.message());
+                }
                 return true;
             }
 

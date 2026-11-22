@@ -14,7 +14,8 @@
 /// Sends a title's connections to a server the user runs. Configured in Configure > Network and
 /// read when a game starts; nothing changes while Settings::values.online_service_redirect is off:
 ///   online_redirect_hosts          these names and their subdomains resolve to 127.0.0.1 (and
-///                                  are no longer blocked)
+///                                  are no longer blocked); separated by commas or whitespace, a
+///                                  leading "*." is the same as the name itself
 ///   online_redirect_server         <ip>:<port>; TCP connections to 127.0.0.1:443 go there
 ///   online_redirect_loopback_only  other names do not resolve, and the guest's connections and
 ///                                  datagrams reach loopback only (and the server, through
@@ -31,6 +32,10 @@ namespace Network::LocalRedirect {
 /// the redirect is on.
 void Configure();
 
+/// The redirected names in online_redirect_hosts: lower case, without trailing dots or a leading
+/// "*.", each once. Entries with any other wildcard are dropped.
+[[nodiscard]] std::vector<std::string> ParseHosts(std::string_view text);
+
 /// Whether `host` is one of the redirected names or a subdomain of one (case and trailing dots
 /// ignored).
 [[nodiscard]] bool Matches(std::string_view host);
@@ -46,6 +51,8 @@ void Configure();
 /// ConnectTarget, so the configured server stays reachable.
 [[nodiscard]] bool Allowed(const SockAddrIn& address);
 
+/// Whether the redirect is on with loopback only. Games then get an id token Lichii makes for the
+/// profile instead of their Nextendo one, since it can reach only the user's server.
 [[nodiscard]] bool LoopbackOnly();
 
 /// The extra CA certificate (DER), empty when unset or unreadable.

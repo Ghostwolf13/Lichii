@@ -8,6 +8,37 @@ QComboBox {
   min-height: 19px;
 }
 
+QDialog#WhatsNewDialog QLabel#WhatsNewText {
+    color: #444444;
+}
+
+QDialog#WhatsNewDialog QLabel#WhatsNewMetadata {
+    color: #26709e;
+}
+
+QDialog#WhatsNewDialog QLabel#WhatsNewBadge {
+    background-color: #dcebf5;
+    border-radius: 8px;
+}
+
+QDialog#WhatsNewDialog QWidget#WhatsNewItem {
+    border-bottom: 1px solid palette(midlight);
+}
+
+QDialog#WhatsNewDialog QWidget#WhatsNewItem[lead="true"] {
+    background-color: #dcebf5;
+    border: none;
+    border-radius: 10px;
+}
+
+QDialog#WhatsNewDialog QWidget#WhatsNewFooter {
+    border-top: 1px solid palette(midlight);
+}
+
+QDialog#WhatsNewDialog QToolButton#WhatsNewArchive {
+    color: palette(link);
+}
+
 QPushButton#TogglableStatusBarButton {
     color: #959595;
     border: 1px solid transparent;

@@ -21,11 +21,16 @@ public:
         offset.reset();
     }
 
-    // The client acquired the frame at pts. The clock starts from the first acquire and runs in
-    // real time from there. A frame acquired ahead of the clock doesn't move it: Kirby Air Riders
-    // takes a frame before it shows it and holds it until its own clock reaches it, and following
-    // those acquires ran the clock ahead of the picture, so 563 of 588 frames came out late.
-    void Acquired(s64 now, u64 pts, s64 pause_end) {
+    // A client that holds the frame it acquired last through this many of its own presents before
+    // it gives an older image back shows frames at its own time.
+    static constexpr u64 PacedPresents = 2;
+
+    // The client acquired the frame at pts, at present count presents. The clock starts from the
+    // first acquire and runs in real time from there. A frame acquired ahead of the clock doesn't
+    // move it: Kirby Air Riders takes a frame before it shows it and holds it until its own clock
+    // reaches it, and following those acquires ran the clock ahead of the picture, so 563 of 588
+    // frames came out late.
+    void Acquired(s64 now, u64 pts, s64 pause_end, u64 presents) {
         const s64 acquired_offset = now - static_cast<s64>(pts);
         if (!offset || now - last_acquire > PauseGap || pause_end > last_acquire ||
             pts < last_acquired_pts || acquired_offset - *offset > MaxCatchUp) {
@@ -33,6 +38,20 @@ public:
         }
         last_acquire = now;
         last_acquired_pts = pts;
+        last_acquire_presents = presents;
+    }
+
+    // The client gave an older image back while it still holds the frame it acquired last. If it
+    // held that frame through PacedPresents presents, it waited for its own clock to reach it and
+    // shows it now, so the clock moves to it. Kirby Air Riders can start its clock well after its
+    // first acquire; a clock started at that acquire stayed that far ahead for the whole movie,
+    // and every frame between the ones it held was dropped. A client
+    // that shows frames as it gets them (Ocarina of Time) gives the older image back within a
+    // present and isn't followed.
+    void Released(s64 now, u64 presents) {
+        if (offset && presents - last_acquire_presents >= PacedPresents) {
+            offset = now - static_cast<s64>(last_acquired_pts);
+        }
     }
 
     // The pts the movie's audio has reached, unless the client hasn't acquired a frame yet or for
@@ -48,10 +67,16 @@ public:
         return static_cast<u64>(due);
     }
 
+    // The pts of the frame the client acquired last.
+    u64 LastAcquiredPts() const {
+        return last_acquired_pts;
+    }
+
 private:
     std::optional<s64> offset; ///< Host time minus pts of the frame the clock started from
     s64 last_acquire{};
     u64 last_acquired_pts{};
+    u64 last_acquire_presents{};
 };
 
 } // namespace Service

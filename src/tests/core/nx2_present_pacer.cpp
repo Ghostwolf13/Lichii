@@ -35,6 +35,17 @@ TEST_CASE("NX2 FPS limit only lengthens a vblank it is below", "[core][nx2_prese
     REQUIRE(PacedInterval(TwoVblanks, 20) == 50'000'000ns);
 }
 
+TEST_CASE("NX2 holds an unpaced unlocked game to 240 fps", "[core][nx2_present_pacer]") {
+    using Service::UnpacedFpsCap;
+    REQUIRE(UnpacedFpsCap(true, false, 0) == 240);
+    // The speed limit or the vsync event's rate already paces it, or the user set an FPS limit.
+    REQUIRE(UnpacedFpsCap(true, true, 0) == 0);
+    REQUIRE(UnpacedFpsCap(true, false, 300) == 0);
+    REQUIRE(UnpacedFpsCap(true, false, 30) == 0);
+    // A locked game counts vsync events and is left as it was.
+    REQUIRE(UnpacedFpsCap(false, false, 0) == 0);
+}
+
 TEST_CASE("NX2 interval decreases apply to the current present", "[core][nx2_present_pacer]") {
     Pacer pacer;
     REQUIRE(pacer.Advance(Start, ThreeVblanks).reset);
@@ -107,4 +118,31 @@ TEST_CASE("NX2 fixed-period pacing matches the previous algorithm", "[core][nx2_
             old_next += period;
         }
     }
+}
+
+TEST_CASE("NX2 display vsync starts frames at the display, under the paced rate",
+          "[core][nx2_present_pacer]") {
+    using Service::DisplayVsyncDeadline;
+    // The first frame, or no limit: at once.
+    REQUIRE(DisplayVsyncDeadline(std::nullopt, Start, 112) == Start);
+    REQUIRE(DisplayVsyncDeadline(Start, Start + 1ms, 0) == Start + 1ms);
+    // 112 fps: 8.928571 ms between starts.
+    REQUIRE(DisplayVsyncDeadline(Start, Start + 4ms, 112) == Start + 8'928'571ns);
+    // A display signal after the interval starts the frame at once.
+    REQUIRE(DisplayVsyncDeadline(Start, Start + 10ms, 112) == Start + 10ms);
+    REQUIRE(DisplayVsyncDeadline(Start, Start + 20ms, 30) == Start + 33'333'333ns);
+}
+
+TEST_CASE("NX2 vsync timer steps in only when the display stops", "[core][nx2_present_pacer]") {
+    using Service::TimerVsyncSignals;
+    REQUIRE(TimerVsyncSignals(std::nullopt, 0, Start, OneVblank));
+    REQUIRE_FALSE(TimerVsyncSignals(Start, 0, Start + OneVblank, OneVblank));
+    REQUIRE_FALSE(TimerVsyncSignals(Start, 0, Start + 2 * OneVblank, OneVblank));
+    REQUIRE(TimerVsyncSignals(Start, 0, Start + ThreeVblanks, OneVblank));
+    // A limit above the timer's rate changes nothing.
+    REQUIRE(TimerVsyncSignals(Start, 100, Start + ThreeVblanks, OneVblank));
+    // A 20 fps limit starts frames 50 ms apart: the timer must not fill the gaps.
+    REQUIRE_FALSE(TimerVsyncSignals(Start, 20, Start + ThreeVblanks, OneVblank));
+    REQUIRE_FALSE(TimerVsyncSignals(Start, 20, Start + 100ms, OneVblank));
+    REQUIRE(TimerVsyncSignals(Start, 20, Start + 101ms, OneVblank));
 }

@@ -60,6 +60,7 @@ public:
     ResultStatus ReadControlData(FileSys::NACP& control) override;
     ResultStatus ReadDisplayVersion(std::string& version) override;
     ResultStatus ReadNSOModules(Modules& modules) override;
+    ResultStatus ReadMainBuildId(Core::System& system, std::array<u8, 0x20>& build_id) override;
 
     /// The RomFS the program sees, without mods: a tree snapshot as stored, or the native
     /// base RomFS with its newest enabled update applied. Used to dump the RomFS.
@@ -70,6 +71,8 @@ public:
     void RegisterContent(FileSys::ManualContentProvider& provider) const;
 
 private:
+    void RegisterFrontendContent(Core::System& system) const;
+
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

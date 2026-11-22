@@ -93,6 +93,11 @@ void EmitA64Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Po
 
         code.CMP(X0, Xscratch0);
         code.B(NE, fail);
+        // A cache wrap can occur without leaving run_code; old host return targets are invalid.
+        code.LDR(Xscratch0, X2, offsetof(StackLayout, rsb) + offsetof(RSBEntry, cache_generation));
+        code.MOV(Xscratch2, ctx.conf.cache_generation);
+        code.CMP(Xscratch0, Xscratch2);
+        code.B(NE, fail);
         code.BR(Xscratch1);
 
         code.l(fail);

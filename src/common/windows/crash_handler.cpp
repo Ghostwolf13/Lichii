@@ -20,6 +20,14 @@
 
 #define LOG_CRASH(...) ::Common::Log::FmtCrashMessage(__FILE__, __LINE__, __func__, __VA_ARGS__)
 
+// MinGW's intrin.h declares _ReturnAddress but no library defines it (undefined symbol at link);
+// GCC and Clang have the builtin.
+#if defined(__MINGW32__)
+#define CRASH_RETURN_ADDRESS() __builtin_return_address(0)
+#else
+#define CRASH_RETURN_ADDRESS() _ReturnAddress()
+#endif
+
 namespace Common::Windows {
 namespace {
 
@@ -111,8 +119,10 @@ void Report(EXCEPTION_POINTERS* pointers, const char* fail_fast) {
         return;
     }
     MINIDUMP_EXCEPTION_INFORMATION information{GetCurrentThreadId(), pointers, FALSE};
-    const BOOL written = write_dump(GetCurrentProcess(), GetCurrentProcessId(), file,
-                                    MiniDumpWithThreadInfo, &information, nullptr, nullptr);
+    const BOOL written = write_dump(
+        GetCurrentProcess(), GetCurrentProcessId(), file,
+        static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules),
+        &information, nullptr, nullptr);
     const DWORD error = written ? 0 : GetLastError();
     CloseHandle(file);
     LOG_CRASH("Host crash: minidump of process {} {} ({:#x})", GetCurrentProcessId(),
@@ -158,7 +168,7 @@ LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* pointers) {
 // asserts end in abort(), which the C runtime turns into a fail-fast that skips the filter above.
 void OnAbort(int) {
     if (BeginReport()) {
-        ReportFailFast("abort()", _ReturnAddress());
+        ReportFailFast("abort()", CRASH_RETURN_ADDRESS());
     }
 }
 
@@ -167,7 +177,7 @@ void OnAbort(int) {
 void OnInvalidParameter(const wchar_t* expression, const wchar_t* function, const wchar_t* file,
                         unsigned int line, std::uintptr_t reserved) {
     if (BeginReport()) {
-        ReportFailFast("CRT invalid-parameter failure", _ReturnAddress());
+        ReportFailFast("CRT invalid-parameter failure", CRASH_RETURN_ADDRESS());
     }
     // What the C runtime does without a handler.
     _invoke_watson(expression, function, file, line, reserved);

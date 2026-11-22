@@ -300,27 +300,37 @@ Result SysmixOutput::SetDataNotification(u32 mode, s32 threshold) {
 }
 
 /**
- * Discard up to frames of buffered input; zero also drains pending host capture.
- * Cursor contention is retried, then returns OperationFailed with purged zero while capture stays
- * engaged. Invalid memory or cursor ownership still faults the stream.
+ * Discard up to frames of buffered data (zero: all of it) by moving the read cursor.
+ * Input: captured frames the game has not read; zero also drains pending host capture.
+ * Output: frames the game queued that the host has not played yet. Xenoblade Chronicles DE
+ * (Switch 2 Edition) purges its output stream when it opens the controller applet after a
+ * docked/handheld switch, and aborts (2153-0002) if this fails.
+ * Cursor contention is retried, then returns OperationFailed with purged zero while the stream
+ * stays engaged. Invalid memory or cursor ownership still faults the stream.
  */
 Result SysmixOutput::Purge(u32 frames, u32& purged) {
     auto& p = *impl;
     std::scoped_lock lock{p.mutex};
     purged = 0;
-    R_UNLESS(p.input_stream && p.open && !p.faulted, ResultOperationFailed);
+    R_UNLESS(p.open && !p.faulted, ResultOperationFailed);
     auto& memory = p.process->GetMemory();
     u32 read{}, write{}, filled{};
-    // The guest owns the read cursor and may advance it while this call is in flight.
+    // Input: the guest owns the read cursor and may advance it while this call is in flight.
+    // Output: Pump moves it, under the same mutex.
     for (u32 attempt = 0; attempt < 8; ++attempt) {
         R_UNLESS(p.ReadOccupancy(read, write, filled), p.Fault());
         const auto count = frames == 0 ? filled : std::min(frames, filled);
-        if (!memory.WriteExclusive32(p.buffer + ReadOffset, (read + count) % p.slots, read)) {
+        const u32 next = (read + count) % p.slots;
+        if (!memory.WriteExclusive32(p.buffer + ReadOffset, next, read)) {
             continue;
+        }
+        if (!p.input_stream) {
+            // The read cursor is the one this side owns for output (as in Pump).
+            p.consumer = next;
         }
         R_UNLESS(p.ReadOccupancy(read, write, filled), p.Fault());
         purged = count;
-        if (frames == 0) {
+        if (frames == 0 && p.input_stream) {
             p.host->DrainInputSamples(0x10000);
         }
         p.Notify(filled);

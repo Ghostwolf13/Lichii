@@ -222,6 +222,9 @@ public:
 
     [[nodiscard]] u64 GetTicks() const;
 
+    /// The running application changed: re-decides the report timestamp units for it.
+    void NotifyApplicationChanged(u64 program_id);
+
     [[nodiscard]] bool IsAsync() const;
 
     /// Whether a channel is suspended on a semaphore acquire (callable from any thread).

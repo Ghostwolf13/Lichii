@@ -13,17 +13,27 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fmt/format.h>
 
+#include "common/scope_exit.h"
+#include "tests/common/temp_dir.h"
 #include "video_core/macro_turing.h"
 #include "video_core/nx2_list_macro_trace.h"
 
 namespace {
 
 void SetDebugDir(const std::filesystem::path& directory) {
-    std::filesystem::remove_all(directory);
 #ifdef _WIN32
     _putenv_s("EDEN_NX2_DEBUG_DIR", directory.string().c_str());
 #else
     setenv("EDEN_NX2_DEBUG_DIR", directory.string().c_str(), 1);
+#endif
+}
+
+// Without this a later dump in the same process would make the removed folder again.
+void ClearDebugDir() {
+#ifdef _WIN32
+    _putenv_s("EDEN_NX2_DEBUG_DIR", "");
+#else
+    unsetenv("EDEN_NX2_DEBUG_DIR");
 #endif
 }
 
@@ -42,8 +52,11 @@ std::string ReadDump(const std::filesystem::path& directory) {
 TEST_CASE("ListMacroTrace: a macro call is noted only when a GPU-written entry fed it",
           "[video_core]") {
     namespace Trace = VideoCommon::ListMacroTrace;
-    const auto directory = std::filesystem::temp_directory_path() / "lichii-list-macro-trace";
-    SetDebugDir(directory);
+    const Tests::TempDir directory{"lichii-list-macro-trace"};
+    SetDebugDir(directory.Path());
+    SCOPE_EXIT {
+        ClearDebugDir();
+    };
     const std::vector<u32> code(9, 0);
     const std::vector<u32> parameters{7, 8, 9};
     const std::vector<u32> data_ram(0xc00);
@@ -64,7 +77,7 @@ TEST_CASE("ListMacroTrace: a macro call is noted only when a GPU-written entry f
     Trace::NoteWrite(call, 0x5f8, 8);
     Trace::EndCall(*call, false);
     Trace::EndEntry(nullptr, 0);
-    const std::string dump = ReadDump(directory);
+    const std::string dump = ReadDump(directory.Path());
     CHECK(dump.find("3D macro") == 0);
     CHECK(dump.find("call 1: method 0xe62, 3 parameters 00000007 00000008 00000009, GPU-written: "
                     "1,2\n") != std::string::npos);
@@ -88,19 +101,21 @@ TEST_CASE("ListMacroTrace: a macro call is noted only when a GPU-written entry f
     Trace::Call* const middle = begin_call(&engine);
     REQUIRE(middle != nullptr);
     Trace::EndCall(*middle, false);
-    const std::string samples = ReadDump(directory);
+    const std::string samples = ReadDump(directory.Path());
     CHECK(samples.find("call 2: method 0xe62, 3 parameters 00000007 00000008 00000009, "
                        "GPU-written: 0\n") != std::string::npos);
     CHECK(samples.find("call 3: method 0xe62, 3 parameters 00000007 00000008 00000009, "
                        "GPU-written: 1\n") != std::string::npos);
-    std::filesystem::remove_all(directory);
 }
 
 TEST_CASE("ListMacroTrace: what reads the data RAM words a GPU-written entry's call stored",
           "[video_core]") {
     namespace Trace = VideoCommon::ListMacroTrace;
-    const auto directory = std::filesystem::temp_directory_path() / "lichii-list-macro-reader";
-    SetDebugDir(directory);
+    const Tests::TempDir directory{"lichii-list-macro-reader"};
+    SetDebugDir(directory.Path());
+    SCOPE_EXIT {
+        ClearDebugDir();
+    };
     // Compute macro 055743923e135e09 (method 0xe74): data RAM 0x20-0x22 = its three parameters.
     const std::vector<u32> store{0x00000087, 0xb9c7c008, 0x399c7f01,
                                  0x00000003, 0x18c00008, 0xb99c7f00};
@@ -113,10 +128,14 @@ TEST_CASE("ListMacroTrace: what reads the data RAM words a GPU-written entry's c
     Tegra::TuringMacroInterpreter interpreter;
     std::array<u32, 0x1000> registers{};
     int engine{};
+    // The trace remembers what it learnt of a macro's code by the code's address and generation,
+    // and the test case above leaves an entry for its freed code under generation 1: when the heap
+    // hands that address to `reader`, a call with the same generation would be judged as that code.
+    constexpr u64 generation = 2;
     const auto run = [&](const std::vector<u32>& code, u32 method, std::vector<u32> parameters) {
         Trace::Call* const call =
-            Trace::BeginCall(Trace::Engine::Compute, &engine, method, code, 1, 0, parameters,
-                             interpreter.dram, registers);
+            Trace::BeginCall(Trace::Engine::Compute, &engine, method, code, generation, 0,
+                             parameters, interpreter.dram, registers);
         if (call == nullptr) {
             return false;
         }
@@ -153,7 +172,7 @@ TEST_CASE("ListMacroTrace: what reads the data RAM words a GPU-written entry's c
     Trace::BeginEntry(Trace::Path::Copied, 0, Trace::Engine::Compute, &engine, 0, 0, 1);
     Trace::EndEntry(nullptr, 0);
     std::string dumps;
-    for (const auto& file : std::filesystem::directory_iterator{directory}) {
+    for (const auto& file : std::filesystem::directory_iterator{directory.Path()}) {
         std::ifstream stream{file.path()};
         std::stringstream text;
         text << stream.rdbuf();
@@ -180,7 +199,7 @@ TEST_CASE("ListMacroTrace: what reads the data RAM words a GPU-written entry's c
     stored_run({8, 2, 3});
     CHECK(run(reader, 0xe7a, {0x12, 0x34560000}));
     std::string pitched;
-    for (const auto& file : std::filesystem::directory_iterator{directory}) {
+    for (const auto& file : std::filesystem::directory_iterator{directory.Path()}) {
         std::ifstream stream{file.path()};
         std::stringstream text;
         text << stream.rdbuf();
@@ -192,5 +211,4 @@ TEST_CASE("ListMacroTrace: what reads the data RAM words a GPU-written entry's c
     // A call no entry fed stores over the words: nothing to follow any more.
     CHECK(run(store, 0xe74, {0, 0, 0}));
     CHECK_FALSE(run(reader, 0xe7a, {0x12, 0x34560000}));
-    std::filesystem::remove_all(directory);
 }

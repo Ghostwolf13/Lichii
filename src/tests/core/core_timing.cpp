@@ -55,6 +55,32 @@ u64 TestTimerSpeed(Core::Timing::CoreTiming& core_timing) {
 
 } // Anonymous namespace
 
+TEST_CASE("CoreTiming discards expired event types before dispatching live events",
+          "[core][core_timing]") {
+    using namespace std::chrono_literals;
+    Core::Timing::CoreTiming timing;
+    const auto callback = [](s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+        FAIL("An expired event must not run");
+        return std::nullopt;
+    };
+    {
+        const auto expired = Core::Timing::CreateEvent("expired", callback);
+        timing.ScheduleEvent(0ns, expired);
+        timing.ScheduleLoopingEvent(0ns, 1ms, expired);
+    }
+
+    int calls = 0;
+    const auto live = Core::Timing::CreateEvent(
+        "live", [&](s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+            ++calls;
+            return std::nullopt;
+        });
+    timing.ScheduleEvent(0ns, live);
+
+    CHECK_FALSE(timing.Advance().has_value());
+    CHECK(calls == 1);
+}
+
 TEST_CASE("CoreTiming[BasicOrder]", "[core]") {
     ScopeInit guard;
     auto& core_timing = guard.core_timing;

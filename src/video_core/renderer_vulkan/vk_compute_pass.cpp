@@ -880,6 +880,55 @@ void BcEncoderPass::Encode(VkImageView source, u32 width, u32 height, u32 layers
     });
 }
 
+void TranscodeAstcBatches(ASTCDecoderPass& decoder, BcEncoderPass& encoder,
+                          const VideoCommon::ImageInfo& info, size_t guest_size_bytes,
+                          const StagingBufferRef& map,
+                          std::span<const VideoCommon::SwizzleParameters> swizzles, VkImage decode,
+                          std::span<const vk::ImageView> level_views, u32 batch, bool bc3,
+                          VkBuffer output, VkDeviceSize output_offset, VkDeviceSize output_size,
+                          std::span<const u64> level_offsets, std::span<const u64> layer_bytes) {
+    const u32 levels = static_cast<u32>(level_views.size());
+    const u32 layers = static_cast<u32>(info.resources.layers);
+    const u64 layer_stride = info.layer_stride;
+    for (u32 base = 0; base < layers; base += batch) {
+        const u32 count = (std::min)(batch, layers - base);
+        // The swizzles describe one layer's levels and the decoder steps layer_stride per layer
+        // from the start of its input, so a batch is the same info with fewer layers, read from
+        // its first layer on. The swizzle math does not depend on the layer count.
+        VideoCommon::ImageInfo batch_info = info;
+        batch_info.resources.layers = static_cast<s32>(count);
+        StagingBufferRef batch_map = map;
+        batch_map.offset += u64{base} * layer_stride;
+        const size_t guest_offset = static_cast<size_t>(u64{base} * layer_stride);
+        const size_t batch_size =
+            batch == layers
+                ? guest_size_bytes
+                : (std::min)(static_cast<size_t>(u64{count} * layer_stride),
+                             guest_size_bytes - (std::min)(guest_size_bytes, guest_offset));
+        decoder.AssembleInto(
+            batch_info, 0, batch_size,
+            ASTCDecoderPass::Target{
+                .image = decode,
+                .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+                // A later batch overwrites what the previous batch's encode read: its barrier
+                // waits for that (initialized).
+                .initialized = base != 0,
+                .level_view = [level_views](s32 level) { return *level_views[level]; },
+                // Only the last batch submits. `map` carries this tick: a later batch reading it
+                // after a submit could find it freed, or refilled with the next upload.
+                .wait = base + count >= layers,
+                .levels = levels,
+            },
+            batch_map, swizzles);
+        for (u32 level = 0; level < levels; ++level) {
+            encoder.Encode(*level_views[level], (std::max)(info.size.width >> level, 1U),
+                           (std::max)(info.size.height >> level, 1U), count, bc3, output,
+                           output_offset, output_size,
+                           level_offsets[level] + layer_bytes[level] * base);
+        }
+    }
+}
+
 constexpr u32 BL3D_BINDING_INPUT_BUFFER  = 0;
 constexpr u32 BL3D_BINDING_OUTPUT_BUFFER = 1;
 

@@ -66,6 +66,8 @@ void EmitIR<IR::Opcode::PushRSB>(oaknut::CodeGenerator& code, EmitContext& ctx, 
     code.MOV(Xscratch0, target.Value());
     EmitBlockLinkRelocation(code, ctx, target, BlockRelocationType::MoveToScratch1);
     code.STP(Xscratch0, Xscratch1, Xscratch2, offsetof(StackLayout, rsb));
+    code.MOV(Xscratch0, ctx.conf.cache_generation);
+    code.STR(Xscratch0, Xscratch2, offsetof(StackLayout, rsb) + offsetof(RSBEntry, cache_generation));
 }
 
 template<>

@@ -6,6 +6,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "tests/common/temp_dir.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
 
 namespace {
@@ -91,10 +92,8 @@ TEST_CASE("Frame dump schedule follows EDEN_NX2_FRAME_DUMP_AT", "[frame_dump_sch
     REQUIRE_FALSE(Vulkan::RecordingSampledTextures());
     REQUIRE(by_seconds.Tick(0.7) == Step::Finish);
 
-    const auto directory = std::filesystem::temp_directory_path() / "frame_dump_schedule_test";
-    std::filesystem::create_directories(directory);
+    const Tests::TempDir directory{"lichii-frame-dump-schedule"};
     const auto trigger = directory / "capture.now";
-    std::filesystem::remove(trigger);
     FrameDumpSchedule by_file;
     by_file.Configure("file", trigger, false);
     for (int frame = 1; frame <= 60; ++frame) {
@@ -106,5 +105,4 @@ TEST_CASE("Frame dump schedule follows EDEN_NX2_FRAME_DUMP_AT", "[frame_dump_sch
     }
     REQUIRE(by_file.Tick(1000.0) == Step::Start);
     REQUIRE(by_file.Frame() == 90);
-    std::filesystem::remove_all(directory);
 }

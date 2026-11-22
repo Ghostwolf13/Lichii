@@ -279,6 +279,11 @@ public:
     void SetKey(S128KeyType id, Key128 key, u64 field1 = 0, u64 field2 = 0);
     void SetKey(S256KeyType id, Key256 key, u64 field1 = 0, u64 field2 = 0);
 
+    /// Tests only: takes a key out of memory and returns it (the key files are left alone).
+    std::optional<Key256> TakeKeyForTest(S256KeyType id, u64 field1 = 0, u64 field2 = 0);
+    /// Tests only: puts back a key TakeKeyForTest returned, in memory only.
+    void RestoreKeyForTest(S256KeyType id, const Key256& key, u64 field1 = 0, u64 field2 = 0);
+
     static bool KeyFileExists(bool title);
 
     // Call before using the sd seed to attempt to derive it if it doesn't exist. Needs system
@@ -299,6 +304,9 @@ public:
     bool AddTicket(const Ticket& ticket);
 
     void ReloadKeys();
+    /// Forgets every key, keyblob and ticket, then reads the key files again, leaving the manager
+    /// as a new one would be. ReloadKeys only adds to what is loaded.
+    void ResetKeys();
     bool AreKeysLoaded() const;
 
 private:
@@ -344,6 +352,8 @@ private:
 Key128 GenerateKeyEncryptionKey(Key128 source, Key128 master, Key128 kek_seed, Key128 key_seed);
 Key128 DeriveKeyblobKey(const Key128& sbk, const Key128& tsec, Key128 source);
 Key128 DeriveKeyblobMACKey(const Key128& keyblob_key, const Key128& mac_source);
+/// AES-128-CMAC of source under key, or nullopt if OpenSSL cannot compute it.
+std::optional<Key128> CalculateCMAC(std::span<const u8> source, const Key128& key);
 Key128 DeriveMasterKey(const std::array<u8, 0x90>& keyblob, const Key128& master_source);
 std::array<u8, 0x90> DecryptKeyblob(const std::array<u8, 0xB0>& encrypted_keyblob, const Key128& key);
 

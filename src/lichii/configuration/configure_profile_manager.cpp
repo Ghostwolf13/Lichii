@@ -18,11 +18,13 @@
 #include <QMessageBox>
 #include <QStandardItemModel>
 #include <QTreeView>
+#include <QtConcurrent/QtConcurrent>
 #include <qnamespace.h>
 #include <qtreeview.h>
 
 #include "common/assert.h"
 #include "common/fs/path_util.h"
+#include "common/nextendo.h"
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "configuration/system/new_user_dialog.h"
@@ -337,8 +339,16 @@ void ConfigureProfileManager::DeleteUser(const int index) {
         Settings::values.current_user = 0;
     }
 
+    const auto uuid = profile_manager.GetUser(index);
+    const auto account = uuid ? Common::Nextendo::LoadAccount(*uuid) : std::nullopt;
     if (!profile_manager.RemoveProfileAtIndex(index)) {
         return;
+    }
+    if (account && !account->refresh_token.empty()) {
+        void(QtConcurrent::run([client_id = Settings::values.nextendo_client_id.GetValue(),
+                                token = account->refresh_token] {
+            Common::Nextendo::RevokeToken(client_id, token);
+        }));
     }
 
     profile_manager.WriteUserSaveFile();

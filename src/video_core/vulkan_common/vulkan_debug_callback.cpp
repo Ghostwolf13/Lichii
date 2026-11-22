@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <string_view>
 #include "common/logging.h"
 #include "common/settings.h"
+#include "video_core/vulkan_common/vulkan_address_map.h"
 #include "video_core/vulkan_common/vulkan_debug_callback.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 
@@ -99,6 +101,57 @@ VkBool32 DebugUtilCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
     return VK_FALSE;
 }
 
+const char* ObjectTypeName(VkObjectType type) {
+    switch (type) {
+    case VK_OBJECT_TYPE_BUFFER:
+        return "buffer";
+    case VK_OBJECT_TYPE_IMAGE:
+        return "image";
+    case VK_OBJECT_TYPE_DEVICE_MEMORY:
+        return "device memory";
+    case VK_OBJECT_TYPE_PIPELINE:
+        return "pipeline";
+    case VK_OBJECT_TYPE_DESCRIPTOR_POOL:
+        return "descriptor pool";
+    case VK_OBJECT_TYPE_COMMAND_BUFFER:
+        return "command buffer";
+    case VK_OBJECT_TYPE_COMMAND_POOL:
+        return "command pool";
+    case VK_OBJECT_TYPE_QUERY_POOL:
+        return "query pool";
+    case VK_OBJECT_TYPE_SWAPCHAIN_KHR:
+        return "swapchain";
+    default:
+        return "object";
+    }
+}
+
+VkBool32 AddressBindingCallback(VkDebugUtilsMessageSeverityFlagBitsEXT,
+                                VkDebugUtilsMessageTypeFlagsEXT type,
+                                const VkDebugUtilsMessengerCallbackDataEXT* data, void*) {
+    if (!(type & VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT) ||
+        data->objectCount == 0) {
+        return VK_FALSE;
+    }
+    for (auto* next = static_cast<const VkBaseInStructure*>(data->pNext); next;
+         next = next->pNext) {
+        if (next->sType != VK_STRUCTURE_TYPE_DEVICE_ADDRESS_BINDING_CALLBACK_DATA_EXT) {
+            continue;
+        }
+        const auto& binding = *reinterpret_cast<const VkDeviceAddressBindingCallbackDataEXT*>(next);
+        const VkDebugUtilsObjectNameInfoEXT& object = data->pObjects[0];
+        AddressMap& map = AddressMap::Get();
+        if (binding.bindingType == VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT) {
+            map.Bind(binding.baseAddress, binding.size, ObjectTypeName(object.objectType),
+                     object.objectHandle,
+                     (binding.flags & VK_DEVICE_ADDRESS_BINDING_INTERNAL_OBJECT_BIT_EXT) != 0);
+        } else {
+            map.Unbind(binding.baseAddress, binding.size, object.objectHandle);
+        }
+    }
+    return VK_FALSE;
+}
+
 } // Anonymous namespace
 
 vk::DebugUtilsMessenger CreateDebugUtilsCallback(const vk::Instance& instance) {
@@ -114,6 +167,28 @@ vk::DebugUtilsMessenger CreateDebugUtilsCallback(const vk::Instance& instance) {
                        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
                        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
         .pfnUserCallback = DebugUtilCallback,
+        .pUserData = nullptr,
+    });
+}
+
+vk::DebugUtilsMessenger CreateAddressBindingCallback(const vk::Instance& instance,
+                                                     const vk::InstanceDispatch& dld) {
+    const auto properties = vk::EnumerateInstanceExtensionProperties(dld);
+    if (!properties || std::ranges::none_of(*properties, [](const VkExtensionProperties& p) {
+            return std::string_view{p.extensionName} == VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+        })) {
+        LOG_WARNING(Render_Vulkan, "EDEN_NX2_FAULT_MAP: the Vulkan loader lacks {}",
+                    VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        return {};
+    }
+    return instance.CreateDebugUtilsMessenger(VkDebugUtilsMessengerCreateInfoEXT{
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .pNext = nullptr,
+        .flags = 0,
+        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT,
+        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT,
+        .pfnUserCallback = AddressBindingCallback,
         .pUserData = nullptr,
     });
 }

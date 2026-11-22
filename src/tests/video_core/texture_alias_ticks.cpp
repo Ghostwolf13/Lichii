@@ -14,8 +14,10 @@ using VideoCommon::AliasedImage;
 using VideoCommon::ImageBase;
 using VideoCommon::ImageId;
 using VideoCommon::ImageInfo;
+using VideoCommon::ImageFlagBits;
 using VideoCommon::ImageType;
 using VideoCommon::SetModificationTick;
+using VideoCommon::SubresourceRange;
 using VideoCore::Surface::PixelFormat;
 
 ImageInfo Info() {
@@ -76,4 +78,44 @@ TEST_CASE("Adding an alias raises both images' newest alias tick",
     CHECK(images[a].newest_alias_tick == 9);
     CHECK(NewestAliasTickHolds(images, a));
     CHECK(NewestAliasTickHolds(images, b));
+}
+
+TEST_CASE("Only storage writes over every layer of a level make it hold shader results",
+          "[video_core][texture_cache]") {
+    ImageInfo info = Info();
+    info.resources.levels = 3;
+    info.resources.layers = 4;
+    ImageBase image(info, 0x10000, 0x10000);
+    const auto range = [](s32 level, s32 levels, s32 layer, s32 layers) {
+        return SubresourceRange{.base = {.level = level, .layer = layer},
+                                .extent = {.levels = levels, .layers = layers}};
+    };
+    // As TextureCache::MarkStorageWrite: the write marks the image GPU-modified first.
+    const auto storage_write = [&](const SubresourceRange& written) {
+        const u32 before = image.storage_written_levels;
+        image.flags = ImageFlagBits::GpuModified;
+        image.storage_written_levels = 0;
+        VideoCommon::NoteStorageWrite(image, before, written);
+    };
+
+    storage_write(range(0, 1, 0, 2));
+    CHECK_FALSE(HoldsStorageWrites(image, range(0, 1, 0, 2)));
+    storage_write(range(0, 1, 0, 4));
+    CHECK(HoldsStorageWrites(image, range(0, 1, 0, 4)));
+    CHECK(HoldsStorageWrites(image, range(0, 1, 2, 2)));
+    // A level no storage write reached still holds whatever was there.
+    CHECK_FALSE(HoldsStorageWrites(image, range(1, 1, 0, 4)));
+    CHECK_FALSE(HoldsStorageWrites(image, range(0, 2, 0, 4)));
+    // A partial write keeps what the level held.
+    storage_write(range(0, 1, 1, 1));
+    CHECK(HoldsStorageWrites(image, range(0, 1, 0, 4)));
+
+    // As TextureCache::MarkModification for a clear, render pass or copy.
+    image.storage_written_levels = 0;
+    CHECK_FALSE(HoldsStorageWrites(image, range(0, 1, 0, 4)));
+
+    storage_write(range(1, 1, 0, 4));
+    CHECK(HoldsStorageWrites(image, range(1, 1, 0, 4)));
+    image.flags |= ImageFlagBits::CpuModified;
+    CHECK_FALSE(HoldsStorageWrites(image, range(1, 1, 0, 4)));
 }

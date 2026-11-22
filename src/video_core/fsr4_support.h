@@ -64,6 +64,15 @@ constexpr bool IsFsr4CapableGpu(u32 vendor_id, bool amd_driver, std::string_view
 /// FP8 network where the device has FP8 cooperative matrices (RDNA 4), on Mesa's RADV driver.
 enum class Fsr4PortModel { Int8, Fp8 };
 
+/// Buffer-device-address is Vulkan 1.2 core: its KHR extension flag may be false even when
+/// the feature is enabled. Check the enabled feature, not the extension's name.
+constexpr bool HasFsr4PortDescriptorFeatures(bool descriptor_buffer_extension,
+                                             bool buffer_device_address_feature,
+                                             bool runtime_descriptor_array_feature) {
+    return descriptor_buffer_extension && buffer_device_address_feature &&
+           runtime_descriptor_array_feature;
+}
+
 /// What fsr4-vk needs, as enabled on the logical device (or supported, before one exists).
 struct Fsr4PortDevice {
     u32 vendor_id;

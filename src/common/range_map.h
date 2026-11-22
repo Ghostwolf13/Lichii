@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <iterator>
+#include <limits>
 #include <map>
 #include <type_traits>
 
@@ -101,44 +103,29 @@ private:
         return it;
     }
 
-    ValueT GetFirstValueWithin(KeyT address) {
-        auto it = container.lower_bound(address);
-        if (it == container.begin()) {
-            return it->second;
-        }
-        if (it == container.end()) [[unlikely]] { // this would be a bug
-            return null_value;
-        }
-        --it;
-        return it->second;
-    }
-
-    ValueT GetLastValueWithin(KeyT address) {
-        auto it = container.upper_bound(address);
-        if (it == container.end()) {
-            return null_value;
-        }
-        if (it == container.begin()) [[unlikely]] { // this would be a bug
-            return it->second;
-        }
-        --it;
-        return it->second;
-    }
-
     void InternalMap(KeyT address, KeyT address_end, ValueT value) {
-        const bool must_add_start = GetFirstValueWithin(address) != value;
-        const ValueT last_value = GetLastValueWithin(address_end);
-        const bool must_add_end = last_value != value;
         auto it = container.lower_bound(address);
         const auto it_end = container.upper_bound(address_end);
-        while (it != it_end) {
-            it = container.erase(it);
+        ValueT first_value = null_value;
+        if (it == container.begin()) {
+            first_value = it->second;
+        } else if (it != container.end()) {
+            first_value = std::prev(it)->second;
         }
+        ValueT last_value = null_value;
+        if (it_end == container.begin()) [[unlikely]] {
+            last_value = it_end->second;
+        } else if (it_end != container.end()) {
+            last_value = std::prev(it_end)->second;
+        }
+        const bool must_add_start = first_value != value;
+        const bool must_add_end = last_value != value;
+        container.erase(it, it_end);
         if (must_add_start) {
-            container.emplace(address, value);
+            container.emplace_hint(it_end, address, value);
         }
         if (must_add_end) {
-            container.emplace(address_end, last_value);
+            container.emplace_hint(it_end, address_end, last_value);
         }
     }
 

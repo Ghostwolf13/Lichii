@@ -18,6 +18,9 @@ public:
     NczCache& operator=(const NczCache&) = delete;
 
     bool IsOpen() const;
+    // Replaces the backing file with a new, empty one.
+    bool Open();
+    void Close();
     virtual bool Write(std::span<const u8> bytes, u64 offset);
     virtual std::size_t Read(std::span<u8> bytes, u64 offset);
 

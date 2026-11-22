@@ -35,7 +35,8 @@ Loader::ResultStatus ProgramMetadata::Load(VirtualFile file) {
 
     // Switch 2 ACID blocks have a 0x300-byte signature/key area instead of 0x200, so the
     // header starts 0x100 bytes later. Offsets inside the header are unchanged.
-    if (std::memcmp(acid_header.magic.data(), "ACID", 4) != 0) {
+    const bool switch2 = std::memcmp(acid_header.magic.data(), "ACID", 4) != 0;
+    if (switch2) {
         constexpr std::size_t acid_sig_size_v1 = 0x200;
         constexpr std::size_t acid_sig_size_v2 = 0x300;
         constexpr std::size_t acid_body_size = sizeof(AcidHeader) - acid_sig_size_v1;
@@ -46,17 +47,26 @@ Loader::ResultStatus ProgramMetadata::Load(VirtualFile file) {
             return Loader::ResultStatus::ErrorBadACIDHeader;
         }
         LOG_INFO(Loader, "NPDM uses the Switch 2 ACID layout");
-        is_switch2 = true;
     }
 
     if (sizeof(AciHeader) != file->ReadObject(&aci_header, npdm_header.aci_offset)) {
+        return Loader::ResultStatus::ErrorBadACIHeader;
+    }
+    // Like the ACID's above: without it any aci_offset loaded, reading the ACI0 fields from
+    // whatever bytes it points at, the NPDM header included.
+    if (std::memcmp(aci_header.magic.data(), "ACI0", 4) != 0) {
         return Loader::ResultStatus::ErrorBadACIHeader;
     }
 
     // Load acid_file_access per-component instead of the entire struct, since this struct does not
     // reflect the layout of the real data.
     // FAC/FAH offsets are relative to the start of the ACID/ACI block, like the KAC offsets.
-    std::size_t current_offset = npdm_header.acid_offset + acid_header.fac_offset;
+    // Both offsets come from the file: add them in 64 bits and keep the block inside the file,
+    // like the KAC below. 0x2C bytes: version, 3 padding bytes, permissions and 0x20 unknown.
+    std::size_t current_offset = u64{npdm_header.acid_offset} + acid_header.fac_offset;
+    if (current_offset > total_size || total_size - current_offset < 0x2C) {
+        return Loader::ResultStatus::ErrorBadFileAccessControl;
+    }
     if (sizeof(FileAccessControl::version) != file->ReadBytes(&acid_file_access.version,
                                                               sizeof(FileAccessControl::version),
                                                               current_offset)) {
@@ -74,7 +84,11 @@ Loader::ResultStatus ProgramMetadata::Load(VirtualFile file) {
     }
 
     // Load aci_file_access per-component instead of the entire struct, same as acid_file_access
-    current_offset = npdm_header.aci_offset + aci_header.fah_offset;
+    // 0x1C bytes: version, 3 padding bytes, permissions and the two offset/size pairs.
+    current_offset = u64{npdm_header.aci_offset} + aci_header.fah_offset;
+    if (current_offset > total_size || total_size - current_offset < 0x1C) {
+        return Loader::ResultStatus::ErrorBadFileAccessHeader;
+    }
     if (sizeof(FileAccessHeader::version) != file->ReadBytes(&aci_file_access.version,
                                                              sizeof(FileAccessHeader::version),
                                                              current_offset)) {
@@ -106,13 +120,19 @@ Loader::ResultStatus ProgramMetadata::Load(VirtualFile file) {
         return Loader::ResultStatus::ErrorBadFileAccessHeader;
     }
 
-    aci_kernel_capabilities.resize(aci_header.kac_size / sizeof(u32));
-    const u64 read_size = aci_header.kac_size;
-    const u64 read_offset = npdm_header.aci_offset + aci_header.kac_offset;
+    // The capabilities are whole words, and the region must lie in the file before it is
+    // allocated: kac_size comes from the file.
+    const u64 read_size = aci_header.kac_size / sizeof(u32) * sizeof(u32);
+    const u64 read_offset = u64{npdm_header.aci_offset} + aci_header.kac_offset;
+    if (read_offset > total_size || read_size > total_size - read_offset) {
+        return Loader::ResultStatus::ErrorBadKernelCapabilityDescriptors;
+    }
+    aci_kernel_capabilities.resize(read_size / sizeof(u32));
     if (file->ReadBytes(aci_kernel_capabilities.data(), read_size, read_offset) != read_size) {
         return Loader::ResultStatus::ErrorBadKernelCapabilityDescriptors;
     }
 
+    is_switch2 = switch2;
     return Loader::ResultStatus::Success;
 }
 

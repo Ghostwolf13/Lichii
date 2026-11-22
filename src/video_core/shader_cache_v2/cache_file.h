@@ -54,9 +54,10 @@ enum class WriteResult {
 
 /// Appends encoded records (EncodeRecord) holding the log's lock, which is tried once. The file
 /// and its header are created when missing, a damaged header is written again, and a record cut
-/// off by a crash is padded to the next record boundary first.
+/// off by a crash is padded to the next record boundary first. Once written, `records_offset`
+/// (when given) is where the first of them begins in the file.
 [[nodiscard]] WriteResult AppendToLog(const std::filesystem::path& file,
-                                      std::span<const u8> records);
+                                      std::span<const u8> records, u64* records_offset = nullptr);
 
 /// Bounds what CompactLog keeps. While the live records take more than `max_bytes` (as written
 /// again), only `target_bytes` of them are kept: those of the lowest rank first, the newest first

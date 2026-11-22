@@ -266,6 +266,7 @@ TEST_CASE("Global memory helpers with variable pointers select the buffer and br
             u32 merges{};
             u32 returns{};
             u32 last_select{};
+            u32 search_id{};
             bool writes_before_branch{};
             bool writes_memory{};
             for (size_t i = 5; i < code.size();) {
@@ -286,10 +287,15 @@ TEST_CASE("Global memory helpers with variable pointers select the buffer and br
                     ++merges;
                 } else if (opcode == OpReturn || opcode == OpReturnValue) {
                     ++returns;
-                } else if (opcode == OpStore || opcode == OpFunctionCall ||
+                } else if (opcode == OpStore ||
+                           (opcode == OpFunctionCall && code[i + 3] != search_id) ||
                            (opcode >= OpAtomicExchange && opcode <= OpAtomicXor)) {
                     writes_memory = true;
                     writes_before_branch |= branches == 0;
+                } else if (opcode == OpFunctionEnd && function_id != main_id && last_select == 0 &&
+                           !writes_memory && search_id == 0) {
+                    // The buffer search the helpers call: no access, so no pointer select.
+                    search_id = function_id;
                 } else if (opcode == OpFunctionEnd && function_id != main_id) {
                     CAPTURE(function_id);
                     CHECK(returns == 1);

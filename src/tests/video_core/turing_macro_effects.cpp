@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <initializer_list>
+#include <optional>
 #include <random>
 #include <span>
 #include <vector>
@@ -11,7 +13,9 @@
 
 #include "common/common_types.h"
 #include "video_core/macro_turing.h"
+#include "video_core/nx2_list_indirect.h"
 #include "video_core/nx2_list_macro_trace.h"
+#include "video_core/nx2_owed_words.h"
 
 namespace {
 
@@ -267,4 +271,295 @@ TEST_CASE("Turing macro effects cover every write Execute makes on random code",
             }
         }
     }
+}
+
+namespace {
+
+namespace List = Tegra::Nx2ListIndirect;
+
+/// A compute macro call as List::ComputeFront sees it (kepler_compute.cpp's ListCallContext), on
+/// an engine whose registers take the call's emits; `released` gets the slots the front gives
+/// back to the back.
+struct ListCall {
+    std::span<const u32> code;
+    u64 generation;
+    u32 start;
+    std::vector<u32>& params;
+    std::span<u32> data_ram;
+    std::span<const u32> registers;
+    List::UploadState upload;
+    std::span<u32> engine_registers;
+    std::vector<u32>& released;
+
+    [[nodiscard]] std::optional<u64> DeviceWord(u64) const {
+        return std::nullopt;
+    }
+    void Emit(u32 method, u32 value) const {
+        engine_registers[method] = value;
+    }
+    void SendOwed(u64, u32) const {}
+    void Release(u32 slot) const {
+        released.push_back(slot);
+    }
+    void ReadSlots(std::span<const u32>, std::span<u32> words) const {
+        std::ranges::fill(words, 7U);
+    }
+    void SetRegister(u32 method, u32 value) const {
+        engine_registers[method] = value;
+    }
+};
+
+} // Anonymous namespace
+
+TEST_CASE("List words: a run that moves a slot's last holder keeps the slot held",
+          "[video_core][macro]") {
+    constexpr u32 slot = 5;
+    constexpr u32 a = 0x10;
+    constexpr u32 b = 0x20;
+    const u32 word = List::Placeholder(slot, 0);
+    std::array<u32, 0xc00> data_ram{};
+    std::array<u32, 0x1000> registers{};
+    std::vector<u32> params;
+    std::vector<u32> released;
+    List::DataRamWords channel{data_ram.data(), {}, {}};
+    List::ComputeFront front;
+    bool concretized{};
+    List::Reason reason{};
+    const auto call = [&](const std::vector<u32>& code, u64 generation) {
+        return ListCall{code, generation, 0, params, data_ram, registers, {}, registers, released};
+    };
+    // DREAD of data RAM word `address` into r0; DWRITE of r0 (`source` 0), the parameter (28)
+    // or 0 (24) to one.
+    const auto dread = [](u32 address) {
+        return Mme{.op = {30, 0}, .dst = {0, 24}, .src_a = {25, 24}, .imm = {address, 0}};
+    };
+    const auto dwrite = [](u32 address, u32 source, bool end) {
+        return Mme{.end = end,
+                   .op = {31, 0},
+                   .src_a = {25, 24},
+                   .src_b = {source, 24},
+                   .imm = {address, 0}};
+    };
+    // A call whose parameter is the list's word stores it at A.
+    const auto store = Code(std::vector<Mme>{dwrite(a, 28, true), Mme{}});
+    auto stores = call(store, 1);
+    REQUIRE(front.PrepareCall(stores, channel, slot, 1));
+    params = {word};
+    REQUIRE(front.Run(stores, channel, concretized, reason));
+    REQUIRE(data_ram[a] == word);
+    REQUIRE(List::FrontHolds()[slot] == 1);
+
+    // Loads A, clears it, stores the word at B: the clear drops A's hold before B takes one.
+    const auto move =
+        Code(std::vector<Mme>{dread(a), dwrite(a, 24, false), dwrite(b, 0, true), Mme{}});
+    params.clear();
+    auto moves = call(move, 2);
+    REQUIRE(front.Run(moves, channel, concretized, reason));
+    REQUIRE(data_ram[a] == 0);
+    REQUIRE(data_ram[b] == word);
+    CHECK(released.empty());
+    CHECK(List::FrontHolds()[slot] == 1);
+
+    // Loads B, emits the word as a QMD grid word, then clears B: the run's stores are applied
+    // before its emits.
+    const Mme emit_r0{.src_a = {0, 24},
+                      .imm = {List::InlineQmdGridFirst, 0},
+                      .out_method = {5, 0},
+                      .out_emit = {1, 0}};
+    const auto consume = Code(std::vector<Mme>{dread(b), emit_r0, dwrite(b, 24, true), Mme{}});
+    auto consumes = call(consume, 3);
+    REQUIRE(front.Run(consumes, channel, concretized, reason));
+    REQUIRE(data_ram[b] == 0);
+    REQUIRE(registers[List::InlineQmdGridFirst] == word);
+    CHECK(released.empty());
+    CHECK(List::FrontHolds()[slot] == 1);
+
+    // The words read back: the front holds the slot no more and gives it back, once.
+    front.ConcretizeAll(consumes, channel);
+    CHECK(registers[List::InlineQmdGridFirst] == 7U);
+    CHECK(released == std::vector<u32>{slot});
+    CHECK(List::FrontHolds()[slot] == 0);
+}
+
+TEST_CASE("List words: a placeholder names a slot the back has", "[video_core][macro]") {
+    CHECK(List::IsPlaceholder(List::Placeholder(0, 0)));
+    CHECK(List::IsPlaceholder(List::Placeholder(List::SlotCount - 1, 2)));
+    CHECK(List::GridSlot(List::Placeholder(9, 0), List::Placeholder(9, 1),
+                         List::Placeholder(9, 2)) == 9U);
+    // A grid the guest wrote with the magic and a slot past the last.
+    const u32 past = List::Placeholder(List::SlotCount, 0);
+    CHECK_FALSE(List::IsPlaceholder(past));
+    CHECK_FALSE(List::IsPlaceholder(List::PlaceholderMagic | 0xFFFCU));
+    CHECK_FALSE(List::GridSlot(past, past + 1, past + 2).has_value());
+}
+
+TEST_CASE("List words: the front never takes a call that does more than move one",
+          "[video_core][macro]") {
+    constexpr u32 slot = 11;
+    std::array<u32, 0xc00> data_ram{};
+    std::array<u32, 0x1000> registers{};
+    std::vector<u32> params;
+    std::vector<u32> released;
+    List::DataRamWords channel{data_ram.data(), {}, {}};
+    List::ComputeFront front;
+    const auto prepare = [&](std::initializer_list<Mme> instructions, u64 generation) {
+        const auto code = Code(std::span<const Mme>{instructions.begin(), instructions.size()});
+        auto call =
+            ListCall{code, generation, 0, params, data_ram, registers, {}, registers, released};
+        return front.PrepareCall(call, channel, slot, 1);
+    };
+    // r0 = parameter + 1: a computation.
+    const Mme add_one{
+        .end = true, .dst = {0, 24}, .src_a = {28, 24}, .src_b = {25, 24}, .imm = {1, 0}};
+    CHECK_FALSE(prepare({add_one, Mme{}}, 1));
+    // The parameter sent to a method other than an inline QMD grid word or the upload's data.
+    CHECK_FALSE(prepare({Fifo(0x100, true), Mme{}}, 2));
+    // The upload's data without a linear one-line upload the front can place.
+    CHECK_FALSE(prepare({Fifo(List::UploadData, true), Mme{}}, 3));
+    CHECK(released.empty());
+    CHECK(List::FrontHolds()[slot] == 0);
+    // An inline QMD grid word: the back dispatches from the slot.
+    REQUIRE(prepare({Fifo(List::InlineQmdGridFirst, true), Mme{}}, 4));
+    CHECK(List::FrontHolds()[slot] == 1);
+    auto none = ListCall{{}, 0, 0, params, data_ram, registers, {}, registers, released};
+    front.ConcretizeAll(none, channel);
+    CHECK(released == std::vector<u32>{slot});
+    CHECK(List::FrontHolds()[slot] == 0);
+}
+
+TEST_CASE("List words: a call that computes with a held one runs on the words themselves",
+          "[video_core][macro]") {
+    constexpr u32 slot = 12;
+    constexpr u32 a = 0x30;
+    constexpr u32 b = 0x31;
+    const u32 word = List::Placeholder(slot, 0);
+    std::array<u32, 0xc00> data_ram{};
+    std::array<u32, 0x1000> registers{};
+    std::vector<u32> params;
+    std::vector<u32> released;
+    List::DataRamWords channel{data_ram.data(), {}, {}};
+    List::ComputeFront front;
+    bool concretized{};
+    List::Reason reason{};
+    const auto call = [&](const std::vector<u32>& code, u64 generation) {
+        return ListCall{code, generation, 0, params, data_ram, registers, {}, registers, released};
+    };
+    const auto store = Code(std::vector<Mme>{
+        Mme{.end = true, .op = {31, 0}, .src_a = {25, 24}, .src_b = {28, 24}, .imm = {a, 0}},
+        Mme{}});
+    auto stores = call(store, 1);
+    REQUIRE(front.PrepareCall(stores, channel, slot, 1));
+    params = {word};
+    REQUIRE(front.Run(stores, channel, concretized, reason));
+    REQUIRE(data_ram[a] == word);
+
+    // Loads A, adds 1, stores it at B. The add uses the word: the front reads the words back
+    // (ReadSlots gives 7) and the caller runs the call on them, never on the placeholder.
+    const auto compute = Code(std::vector<Mme>{
+        Mme{.op = {30, 0}, .dst = {0, 24}, .src_a = {25, 24}, .imm = {a, 0}},
+        Mme{.dst = {1, 24}, .src_a = {0, 24}, .src_b = {25, 24}, .imm = {1, 0}},
+        Mme{.end = true, .op = {31, 0}, .src_a = {25, 24}, .src_b = {1, 24}, .imm = {b, 0}},
+        Mme{}});
+    params.clear();
+    auto computes = call(compute, 2);
+    REQUIRE_FALSE(front.Run(computes, channel, concretized, reason));
+    CHECK(concretized);
+    CHECK(reason == List::Reason::Escaped);
+    CHECK(data_ram[a] == 7U);
+    CHECK(data_ram[b] == 0U);
+    CHECK(channel.words.empty());
+    CHECK(released == std::vector<u32>{slot});
+    CHECK(List::FrontHolds()[slot] == 0);
+
+    // A 3D macro that may read a held word gets the words first (Maxwell3D's
+    // ConcretizeListWords).
+    data_ram[a] = word;
+    ++List::FrontHolds()[slot];
+    channel.words.push_back({a, word});
+    released.clear();
+    const u32 slots_read = List::ConcretizeDataRam(
+        channel.words, data_ram,
+        [](std::span<const u32>, std::span<u32> words) { std::ranges::fill(words, 9U); },
+        [&](u32 held) { released.push_back(held); });
+    CHECK(slots_read == 1);
+    CHECK(data_ram[a] == 9U);
+    CHECK(released == std::vector<u32>{slot});
+}
+
+TEST_CASE("List words: an owed word lands once its tick ran, unless something wrote it since",
+          "[video_core][macro]") {
+    using Words = std::vector<List::OwedWords::Word>;
+    List::OwedWords owed;
+    const u32 x = List::Placeholder(3, 0);
+    const u32 y = List::Placeholder(3, 1);
+    owed.Note(0x1004, x, 5);
+    owed.Note(0x1008, y, 6);
+    // Any thread sees every byte of an owed word, and nothing next to it.
+    CHECK_FALSE(owed.Overlaps(0x1000, 4));
+    CHECK(owed.Overlaps(0x1007, 1));
+    CHECK(owed.Overlaps(0x1000, 0x1000));
+    CHECK_FALSE(owed.Overlaps(0x100c, 4));
+
+    Words taken;
+    owed.TakeDone([](u64 tick) { return tick <= 5; }, taken);
+    REQUIRE(taken.size() == 1);
+    CHECK(taken[0].address == 0x1004);
+    CHECK_FALSE(owed.Overlaps(0x1004, 4));
+    CHECK(owed.Overlaps(0x1008, 4));
+
+    // Guest memory: the placeholder becomes the word; a word written since stays as written,
+    // aligned (atomic) or not.
+    alignas(4) std::array<u8, 12> memory{};
+    std::memcpy(memory.data(), &x, 4);
+    REQUIRE(List::LandOwedWord(memory.data(), x, 42));
+    u32 word;
+    std::memcpy(&word, memory.data(), 4);
+    CHECK(word == 42);
+    CHECK_FALSE(List::LandOwedWord(memory.data(), x, 43));
+    std::memcpy(memory.data() + 5, &y, 4);
+    REQUIRE(List::LandOwedWord(memory.data() + 5, y, 7));
+    std::memcpy(&word, memory.data() + 5, 4);
+    CHECK(word == 7);
+}
+
+TEST_CASE("List words: a word owed no more is not landed or patched", "[video_core][macro]") {
+    using Words = std::vector<List::OwedWords::Word>;
+    List::OwedWords owed;
+    const u32 first = List::Placeholder(1, 0);
+    const u32 second = List::Placeholder(2, 0);
+    // The next upload there: the older word is taken, and its note never lands over the new one.
+    owed.Note(0x2000, first, 1);
+    Words taken;
+    owed.Take(0x2000, 4, taken);
+    REQUIRE(taken.size() == 1);
+    owed.Note(0x2000, second, 9);
+    taken.clear();
+    owed.TakeDone([](u64 tick) { return tick <= 1; }, taken);
+    CHECK(taken.empty());
+    CHECK(owed.Overlaps(0x2000, 4));
+
+    // A reader finds guest memory changed there (a CPU or inline write): the word is dropped.
+    owed.Note(0x2010, first, 9);
+    Words dropped;
+    std::vector<DAddr> kept;
+    owed.ForEach(
+        0x2000, 0x20,
+        [&](const List::OwedWords::Word& owed_word) {
+            if (owed_word.address == 0x2010) {
+                return false;
+            }
+            kept.push_back(owed_word.address);
+            return true;
+        },
+        dropped);
+    CHECK(kept == std::vector<DAddr>{0x2000});
+    REQUIRE(dropped.size() == 1);
+    CHECK(dropped[0].value == first);
+    CHECK_FALSE(owed.Overlaps(0x2010, 4));
+
+    // The host GPU wrote over it (a shader, copy or clear).
+    taken.clear();
+    owed.Take(0x2002, 1, taken);
+    REQUIRE(taken.size() == 1);
+    CHECK(owed.Empty());
 }

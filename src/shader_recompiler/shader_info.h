@@ -325,6 +325,9 @@ struct Info {
     bool stores_tess_level_inner{};
 
     bool stores_indexed_attributes{};
+    /// The vertex shader stores one value to position z and w, putting every vertex on viewport
+    /// 0's far plane (z / w = 1), the usual way to draw a sky
+    bool position_on_far_plane{};
 
     bool stores_global_memory{};
     bool uses_local_memory{};

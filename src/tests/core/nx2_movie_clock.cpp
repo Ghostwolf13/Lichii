@@ -13,11 +13,11 @@ TEST_CASE("NX2 movie clock ignores frames acquired ahead of it", "[nx2_movie_clo
     // A player with two output images that takes each frame as soon as it is written, a frame
     // ahead of when it shows it.
     Service::Nx2MovieClock clock;
-    clock.Acquired(Start, 0, 0);
+    clock.Acquired(Start, 0, 0, 0);
     for (s64 frame = 1; frame < 600; ++frame) {
         CAPTURE(frame);
         const s64 now = Start + (frame - 1) * Frame + 500;
-        clock.Acquired(now, static_cast<u64>(frame * Frame), 0);
+        clock.Acquired(now, static_cast<u64>(frame * Frame), 0, static_cast<u64>(frame));
         REQUIRE(clock.Due(now, 0) == static_cast<u64>(now - Start));
     }
 }
@@ -27,7 +27,7 @@ TEST_CASE("NX2 movie clock runs on while a slow client falls behind", "[nx2_movi
     Service::Nx2MovieClock clock;
     for (s64 frame = 0; frame < 120; ++frame) {
         const s64 now = Start + frame * 20833;
-        clock.Acquired(now, static_cast<u64>(frame * Frame), 0);
+        clock.Acquired(now, static_cast<u64>(frame * Frame), 0, static_cast<u64>(frame));
         REQUIRE(clock.Due(now, 0) == static_cast<u64>(now - Start));
     }
 }
@@ -36,33 +36,33 @@ TEST_CASE("NX2 movie clock restarts after a pause, a loop or a long lag", "[nx2_
     using Clock = Service::Nx2MovieClock;
     Clock clock;
     REQUIRE_FALSE(clock.Due(Start, 0));
-    clock.Acquired(Start, 0, 0);
-    clock.Acquired(Start + Frame, Frame, 0);
+    clock.Acquired(Start, 0, 0, 0);
+    clock.Acquired(Start + Frame, Frame, 0, 0);
 
     // No acquire for over a second: no due pts until the next acquire restarts the clock.
     s64 now = Start + Frame + Clock::PauseGap + 1;
     REQUIRE_FALSE(clock.Due(now, 0));
-    clock.Acquired(now, 2 * Frame, 0);
-    REQUIRE(clock.Due(now + 1000, 0) == 2 * Frame + 1000);
+    clock.Acquired(now, 2 * Frame, 0, 0);
+    REQUIRE(clock.Due(now + 1000, 0) == static_cast<u64>(2 * Frame + 1000));
 
     // Emulation paused and resumed since the last acquire.
     const s64 resumed = now + 2000;
     REQUIRE_FALSE(clock.Due(now + 3000, resumed));
     now += 4000;
-    clock.Acquired(now, 3 * Frame, resumed);
-    REQUIRE(clock.Due(now, resumed) == 3 * Frame);
+    clock.Acquired(now, 3 * Frame, resumed, 0);
+    REQUIRE(clock.Due(now, resumed) == static_cast<u64>(3 * Frame));
 
     // The movie loops back to its start.
     now += Frame;
-    clock.Acquired(now, 0, resumed);
-    REQUIRE(clock.Due(now, resumed) == 0);
+    clock.Acquired(now, 0, resumed, 0);
+    REQUIRE(clock.Due(now, resumed) == 0U);
 
     // The client takes a frame every half second: once it lags by more than MaxCatchUp, the
     // clock restarts from its frame.
     const s64 loop = now;
     for (s64 step = 1; step <= 7; ++step) {
         now = loop + step * Clock::PauseGap / 2;
-        clock.Acquired(now, static_cast<u64>(step * Frame), resumed);
+        clock.Acquired(now, static_cast<u64>(step * Frame), resumed, 0);
         const s64 lag = (now - loop) - step * Frame;
         CAPTURE(step, lag);
         REQUIRE(clock.Due(now, resumed) ==
@@ -71,4 +71,41 @@ TEST_CASE("NX2 movie clock restarts after a pause, a loop or a long lag", "[nx2_
 
     clock.Reset();
     REQUIRE_FALSE(clock.Due(now, resumed));
+}
+
+TEST_CASE("NX2 movie clock moves to a frame the client held until it showed it", "[nx2_movie_clock]") {
+    // Kirby Air Riders takes frames 0 and 1 at once, starts its own clock 0.6 s later when frame
+    // 0 shows, and gives frame 0's image back when frame 1 shows.
+    constexpr s64 Delay = 600'000;
+    constexpr u64 Present = 100;
+    Service::Nx2MovieClock clock;
+    clock.Acquired(Start, 0, 0, Present);
+    clock.Acquired(Start + 1400, Frame, 0, Present);
+    REQUIRE(clock.Due(Start + Delay + Frame, 0) == static_cast<u64>(Delay + Frame));
+    const u64 shown_present = Present + Delay / Frame + 1;
+    clock.Released(Start + Delay + Frame, shown_present);
+    REQUIRE(clock.Due(Start + Delay + Frame, 0) == static_cast<u64>(Frame));
+
+    // From there each frame is taken a present before it shows: the clock stays with the client.
+    for (s64 frame = 2; frame < 600; ++frame) {
+        CAPTURE(frame);
+        const s64 shown = Start + Delay + frame * Frame;
+        const u64 present = shown_present + static_cast<u64>(frame - 1);
+        clock.Acquired(shown - Frame + 3000, static_cast<u64>(frame * Frame), 0, present - 1);
+        clock.Released(shown, present);
+        REQUIRE(clock.Due(shown, 0) == static_cast<u64>(frame * Frame));
+    }
+}
+
+TEST_CASE("NX2 movie clock doesn't follow a client that shows frames as it gets them",
+          "[nx2_movie_clock]") {
+    // Ocarina of Time at 48 fps gives the older image back in the frame it takes the next one.
+    Service::Nx2MovieClock clock;
+    for (s64 frame = 0; frame < 120; ++frame) {
+        const s64 now = Start + frame * 20833;
+        const u64 present = static_cast<u64>(frame);
+        clock.Acquired(now, static_cast<u64>(frame * Frame), 0, present);
+        clock.Released(now + 500, present + 1);
+        REQUIRE(clock.Due(now + 500, 0) == static_cast<u64>(now + 500 - Start));
+    }
 }

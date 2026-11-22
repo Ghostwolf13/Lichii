@@ -61,12 +61,18 @@ inline constexpr std::array<const char*, static_cast<size_t>(Reason::Count)> rea
     "memory map",
 };
 
-inline std::atomic<bool> g_enabled{true};
+/// Read by every thread: on its own cache line, away from the serials the breaks bump.
+alignas(64) inline std::atomic<bool> g_enabled{true};
 
 /// Whether pipelines take their vertex input as dynamic state (VK_EXT_vertex_input_dynamic_state):
 /// then the vertex attribute formats are draw parameters, as only each attribute's type class is
 /// in the pipeline key. Set by the pipeline cache before the GPU threads run, read on the back.
 inline std::atomic<bool> g_dynamic_vertex_input{};
+
+/// Whether vertex stream strides, enables and divisors are dynamic state too: dynamic vertex
+/// input with extended dynamic state keeps them out of the pipeline key, and UpdateVertexInput
+/// and the vertex buffer binds record them for every draw. Set with g_dynamic_vertex_input.
+inline std::atomic<bool> g_dynamic_vertex_streams{};
 
 /// Any thread: whether fast draws run (always, unless a test turned them off). The rasterizer
 /// latches it per draw (on the thread that draws) and starts with a full resolve when it turns on.
@@ -105,14 +111,22 @@ inline thread_local bool t_serial_bumped{};
 /// Bumped where the guest CPU may have synchronised with the GPU: fences, semaphores, syncpoints,
 /// reports, frames, other engines and requests from other threads. After one the guest may have
 /// written memory the caches were not told about (pages that aren't write-protected), so uniform
-/// keeps read their buffers again.
-inline std::atomic<u64> g_sync_serial{1};
+/// keeps read their buffers again. As with the serial above, the thread that reads it skips the
+/// locked add once it bumped it since that read (every method of another engine notes a sync).
+alignas(64) inline std::atomic<u64> g_sync_serial{1};
+inline thread_local bool t_reads_sync_serial{};
+inline thread_local bool t_sync_serial_bumped{};
 
 inline void NoteSync() {
-    g_sync_serial.fetch_add(1, std::memory_order_relaxed);
+    if (!(t_reads_sync_serial && t_sync_serial_bumped)) {
+        g_sync_serial.fetch_add(1, std::memory_order_relaxed);
+        t_sync_serial_bumped = t_reads_sync_serial;
+    }
 }
 
 [[nodiscard]] inline u64 SyncSerial() {
+    t_reads_sync_serial = true;
+    t_sync_serial_bumped = false;
     return g_sync_serial.load(std::memory_order_acquire);
 }
 

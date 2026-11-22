@@ -10,10 +10,11 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/service/kernel_helpers.h"
+#include "core/hle/service/nx2_video_input_queue.h"
 #include "core/hle/service/nx2_video_ready.h"
 #include "tests/core/system_test_context.h"
 
-TEST_CASE("Stopped video decoders cannot re-signal submission readiness", "[nx2][video]") {
+TEST_CASE("Video readiness follows input capacity and decoder running state", "[nx2][video]") {
     ScopedSystemTestContext environment;
     Core::System system;
     system.Initialize();
@@ -47,6 +48,28 @@ TEST_CASE("Stopped video decoders cannot re-signal submission readiness", "[nx2]
         ready.room.store(true);
         ready.Signal(kernel);
         CHECK(event->GetReadableEvent().IsSignaled(kernel));
+
+        Service::Nx2VideoInputQueue inputs;
+        for (u64 index = 0; index < inputs.RefuseAt; ++index) {
+            REQUIRE(inputs.Submit({{static_cast<u8>(index)}, index * 16667, false}));
+        }
+        const Service::Nx2VideoInputQueue::Input refused{{0xAB}, inputs.RefuseAt * 16667, false};
+        REQUIRE_FALSE(inputs.Submit(refused));
+        event->Clear(kernel);
+        ready.room.store(inputs.HasRoom());
+        ready.Signal(kernel);
+        CHECK_FALSE(event->GetReadableEvent().IsSignaled(kernel));
+
+        // A single consumed input must wake the producer even if it holds all output images.
+        inputs.Pop();
+        ready.room.store(inputs.HasRoom());
+        ready.Signal(kernel);
+        CHECK(event->GetReadableEvent().IsSignaled(kernel));
+        REQUIRE(inputs.Submit(refused));
+        event->Clear(kernel);
+        ready.room.store(inputs.HasRoom());
+        ready.Signal(kernel);
+        CHECK_FALSE(event->GetReadableEvent().IsSignaled(kernel));
 
         ready.SetRunning(kernel, false);
         ready.Signal(kernel);

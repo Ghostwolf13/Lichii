@@ -120,6 +120,12 @@ enum class AppletProgramId : u64 {
     MaxProgramId = 0x0100000000001FFFull,
 };
 
+/// The Switch 1 system and library applets: the HOME Menu, overlayDisp and the LLE applets.
+constexpr bool IsAppletProgramId(u64 program_id) {
+    return program_id >= static_cast<u64>(AppletProgramId::QLaunch) &&
+           program_id <= static_cast<u64>(AppletProgramId::MaxProgramId);
+}
+
 // This is nn::am::AppletMessage
 enum class AppletMessage : u32 {
     None = 0,

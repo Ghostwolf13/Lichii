@@ -146,6 +146,24 @@ TEST_CASE("Descriptor limits clear exposed slots after shrink and growth", "[des
     }
 }
 
+TEST_CASE("A deferred descriptor retries without changing its neighbors", "[descriptor_table]") {
+    DescriptorMemory memory;
+    memory.banks[0][63] = 17;
+    memory.banks[0][64] = 21;
+    VideoCommon::DescriptorTable<u64> table;
+    REQUIRE(table.Synchronize(0x1000, 127));
+    REQUIRE(table.Read(memory, 63).second);
+    REQUIRE(table.Read(memory, 64).second);
+    const auto generation = table.changes;
+
+    table.Retry(64);
+
+    CHECK_FALSE(table.Read(memory, 63).second);
+    CHECK(table.Read(memory, 64) == std::pair<u64, bool>{21, true});
+    CHECK_FALSE(table.Read(memory, 64).second);
+    CHECK(table.changes == generation);
+}
+
 TEST_CASE("Descriptor invalidation CPU benchmark", "[.][cache_bench]") {
     DescriptorMemory memory;
     const auto measure = [&](bool deferred) {
@@ -303,6 +321,20 @@ TEST_CASE("Bound descriptor IDs refresh after descriptor capacity changes", "[de
         REQUIRE(table.Read(memory, limit).second);
         REQUIRE(table.bound_ids[limit] == Common::SlotId{0});
     }
+}
+
+TEST_CASE("Descriptor indices must fit both the guest limit and allocated table",
+          "[descriptor_table]") {
+    VideoCommon::DescriptorTable<u64> table;
+    CHECK_FALSE(table.ContainsIndex(0));
+
+    REQUIRE(table.Synchronize(0x1000, 127));
+    CHECK(table.ContainsIndex(127));
+    CHECK_FALSE(table.ContainsIndex(128));
+
+    REQUIRE(table.Synchronize(0x1000, (std::numeric_limits<u32>::max)()));
+    CHECK(table.ContainsIndex(0));
+    CHECK_FALSE(table.ContainsIndex(static_cast<u32>(table.bound_ids.size())));
 }
 
 TEST_CASE("Descriptor Debug poisoning touches only the current addressable range",

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <optional>
 
@@ -14,6 +15,14 @@ struct FrameGenPlan {
     size_t generations{};
     bool warm{};
 };
+
+/// The generations a game frame can present without the renderer waiting for a present frame:
+/// those free now, less one kept for the next game frame. Frame generation runs on FIFO, so when
+/// the display takes fewer presents than the game and its generated frames make (2x at 60 Hz),
+/// waiting for them would hold the game below its own rate. Generation steps back instead.
+[[nodiscard]] inline size_t GenerationsWithoutWaiting(size_t planned, size_t free_frames) {
+    return std::min(planned, free_frames > 0 ? free_frames - 1 : 0);
+}
 
 class FrameGenPacer {
 public:

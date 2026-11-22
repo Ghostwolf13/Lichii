@@ -150,7 +150,7 @@ public:
 private:
     Result DoHandshakeImpl() {
         ASSERT_OR_EXECUTE(!did_handshake && socket, { return ResultNoSocket; });
-        Result res = backend->DoHandshake();
+        Result res = backend->DoHandshake(next_alpn_proto);
         did_handshake = res.IsSuccess();
         return res;
     }
@@ -317,7 +317,7 @@ private:
     }
 
     Result Peek(OutBuffer<BufferAttr_HipcMapAlias> data, Out<u32> out_size) {
-        LOG_WARNING(Service_SSL, "(STUBBED)");
+        R_UNLESS(did_handshake, ResultInternalError);
         size_t tmp{};
         auto const res = backend->Peek(&tmp, data);
         *out_size = u32(tmp);
@@ -415,8 +415,7 @@ private:
     }
 
     Result SetNextAlpnProto(InBuffer<BufferAttr_HipcMapAlias> data) {
-        auto const to_write = u32((std::min)(next_alpn_proto.size(), data.size()));
-        next_alpn_proto.assign(data.begin(), data.begin() + to_write);
+        next_alpn_proto.assign(data.begin(), data.end());
         LOG_DEBUG(Service_SSL, "SetNextAlpnProto called, size={}", next_alpn_proto.size());
         R_SUCCEED();
     }

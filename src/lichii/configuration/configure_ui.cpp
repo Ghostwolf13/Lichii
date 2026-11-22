@@ -18,6 +18,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
+#include <QPushButton>
 #include <QString>
 #include <QToolButton>
 #include <QTranslator>
@@ -29,6 +30,7 @@
 #include "common/settings_enums.h"
 #include "core/core.h"
 #include "core/frontend/framebuffer_layout.h"
+#include "lichii/configuration/iidb_key_dialog.h"
 #include "ui_configure_ui.h"
 
 #include "qt_common/config/uisettings.h"
@@ -104,6 +106,7 @@ ConfigureUi::ConfigureUi(Core::System& system_, QWidget* parent)
       ratio{Settings::values.aspect_ratio.GetValue()},
       resolution_setting{Settings::values.resolution_setup.GetValue()}, system{system_} {
     ui->setupUi(this);
+    connect(ui->iidb_api_key, &QPushButton::clicked, this, [this] { IiDB::ConfigureKey(this); });
 
     // Optional SteamGridDB artwork lookup for games without artwork; off while the key is empty.
     {

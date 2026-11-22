@@ -5,10 +5,13 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace VideoCommon::GpuTrace {
 struct StateAccess;
@@ -43,6 +46,50 @@ public:
     using Address = std::uint64_t;
     using Descriptor = std::array<Word, 64>;
     struct RejectShaderDispatch { bool operator()(const Descriptor&) const { return false; } };
+    /// A scheduler with a table of its own, not the one the channels share: the split GPU thread's
+    /// front runs the scheduling ahead of its back to know what the launches release
+    /// (KeplerCompute).
+    struct OwnTable {};
+    NativeQmdScheduler() = default;
+    explicit NativeQmdScheduler(OwnTable) : table{&own_states} {}
+    NativeQmdScheduler(const NativeQmdScheduler&) = delete;
+    NativeQmdScheduler& operator=(const NativeQmdScheduler&) = delete;
+    /// Takes the QMD states of `other` over, while nothing runs on either.
+    void CopyStates(const NativeQmdScheduler& other) {
+        if (table != other.table) {
+            *table = *other.table;
+        }
+    }
+    [[nodiscard]] bool SameStates(const NativeQmdScheduler& other) const {
+        return *table == *other.table;
+    }
+    [[nodiscard]] std::size_t StateCount() const {
+        return table->size();
+    }
+    /// The split GPU thread's front runs signals it may have to take back, where it can't read a
+    /// QMD as the back will yet (FrontQmdView): from BeginAttempt on, Signal records what it
+    /// changes in the table, until CommitAttempt keeps it or RollbackAttempt restores the table.
+    void BeginAttempt() {
+        undo.clear();
+        attempting = true;
+    }
+    void CommitAttempt() {
+        undo.clear();
+        attempting = false;
+    }
+    void RollbackAttempt() {
+        auto& states = *table;
+        // Newest first: each QMD ends with the state it had before the attempt.
+        for (auto it = undo.rbegin(); it != undo.rend(); ++it) {
+            if (it->second) {
+                states.insert_or_assign(it->first, *it->second);
+            } else {
+                states.erase(it->first);
+            }
+        }
+        undo.clear();
+        attempting = false;
+    }
     // Optional diagnostics: called with "load"/"count"/"defer"/"run" events.
     std::function<void(std::string_view, Address, std::int32_t)> trace;
     // Optional diagnostics: called with the QMD, slot and raw words of a release it skips.
@@ -63,6 +110,9 @@ public:
     template <typename Read, typename Release, typename Dispatch>
     std::string_view Signal(Address address, Word argument, Read read, Release release, Dispatch dispatch) {
         struct Pending { Address address; Word action; Word count; };
+        auto& states = *table;
+        // What `read` returns is used before the next read only: a table entry holds no copy.
+        Descriptor descriptor{};
         std::string_view error;
         std::array<Pending, 256> pending{};
         std::size_t count = 1;
@@ -71,16 +121,30 @@ public:
             const auto request = pending[i];
             if (states.size() >= 4096 && !states.contains(request.address)) {
                 // Finished QMDs with nothing deferred are only history, drop them instead of stalling.
+                if (attempting) {
+                    for (const auto& [kept_address, kept] : states) {
+                        if (kept.completed && kept.deferred == 0) {
+                            undo.emplace_back(kept_address, kept);
+                        }
+                    }
+                }
                 std::erase_if(states, [](const auto& entry) {
                     return entry.second.completed && entry.second.deferred == 0;
                 });
                 if (states.size() >= 4096) return "QMD cache limit";
             }
+            if (attempting) {
+                const auto found = states.find(request.address);
+                undo.emplace_back(request.address, found != states.end()
+                                                       ? std::optional<State>{found->second}
+                                                       : std::nullopt);
+            }
             auto& state = states[request.address];
             if (request.action == 3 || request.action == 2) {
                 if (request.action == 3 || !state.loaded) {
-                    if (!read(request.address, state.descriptor)) return "unmapped QMD";
-                    const auto& qmd = state.descriptor;
+                    if (!read(request.address, descriptor))
+                        return "unmapped QMD";
+                    const auto& qmd = descriptor;
                     if ((qmd[18] & 0xff) != 0x30 || (qmd[4] & 0x100)) return "unsupported QMD version or queue";
                     if constexpr (std::is_same_v<Dispatch, RejectShaderDispatch>) {
                         if (qmd[12] && (qmd[13] & 0xffff) && (qmd[14] & 0xffff))
@@ -112,8 +176,9 @@ public:
             if (state.dependencies < 0) return "QMD dependency underflow";
             // The SDK patches release payloads while a scheduled QMD is
             // waiting for its remaining dependencies. Fetch them at execution.
-            if (!read(request.address, state.descriptor)) return "unmapped QMD";
-            const auto qmd = state.descriptor;
+            if (!read(request.address, descriptor))
+                return "unmapped QMD";
+            const auto qmd = descriptor;
             if ((qmd[18] & 0xff) != 0x30 || (qmd[4] & 0x100)) return "unsupported QMD version or queue";
             // A program Eden can't run is skipped, but the QMD still completes: its releases
             // are what other queues and the CPU wait on (the console never fails a launch).
@@ -150,16 +215,21 @@ private:
     static constexpr std::array<Word, 3> ReleaseSlots{24, 28, 52};
 
     struct State {
-        Descriptor descriptor{};
         std::int32_t dependencies{};
         std::int32_t deferred{};
         bool loaded{};
         bool scheduled{};
         bool completed{};
+        bool operator==(const State&) const = default;
     };
     // One table for every channel: a QMD's dependency counter is state of the QMD itself, and
     // title 1 schedules a QMD on one channel while another decrements it (a decrement that
     // arrived first was kept by the other channel's scheduler and the QMD never launched).
-    static inline std::unordered_map<Address, State> states;
+    static inline std::unordered_map<Address, State> shared_states;
+    std::unordered_map<Address, State> own_states;
+    std::unordered_map<Address, State>* table{&shared_states};
+    /// BeginAttempt: the states the attempt changed, as they were (none: the QMD had no state).
+    bool attempting{};
+    std::vector<std::pair<Address, std::optional<State>>> undo;
 };
 } // namespace Tegra

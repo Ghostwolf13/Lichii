@@ -59,7 +59,6 @@ public:
     }
 
 private:
-    u8 PeekByte();
     Common::Stream base_stream{};
     u32 low_value{};
     u32 range{0xff};

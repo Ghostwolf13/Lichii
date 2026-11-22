@@ -3,11 +3,13 @@
 
 #include "core/hle/service/sockets/numeric_name_info.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <utility>
 
 #include "core/hle/ipc.h"
+#include "core/internal_network/network.h"
 
 namespace Service::Sockets {
 
@@ -22,7 +24,7 @@ NumericNameInfoResult ResolveNumericNameInfo(const Network::SockAddrIn& address,
     if ((bits & ~AllowedFlags) != 0) {
         return {GetAddrInfoError::BADFLAGS, {}, {}};
     }
-    if (address.family != Network::Domain::INET) {
+    if (address.family != Network::Domain::INET && address.family != Network::Domain::INET6) {
         return {GetAddrInfoError::FAMILY, {}, {}};
     }
     if ((host_capacity == 0 && service_capacity == 0) ||
@@ -32,7 +34,9 @@ NumericNameInfoResult ResolveNumericNameInfo(const Network::SockAddrIn& address,
     }
 
     std::string host;
-    if (host_capacity != 0) {
+    if (host_capacity != 0 && address.family == Network::Domain::INET6) {
+        host = Network::IPv6AddressToString(address.ip6);
+    } else if (host_capacity != 0) {
         host = std::to_string(address.ip[0]) + "." + std::to_string(address.ip[1]) + "." +
                std::to_string(address.ip[2]) + "." + std::to_string(address.ip[3]);
     }
@@ -67,6 +71,20 @@ NumericNameInfoResult ResolveNumericNameInfoRequest(std::span<const u8> paramete
                (u32{parameters[offset + 2]} << 16) | (u32{parameters[offset + 3]} << 24);
     };
     // +4 is not options_count, and its exact legacy meaning is not required here.
+    // An INET6 family in less than a sockaddr_in6 is not an IPv6 address.
+    if (sockaddr[1] == static_cast<u8>(Domain::INET6) && sockaddr.size() >= 28) {
+        if (read_u32(8) != 0 || (sockaddr[0] != 0 && sockaddr[0] != 28)) {
+            return {GetAddrInfoError::FAIL, {}, {}};
+        }
+        Network::SockAddrIn address{
+            .family = Network::Domain::INET6,
+            .ip = {},
+            .portno = static_cast<u16>((u16{sockaddr[2]} << 8) | sockaddr[3]),
+        };
+        std::copy_n(sockaddr.begin() + 8, address.ip6.size(), address.ip6.begin());
+        return ResolveNumericNameInfo(address, static_cast<s32>(read_u32(0)), host_capacity,
+                                      service_capacity);
+    }
     if (read_u32(8) != 0 || (sockaddr[0] != 0 && sockaddr[0] != 16)) {
         return {GetAddrInfoError::FAIL, {}, {}};
     }

@@ -166,7 +166,8 @@ json GetHLERequestContextData(Service::HLERequestContext& ctx, Core::Memory::Mem
 
 namespace Core {
 
-Reporter::Reporter(System& system_) : system(system_) {
+Reporter::Reporter(System& system_, FSAccessLogPolicy fs_access_log_policy_)
+    : system{system_}, fs_access_log_policy{fs_access_log_policy_} {
     ClearFSAccessLog();
 }
 
@@ -335,6 +336,10 @@ void Reporter::SaveErrorReport(u64 title_id, Result result,
 }
 
 void Reporter::SaveFSAccessLog(std::string_view log_message) const {
+    if (fs_access_log_policy == FSAccessLogPolicy::Disabled) {
+        return;
+    }
+
     const auto access_log_path =
         Common::FS::GetEdenPath(Common::FS::EdenPath::SDMCDir) / "FsAccessLog.txt";
 
@@ -355,6 +360,10 @@ void Reporter::SaveUserReport() const {
 }
 
 void Reporter::ClearFSAccessLog() const {
+    if (fs_access_log_policy == FSAccessLogPolicy::Disabled) {
+        return;
+    }
+
     const auto access_log_path =
         Common::FS::GetEdenPath(Common::FS::EdenPath::SDMCDir) / "FsAccessLog.txt";
 

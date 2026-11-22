@@ -52,6 +52,13 @@ TRACE_LOG = "".join([
     line(9.00, "Nx2Boot event=shader_load_end mono_s=107.900 commit_mib=2000.0 peak_commit_mib=2100.0 "
                "seconds=6.000 graphics_records=1870 compute_records=300 queued=2000 skipped=170 "
                "deferred=64 cache_bytes=99000000 driver_cache_bytes=55000000"),
+    line(9.00, "Shader cache v2 boot load: 6.0 s, 300 of 300 compute and 1700 of 1700 graphics "
+               "pipelines built (the used list of 1700 pipelines from 2 sessions), 0 only older "
+               "sessions used and 170 more cached graphics pipelines skipped at boot, 64 admitted "
+               "for background prebuild (older sessions' first, then newest first), 106 left for "
+               "their first draw (prebuild limit 64); driver build times: 1990 under 10 ms, 8 "
+               "10-100 ms, 2 over 100 ms (4.1 s in all, longest 812.5 ms)",
+         "Render.Vulkan <Info> vk_pipeline_cache.cpp:1:x: "),
     line(9.10, "Nx2Boot event=precache_begin mono_s=108.000 commit_mib=2000.0 peak_commit_mib=2100.0 jobs=5000"),
     line(199.10, "Nx2Boot event=precache_end mono_s=298.000 commit_mib=2500.0 peak_commit_mib=4107.0 "
                  "built=4990 seconds=190.000"),
@@ -149,6 +156,13 @@ class CacheMetricsTest(unittest.TestCase):
     def test_driver_builds(self):
         result = cache_metrics.parse_log(self.write("trace.txt", TRACE_LOG))
         self.assertEqual(result["cache"]["driver_builds"], {"binary": 4, "compiled": 2, "rejected": 1})
+
+    def test_driver_build_times(self):
+        result = cache_metrics.parse_log(self.write("trace.txt", TRACE_LOG))
+        self.assertEqual(result["driver_build_times"]["boot"],
+                         {"under_10ms": 1990, "10_100ms": 8, "over_100ms": 2, "total_s": 4.1,
+                          "longest_ms": 812.5})
+        self.assertIsNone(result["driver_build_times"]["prebuild"])
 
     def test_window_limits_frames_and_stutters(self):
         result = cache_metrics.parse_log(self.write("trace.txt", TRACE_LOG), start_s=216.0)

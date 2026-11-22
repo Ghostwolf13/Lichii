@@ -3,11 +3,16 @@
 
 #pragma once
 
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <string>
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 #include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
@@ -15,7 +20,7 @@
 // The NX2 switches are read from the environment (EDEN_NX2_*), which a GUI launch has no way to
 // set. nx2_switches.txt holds "NAME=VALUE" lines, one per line, '#' comments. A variable already
 // in the real environment always wins, so a launcher script can still override one run; between
-// files the later one wins, so the copy next to the executable (shipped with the build) can be
+// files the later one wins, so the copy shipped with the build can be
 // overridden by %APPDATA%\lichii\nx2_switches.txt without editing the one that gets replaced.
 static void ParseSwitchFile(const std::filesystem::path& path,
                             std::map<std::string, std::string>& entries) {
@@ -57,6 +62,16 @@ static std::filesystem::path GetSwitchExeDirectory(const char* argv0) {
     if (auto exe = std::filesystem::read_symlink("/proc/self/exe", ec); !ec) {
         return exe.parent_path();
     }
+#elif defined(__APPLE__)
+    std::uint32_t size = 0;
+    if (_NSGetExecutablePath(nullptr, &size) != 0 && size != 0) {
+        std::string path(size, '\0');
+        if (_NSGetExecutablePath(path.data(), &size) == 0) {
+            if (const auto exe = std::filesystem::canonical(path.c_str(), ec); !ec) {
+                return exe.parent_path();
+            }
+        }
+    }
 #endif
     const auto exe = std::filesystem::absolute(argv0, ec);
     return ec ? std::filesystem::path{} : exe.parent_path();
@@ -67,7 +82,14 @@ static void LoadNx2Switches(const char* argv0) {
     // Later files overwrite earlier entries; the real environment is checked only at the end.
     std::map<std::string, std::string> entries;
     if (const auto exe_dir = GetSwitchExeDirectory(argv0); !exe_dir.empty()) {
-        ParseSwitchFile(exe_dir / "nx2_switches.txt", entries);
+        auto switches_dir = exe_dir;
+#ifdef __APPLE__
+        if (exe_dir.filename() == "MacOS" && exe_dir.parent_path().filename() == "Contents" &&
+            exe_dir.parent_path().parent_path().extension() == ".app") {
+            switches_dir = exe_dir.parent_path() / "Resources";
+        }
+#endif
+        ParseSwitchFile(switches_dir / "nx2_switches.txt", entries);
     }
 #ifdef __linux__
     if (const char* appimage = std::getenv("APPIMAGE"); appimage && *appimage) {
@@ -84,10 +106,11 @@ static void LoadNx2Switches(const char* argv0) {
     std::erase_if(entries, [](const auto& entry) {
         const auto& name = entry.first;
         return !(name.starts_with("EDEN_NX2_") || name == "EDEN_DKB_FRAME_TRACE" ||
-                 name == "EDEN_DKB_INDIRECT_READBACK" || name == "EDEN_NATIVE_DRAW_CAPTURE" ||
-                 name == "EDEN_NATIVE_DRAW_DIAGNOSTICS" || name == "EDEN_NATIVE_FRAME_CAPTURE" ||
-                 name == "EDEN_NATIVE_SHADER_OVERRIDE_DIR" || name == "EDEN_PUNCH_HOLE" ||
-                 name == "EDEN_STARFOX_WINDOW_TRACE" || name == "EDEN_VI2_MAX_RESOLUTION_MODE" ||
+                 name == "EDEN_DKB_GPU_SITES" || name == "EDEN_DKB_INDIRECT_READBACK" ||
+                 name == "EDEN_NATIVE_DRAW_CAPTURE" || name == "EDEN_NATIVE_DRAW_DIAGNOSTICS" ||
+                 name == "EDEN_NATIVE_FRAME_CAPTURE" || name == "EDEN_NATIVE_SHADER_OVERRIDE_DIR" ||
+                 name == "EDEN_PUNCH_HOLE" || name == "EDEN_STARFOX_WINDOW_TRACE" ||
+                 name == "EDEN_VI2_MAX_RESOLUTION_MODE" ||
                  name == "EGLANTINE_EXPERIMENTAL_STATIC_VERTEX_REPACK" ||
                  name == "EGLANTINE_TEST_VERTEX_REPACK");
     });

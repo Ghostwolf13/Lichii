@@ -830,7 +830,7 @@ const MemoryManager::MappingSnapshot& MemoryManager::CurrentSnapshot() const {
         auto next = std::make_shared<MappingSnapshot>();
         next->runs.reserve(continuous_runs.size());
         for (const auto& [begin, run] : continuous_runs) {
-            next->runs.push_back({begin, run.end});
+            next->runs.push_back({begin, run.end, run.device_addr});
         }
         {
             std::unique_lock<std::mutex> kind_lock(guard);
@@ -1026,15 +1026,75 @@ bool MemoryManager::IsFullyMappedRange(GPUVAddr gpu_addr, std::size_t size) cons
     return result;
 }
 
+template <bool is_gpu_address>
+bool MemoryManager::SubmappedRangeFromRuns(
+    GPUVAddr gpu_addr, std::size_t size,
+    boost::container::small_vector<
+        std::pair<std::conditional_t<is_gpu_address, GPUVAddr, DAddr>, std::size_t>, 32>& result)
+    const {
+    if (size == 0 || !IsWithinGPUAddressRange(gpu_addr) || size > address_space_size - gpu_addr) {
+        return false;
+    }
+    // A run is a maximal GPU range mapped to one device range, so the page walk ends a segment
+    // exactly where a run ends: at an unmapped page or where the device address jumps.
+    const GPUVAddr end = gpu_addr + size;
+    const auto& runs = CurrentSnapshot().runs;
+    auto it = std::upper_bound(
+        runs.begin(), runs.end(), gpu_addr,
+        [](GPUVAddr address, const MappingSnapshot::Run& run) { return address < run.begin; });
+    if (it != runs.begin() && std::prev(it)->end > gpu_addr) {
+        --it;
+    }
+    for (; it != runs.end() && it->begin < end; ++it) {
+        const GPUVAddr begin = (std::max)(it->begin, gpu_addr);
+        const GPUVAddr run_end = (std::min)(it->end, end);
+        if (begin >= run_end) {
+            continue;
+        }
+        if constexpr (is_gpu_address) {
+            result.emplace_back(begin, static_cast<std::size_t>(run_end - begin));
+        } else {
+            result.emplace_back(it->device_addr + (begin - it->begin),
+                                static_cast<std::size_t>(run_end - begin));
+        }
+    }
+    return true;
+}
+
+// GetSubmappedRange and GetSubmappedDeviceRange answer from the map-time runs instead of walking
+// the range page by page, as MaxContinuousRange does: the buffer cache's virtual ranges, fast draws
+// and sparse images ask them for the ranges they bind.
 boost::container::small_vector<std::pair<GPUVAddr, std::size_t>, 32>
 MemoryManager::GetSubmappedRange(GPUVAddr gpu_addr, std::size_t size) const {
+    boost::container::small_vector<std::pair<GPUVAddr, std::size_t>, 32> result{};
+    if (!SubmappedRangeFromRuns<true>(gpu_addr, size, result)) {
+        GetSubmappedRangeImpl<true>(gpu_addr, size, result);
+    }
+    return result;
+}
+
+boost::container::small_vector<std::pair<DAddr, std::size_t>, 32>
+MemoryManager::GetSubmappedDeviceRange(GPUVAddr gpu_addr, std::size_t size) const {
+    boost::container::small_vector<std::pair<DAddr, std::size_t>, 32> result{};
+    if (!IsWithinGPUAddressRange(gpu_addr)) {
+        return result;
+    }
+    size = (std::min<u64>)(size, address_space_size - gpu_addr);
+    if (!SubmappedRangeFromRuns<false>(gpu_addr, size, result)) {
+        GetSubmappedRangeImpl<false>(gpu_addr, size, result);
+    }
+    return result;
+}
+
+boost::container::small_vector<std::pair<GPUVAddr, std::size_t>, 32>
+MemoryManager::GetSubmappedRangeUncached(GPUVAddr gpu_addr, std::size_t size) const {
     boost::container::small_vector<std::pair<GPUVAddr, std::size_t>, 32> result{};
     GetSubmappedRangeImpl<true>(gpu_addr, size, result);
     return result;
 }
 
 boost::container::small_vector<std::pair<DAddr, std::size_t>, 32>
-MemoryManager::GetSubmappedDeviceRange(GPUVAddr gpu_addr, std::size_t size) const {
+MemoryManager::GetSubmappedDeviceRangeUncached(GPUVAddr gpu_addr, std::size_t size) const {
     boost::container::small_vector<std::pair<DAddr, std::size_t>, 32> result{};
     if (IsWithinGPUAddressRange(gpu_addr)) {
         GetSubmappedRangeImpl<false>(

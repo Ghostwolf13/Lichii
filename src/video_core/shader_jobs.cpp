@@ -2,8 +2,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <exception>
 #include <optional>
+#include <type_traits>
 #include <utility>
+
+#ifdef __APPLE__
+#include <pthread.h>
+#endif
 
 #include "common/literals.h"
 #include "common/logging.h"
@@ -12,6 +18,70 @@
 #include "video_core/shader_jobs.h"
 
 namespace VideoCommon {
+namespace {
+
+#ifdef __APPLE__
+// A secondary thread on macOS gets 512 KiB of stack. MoltenVK converts SPIR-V to MSL on the thread
+// that creates the pipeline, and SPIRV-Cross's CFG::walk_from recurses once per block reachable
+// after a loop, 64-80 bytes a level on arm64: an Ocarina of Time compute program overflowed a
+// worker's 544 KiB. A guest program has at most 1 MiB of code (131,072 Maxwell or 65,536 Ampere
+// words), and 32 MiB holds about 400,000 levels, three blocks for each of those words. Only the
+// pages a walk touches take memory.
+constexpr size_t LargeStackSize = size_t{32} << 20;
+thread_local bool t_large_stack{};
+
+template <typename Body>
+struct LargeStackCall {
+    Body& body;
+    std::exception_ptr exception;
+};
+
+template <typename Body>
+void* RunLargeStackCall(void* argument) {
+    auto& call{*static_cast<LargeStackCall<Body>*>(argument)};
+    t_large_stack = true;
+    try {
+        call.body();
+    } catch (...) {
+        call.exception = std::current_exception();
+    }
+    return nullptr;
+}
+#endif
+
+/// Runs body on a thread with LargeStackSize of stack where the platform's default is too small
+/// for the driver's shader compiler, and on this thread otherwise or when that thread can't be made.
+template <typename Body>
+void RunOnLargeStack(Body&& body) {
+#ifdef __APPLE__
+    if (!t_large_stack) {
+        LargeStackCall<std::remove_reference_t<Body>> call{body};
+        pthread_attr_t attr;
+        if (pthread_attr_init(&attr) == 0) {
+            pthread_t thread;
+            const bool created =
+                pthread_attr_setstacksize(&attr, LargeStackSize) == 0 &&
+                pthread_create(&thread, &attr, &RunLargeStackCall<std::remove_reference_t<Body>>,
+                               &call) == 0;
+            pthread_attr_destroy(&attr);
+            if (created) {
+                pthread_join(thread, nullptr);
+                if (call.exception) {
+                    std::rethrow_exception(call.exception);
+                }
+                return;
+            }
+        }
+        static std::atomic_bool logged{};
+        if (!logged.exchange(true)) {
+            LOG_WARNING(HW_GPU, "Shader jobs run on the default stack: no larger one");
+        }
+    }
+#endif
+    body();
+}
+
+} // Anonymous namespace
 
 struct ShaderJobBatchState {
     mutable std::mutex mutex;
@@ -157,10 +227,12 @@ ShaderJobScheduler::ShaderJobScheduler(const ShaderJobConfig& config)
     stats.budget_bytes = budget;
     const auto start{[this](std::string name, bool driver) {
         threads.emplace_back([this, name = std::move(name), driver] {
-            Common::SetCurrentThreadName(name.c_str());
-            Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
-            Common::SetCurrentThreadToBackgroundWork();
-            Worker(driver);
+            RunOnLargeStack([&] {
+                Common::SetCurrentThreadName(name.c_str());
+                Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+                Common::SetCurrentThreadToBackgroundWork();
+                Worker(driver);
+            });
         });
     }};
     for (size_t i = 0; i < std::max<size_t>(config.cpu_threads, 1); ++i) {
@@ -244,6 +316,19 @@ void ShaderJobScheduler::Cancel(const ShaderJobHandle& handle) {
     }
 }
 
+std::optional<ShaderJobStatus> ShaderJobScheduler::CancelQueued(const ShaderJobHandle& handle) {
+    ShaderJobState& job{*handle.state};
+    std::vector<ShaderJob> dead;
+    std::scoped_lock lock{mutex};
+    const ShaderJobStatus status{job.status.load()};
+    if (!IsQueued(status)) {
+        return std::nullopt;
+    }
+    job.stop = true;
+    Finish(job, ShaderJobStatus::Cancelled, dead);
+    return status;
+}
+
 void ShaderJobScheduler::Cancel(const ShaderJobBatch& batch) {
     std::vector<ShaderJob> dead;
     std::scoped_lock lock{mutex};
@@ -261,17 +346,27 @@ void ShaderJobScheduler::Cancel(const ShaderJobBatch& batch) {
 
 void ShaderJobScheduler::RunOrWait(const ShaderJobHandle& handle) {
     Promote(handle, ShaderJobPriority::NeedNow);
+    ShaderJobState& job{*handle.state};
     std::unique_lock lock{mutex};
-    switch (handle.state->status.load()) {
-    case ShaderJobStatus::Queued:
-        StartStage(*handle.state, false, Clock::now());
+    if (job.status.load() == ShaderJobStatus::Cpu) {
         lock.unlock();
-        RunCpu(handle.state, true);
+        {
+            std::unique_lock job_lock{job.mutex};
+            job.condition.wait(job_lock,
+                               [&] { return job.status.load() != ShaderJobStatus::Cpu; });
+        }
+        lock.lock();
+    }
+    switch (job.status.load()) {
+    case ShaderJobStatus::Queued:
+        StartStage(job, false, Clock::now());
+        lock.unlock();
+        RunOnLargeStack([&] { RunCpu(handle.state, true); });
         return;
     case ShaderJobStatus::DriverQueued:
-        StartStage(*handle.state, true, Clock::now());
+        StartStage(job, true, Clock::now());
         lock.unlock();
-        RunDriver(handle.state);
+        RunOnLargeStack([&] { RunDriver(handle.state); });
         return;
     default:
         break;
@@ -439,10 +534,16 @@ void ShaderJobScheduler::RunCpu(const JobPtr& job, bool run_driver_here) {
                 StartStage(*job, true, Clock::now());
                 run_driver = true;
             } else {
-                job->status = ShaderJobStatus::DriverQueued;
+                {
+                    std::scoped_lock job_lock{job->mutex};
+                    job->status = ShaderJobStatus::DriverQueued;
+                }
                 job->queued_priority = job->priority.load();
                 driver_queue[Index(job->queued_priority)].push_back(job);
                 driver_condition.notify_one();
+                // Wakes a RunOrWait caller waiting out the CPU stage, so it runs the driver stage
+                // itself instead of waiting behind the driver pool.
+                job->condition.notify_all();
             }
         }
     }

@@ -9,6 +9,11 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <shared_mutex>
 #include <tuple>
 #include "common/container/unordered_set.h"
 
@@ -42,24 +47,33 @@ struct FastmemPatchInfo {
 
 class FastmemManager {
 public:
-    explicit FastmemManager(ExceptionHandler& eh)
-            : exception_handler(eh) {}
+    /// The JITs of one fastmem arena (each core of a process has its own) share the accesses that
+    /// faulted: a fault on one core keeps the others from compiling that access with fastmem and
+    /// recompiling it after their own fault.
+    FastmemManager(ExceptionHandler& eh, std::optional<std::uintptr_t> arena);
 
     bool SupportsFastmem() const {
         return exception_handler.SupportsFastmem();
     }
 
     bool ShouldFastmem(DoNotFastmemMarker marker) const {
-        return do_not_fastmem.count(marker) == 0;
+        std::shared_lock lock{records->mutex};
+        return records->do_not_fastmem.count(marker) == 0;
     }
 
     void MarkDoNotFastmem(DoNotFastmemMarker marker) {
-        do_not_fastmem.insert(marker);
+        std::unique_lock lock{records->mutex};
+        records->do_not_fastmem.insert(marker);
     }
 
 private:
+    struct Records {
+        std::shared_mutex mutex;
+        ::Common::unordered_set<DoNotFastmemMarker, DoNotFastmemMarkerHash> do_not_fastmem;
+    };
+
     ExceptionHandler& exception_handler;
-    ::Common::unordered_set<DoNotFastmemMarker, DoNotFastmemMarkerHash> do_not_fastmem;
+    std::shared_ptr<Records> records;
 };
 
 }  // namespace Dynarmic::Backend::Arm64

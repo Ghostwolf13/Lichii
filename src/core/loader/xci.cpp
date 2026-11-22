@@ -136,8 +136,7 @@ ResultStatus AppLoader_XCI::ReadUpdateRaw(FileSys::VirtualFile& out_file) {
         return ResultStatus::ErrorXCIMissingProgramNCA;
     }
 
-    const auto read = xci->GetSecurePartitionNSP()->GetNCAFile(
-        FileSys::GetUpdateTitleID(program_id), FileSys::ContentRecordType::Program);
+    const auto read = xci->GetSecurePartitionNSP()->GetPackedUpdateFile(program_id);
     if (read == nullptr) {
         return ResultStatus::ErrorNoPackedUpdate;
     }
@@ -209,6 +208,11 @@ ResultStatus AppLoader_XCI::ReadLogo(std::vector<u8>& buffer) {
 
 ResultStatus AppLoader_XCI::ReadNSOModules(Modules& modules) {
     return nca_loader->ReadNSOModules(modules);
+}
+
+ResultStatus AppLoader_XCI::ReadMainBuildId(Core::System& system,
+                                            std::array<u8, 0x20>& build_id) {
+    return nca_loader->ReadMainBuildId(system, build_id);
 }
 
 } // namespace Loader

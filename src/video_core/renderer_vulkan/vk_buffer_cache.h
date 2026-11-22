@@ -13,7 +13,9 @@
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/renderer_vulkan/nx2_list_slots.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
+#include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_multi_range_buffer.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -36,7 +38,7 @@ public:
     explicit Buffer(BufferCacheRuntime& runtime, VAddr cpu_addr_, u64 size_bytes_,
                     bool sparse_compatible_);
 
-    [[nodiscard]] VkBufferView View(u32 offset, u32 size, VideoCore::Surface::PixelFormat format);
+    [[nodiscard]] VkBufferView View(VkDeviceSize offset, VkDeviceSize size, VkFormat format);
 
     [[nodiscard]] VkBuffer Handle() const noexcept {
         return *buffer;
@@ -83,9 +85,9 @@ public:
 
 private:
     struct BufferView {
-        u32 offset;
-        u32 size;
-        VideoCore::Surface::PixelFormat format;
+        VkDeviceSize offset;
+        VkDeviceSize size;
+        VkFormat format;
         vk::BufferView handle;
     };
 
@@ -129,7 +131,11 @@ public:
         return vertex_repack_mask != 0;
     }
 
-    u64 CurrentTick();
+    /// Scheduler::CurrentTick, inline: the stream uniform reuse asks for it on every small
+    /// uniform buffer bind.
+    u64 CurrentTick() const noexcept {
+        return master_semaphore.CurrentTick();
+    }
 
     bool IsFree(u64 tick);
 
@@ -235,6 +241,49 @@ public:
         return last_stream_uniform;
     }
 
+    /// GPU-written list words the host GPU took over (Nx2ListIndirect), owed in [device_addr,
+    /// +size), which `reader` reads from `buffer` at `offset`, filled already: the slot words go
+    /// over the placeholders. `read(device)`: guest memory's word. Whether any went over them.
+    template <typename Read>
+    bool Nx2PatchOwed(DAddr device_addr, u32 size, VkBuffer buffer, u64 offset, Read&& read,
+                      Tegra::Nx2ListIndirect::OwedReader reader) {
+        return nx2_list_slots.HasOwed() &&
+               nx2_list_slots.Patch(device_addr, size, buffer, offset, read, reader);
+    }
+
+    /// Whether [device_addr, +size) holds owed list words (Nx2ListIndirect).
+    [[nodiscard]] bool Nx2Owes(DAddr device_addr, u64 size) const {
+        return nx2_list_slots.Owes(device_addr, size);
+    }
+
+    /// The host GPU wrote [device_addr, +size): the owed list words there are owed no more.
+    void Nx2ForgetOwed(DAddr device_addr, u64 size) {
+        if (nx2_list_slots.HasOwed()) {
+            nx2_list_slots.Forget(device_addr, size);
+        }
+    }
+
+    /// Lands the owed list words in [device_addr, +size) at once for `reader` (Nx2ListIndirect,
+    /// Nx2ListSlots::LandRange): submits and waits for the host GPU if it has to.
+    template <typename Land>
+    void Nx2LandOwed(DAddr device_addr, u64 size, Tegra::Nx2ListIndirect::OwedReader reader,
+                     Land&& land) {
+        if (nx2_list_slots.HasOwed()) {
+            nx2_list_slots.LandRange(device_addr, size, reader, land);
+        }
+    }
+
+    /// [first word, end of the last) of the owed list words in [device_addr, +size).
+    [[nodiscard]] std::optional<std::pair<DAddr, DAddr>> Nx2OwedSpan(DAddr device_addr,
+                                                                     u64 size) const {
+        return nx2_list_slots.OwedSpan(device_addr, size);
+    }
+
+    /// The slots of GPU-written list words (Nx2ListIndirect).
+    [[nodiscard]] Nx2ListSlots& Nx2Slots() noexcept {
+        return nx2_list_slots;
+    }
+
     /// Adds `ref` to the descriptor payload exactly as BindMappedUniformBuffer did when it made
     /// the allocation (it is the very same call). The caller guarantees the allocation is still
     /// live: made on the scheduler tick that is current now, so the staging pool has not recycled
@@ -293,15 +342,7 @@ public:
     }
 
     void BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
-                           VideoCore::Surface::PixelFormat format) {
-        // An unmapped texture buffer has no format; its view is the null buffer's anyway.
-        if (format == VideoCore::Surface::PixelFormat::Invalid) {
-            format = VideoCore::Surface::PixelFormat::R8_UNORM;
-        }
-        guest_descriptor_queue.AddTexelBuffer(buffer.View(offset, size, format),
-                                              buffer.DeviceAddress(), offset, size,
-                                              TexelBufferFormat(format));
-    }
+                           VideoCore::Surface::PixelFormat format);
 
     bool ShouldLimitDynamicStorageBuffers() const {
         return limit_dynamic_storage_buffers;
@@ -323,8 +364,6 @@ private:
         }
     }
 
-    VkFormat TexelBufferFormat(VideoCore::Surface::PixelFormat format) const;
-
     void ReserveNullBuffer();
     vk::Buffer CreateNullBuffer();
     VkDeviceSize NullBufferSize() const;
@@ -332,6 +371,7 @@ private:
     const Device& device;
     MemoryAllocator& memory_allocator;
     Scheduler& scheduler;
+    const MasterSemaphore& master_semaphore; ///< The scheduler's, for CurrentTick
     StagingBufferPool& staging_pool;
     GuestDescriptorQueue& guest_descriptor_queue;
 
@@ -361,6 +401,8 @@ private:
     VkIndexType bound_index_type = VK_INDEX_TYPE_UINT32;
     u64 bound_index_epoch = 0;
     bool bound_index_valid = false;
+
+    Nx2ListSlots nx2_list_slots{memory_allocator, scheduler};
 };
 
 struct BufferCacheParams {

@@ -27,7 +27,7 @@ struct NetworkInterface {
     HostAdapterKind kind{HostAdapterKind::Ethernet};
 };
 
-std::vector<NetworkInterface> GetAvailableNetworkInterfaces();
+std::vector<NetworkInterface> GetAvailableNetworkInterfaces(bool include_secondary_ipv4 = false);
 std::optional<NetworkInterface> GetSelectedNetworkInterface();
 void SelectFirstNetworkInterface();
 

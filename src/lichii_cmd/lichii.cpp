@@ -36,6 +36,8 @@
 #include "common/literals.h"
 #include "common/logging.h"
 #include "common/memory_detect.h"
+#include "common/nextendo.h"
+#include "common/npln_patch_catalog.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
 #include "common/string_util.h"
@@ -47,7 +49,10 @@
 #include "core/file_sys/nup_writer.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
+#include "core/hle/service/acc/nextendo_id_token.h"
+#include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/am/applet_manager.h"
+#include "core/hle/service/bcat/backend/nextendo.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/loader.h"
 #include "frontend_common/config.h"
@@ -665,6 +670,21 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
                                           &manual_provider);
     state->system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
     state->system.GetFileSystemController().CreateFactories(*state->system.GetFilesystem());
+    // The booted NSP's or XCI's control data (NACP) comes from this provider, which the Qt game
+    // list fills; without it the game reads an empty NACP.
+    if (const auto file =
+            state->system.GetFilesystem()->OpenFile(lp.filepath, FileSys::OpenMode::Read)) {
+        switch (Loader::IdentifyFile(file)) {
+        case Loader::FileType::NSP:
+        case Loader::FileType::NSZ:
+        case Loader::FileType::XCI:
+        case Loader::FileType::XCZ:
+            void(manual_provider.AddEntriesFromContainer(file));
+            break;
+        default:
+            break;
+        }
+    }
     state->system.GetUserChannel().clear();
 
     Service::AM::FrontendAppletParameters load_parameters{
@@ -687,6 +707,31 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         load_parameters.previous_program_index = handoff->previous_program_index;
         LOG_INFO(Frontend, "Restarted by the game: program index {}, {} user channel entries",
                  handoff->program_index, state->system.GetUserChannel().size());
+    }
+    // SdlState read the profiles before the config named the NAND.
+    auto& profile_manager = state->system.GetProfileManager();
+    profile_manager.ResetUserSaveFile();
+    if (!lp.selected_user_name.empty()) {
+        // -u <name> was looked up in those profiles; look it up again in these.
+        if (const auto index = profile_manager.GetUserIndex(lp.selected_user_name);
+            index && static_cast<s32>(*index) != Settings::values.current_user.GetValue()) {
+            Settings::values.current_user = static_cast<s32>(*index);
+            profile_manager.ResetUserSaveFile();
+        } else if (!index) {
+            LOG_ERROR(Frontend, "Invalid user argument '{}'", lp.selected_user_name);
+        }
+    }
+    Common::Nextendo::MigrateAccountFile(Service::Account::Nextendo::CurrentProfile(state->system));
+    if (Common::Nextendo::OnlinePlayActive()) {
+        const auto loader = Loader::GetLoader(
+            state->system, Core::GetGameFileFromPath(state->system.GetFilesystem(), lp.filepath),
+            load_parameters.program_id, load_parameters.program_index);
+        u64 title_id{};
+        if (loader && loader->ReadProgramId(title_id) == Loader::ResultStatus::Success) {
+            Common::NplnPatchCatalog::PrepareForGame(
+                title_id, [&] { return loader->ReadMainBuildIdHex(state->system); });
+            Service::BCAT::Nextendo::PrepareForGame(title_id);
+        }
     }
     const Core::SystemResultStatus load_result = state->system.Load(*state->emu_window, lp.filepath, load_parameters);
     switch (load_result) {

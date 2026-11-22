@@ -8,6 +8,7 @@ body:
       value: |
         One bug per report, please. Search the open issues first, and try the [latest build](https://github.com/zortos293/lichii/releases/latest) if you can.
         Reports without a log usually can't be worked on, so the log field is required.
+        Do not post games, keys, firmware, account credentials or unauthorized download links. Bug bundles, GPU traces, shader caches and memory dumps can contain game data: do not attach them publicly; ask a maintainer for handling instructions first.
 
   - type: input
     id: build
@@ -143,6 +144,7 @@ body:
       description: |
         Drag and drop eden_log.txt here. In Lichii, open File → Open Lichii Folders → Log Folder.
         Upload it right after the problem happens and before you start Lichii again: eden_log.txt is the latest session and eden_log.txt.old the one before. Zip it if GitHub says it's too big.
+        Review the log for personal information and credentials before posting. This field is for the text log, not a Ctrl+F12 bug bundle or a memory dump.
       placeholder: Drop eden_log.txt here
     validations:
       required: true

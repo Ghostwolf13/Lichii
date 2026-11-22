@@ -1,15 +1,25 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+// SPDX-FileCopyrightText: Copyright 2025 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstring>
+#include <limits>
 #include <queue>
+#include <string_view>
+#include <vector>
+#include <fmt/format.h>
 #include "common/logging.h"
+#include "common/nextendo.h"
 #include "common/uuid.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/service/acc/errors.h"
+#include "core/hle/service/acc/nextendo_id_token.h"
 #include "core/hle/service/friend/friend.h"
 #include "core/hle/service/friend/friend_interface.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -19,6 +29,178 @@
 
 namespace Service::Friend {
 
+namespace {
+
+#pragma pack(push, 1)
+struct UserPresenceImpl {
+    Common::UUID user_id;
+    s64 last_time_online_timestamp;
+    u32 status;
+    u8 same_presence_group_application;
+    std::array<u8, 3> unknown;
+    std::array<u8, 0xC0> app_key_value;
+};
+static_assert(sizeof(UserPresenceImpl) == 0xE0, "UserPresenceImpl has the wrong size");
+
+struct FriendImpl {
+    Common::UUID user_id;
+    u64 network_user_id;
+    std::array<char, 0x21> nickname;
+    std::array<u8, 7> nickname_pad;
+    UserPresenceImpl presence;
+    u8 is_favourite;
+    u8 is_new;
+    std::array<u8, 6> unknown;
+    u8 is_valid;
+    std::array<u8, 0xD7> padding;
+};
+static_assert(sizeof(FriendImpl) == 0x200, "FriendImpl has the wrong size");
+static_assert(offsetof(FriendImpl, presence) == 0x40);
+static_assert(offsetof(FriendImpl, is_valid) == 0x128);
+
+// Offsets as nnSdk's Profile accessors read them.
+struct ProfileImpl {
+    u64 network_user_id;
+    std::array<char, 0x21> nickname;
+    std::array<u8, 7> nickname_pad;
+    std::array<char, 0xA0> image_url;
+    u8 is_valid;
+    std::array<u8, 0x2F> reserved;
+};
+static_assert(sizeof(ProfileImpl) == 0x100, "ProfileImpl has the wrong size");
+static_assert(offsetof(ProfileImpl, image_url) == 0x30);
+static_assert(offsetof(ProfileImpl, is_valid) == 0xD0);
+#pragma pack(pop)
+
+// A real friend list never has more than 300 entries.
+constexpr std::size_t MaxRequestedIds = 300;
+
+// These NPLN titles know their friends by NSA (NetworkServiceAccountId), not by Nextendo pid.
+constexpr std::array<u64, 2> NsaIdTitles{
+    0x0100C2500FC20000, // Splatoon 3
+    0x010015100B514000, // Super Mario Bros. Wonder
+};
+
+// Friends are listed without their pictures, so each gets this plain grey 256x256 icon. Hardware
+// always answers with one, and some titles abort on an empty icon.
+constexpr std::array<u8, 667> DefaultFriendIcon{
+    0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+    0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x05, 0x03, 0x04, 0x04, 0x04, 0x03, 0x05,
+    0x04, 0x04, 0x04, 0x05, 0x05, 0x05, 0x06, 0x07, 0x0C, 0x08, 0x07, 0x07, 0x07, 0x07, 0x0F, 0x0B,
+    0x0B, 0x09, 0x0C, 0x11, 0x0F, 0x12, 0x12, 0x11, 0x0F, 0x11, 0x11, 0x13, 0x16, 0x1C, 0x17, 0x13,
+    0x14, 0x1A, 0x15, 0x11, 0x11, 0x18, 0x21, 0x18, 0x1A, 0x1D, 0x1D, 0x1F, 0x1F, 0x1F, 0x13, 0x17,
+    0x22, 0x24, 0x22, 0x1E, 0x24, 0x1C, 0x1E, 0x1F, 0x1E, 0xFF, 0xDB, 0x00, 0x43, 0x01, 0x05, 0x05,
+    0x05, 0x07, 0x06, 0x07, 0x0E, 0x08, 0x08, 0x0E, 0x1E, 0x14, 0x11, 0x14, 0x1E, 0x1E, 0x1E, 0x1E,
+    0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E,
+    0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E,
+    0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0xFF, 0xC0,
+    0x00, 0x11, 0x08, 0x01, 0x00, 0x01, 0x00, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11,
+    0x01, 0xFF, 0xC4, 0x00, 0x15, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0xFF, 0xC4, 0x00, 0x14, 0x10, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xC4,
+    0x00, 0x14, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xFF, 0xC4, 0x00, 0x14, 0x11, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01,
+    0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xFF, 0xD9};
+
+// The friend list of the game's profile while Nextendo online play is on, read from the cache
+// the frontend refreshes.
+std::vector<Common::Nextendo::Friend> Friends(const Core::System& system) {
+    if (!Common::Nextendo::OnlinePlayActive()) {
+        return {};
+    }
+    return Common::Nextendo::CachedFriends(Account::Nextendo::CurrentProfile(system)).friends;
+}
+
+bool WantsNsaIds(Core::System& system) {
+    return std::ranges::find(NsaIdTitles, system.GetApplicationProcessProgramID()) !=
+           NsaIdTitles.end();
+}
+
+// Consoles announce their account id and emulators their pid; NPLN titles want the NSA for all.
+u64 AdvertisedId(const Common::Nextendo::Friend& entry, bool want_nsa) {
+    return (want_nsa || entry.console) && entry.nsa != 0 ? entry.nsa : entry.pid;
+}
+
+const Common::Nextendo::Friend* FindFriend(const std::vector<Common::Nextendo::Friend>& friends,
+                                           u64 id) {
+    const auto it = std::ranges::find_if(friends, [id](const Common::Nextendo::Friend& entry) {
+        return entry.pid == id || (entry.nsa != 0 && entry.nsa == id);
+    });
+    return it == friends.end() ? nullptr : &*it;
+}
+
+// A Uid that stays the same for a friend across launches.
+Common::UUID UidForId(u64 id) {
+    std::array<u8, 16> raw{};
+    constexpr u64 high = 0x1100000000000000ULL;
+    std::memcpy(raw.data(), &id, sizeof(id));
+    std::memcpy(raw.data() + 8, &high, sizeof(high));
+    return Common::UUID{raw};
+}
+
+template <std::size_t N>
+void CopyString(std::array<char, N>& out, std::string_view text) {
+    std::memcpy(out.data(), text.data(), std::min(text.size(), N - 1));
+}
+
+// Records carry the id the caller asked about, or the title can't pair them with its query.
+FriendImpl MakeFriend(const Common::Nextendo::Friend& entry, u64 id, u64 program_id,
+                      const Common::UUID* owner) {
+    FriendImpl out{};
+    // nnSdk's Friend::GetProfileImage checks that this Uid is a local user.
+    out.user_id = owner ? *owner : UidForId(id);
+    out.network_user_id = id;
+    CopyString(out.nickname, entry.name);
+    // A friend's presence starts with the application they play and its presence group.
+    const std::array<u64, 2> application{entry.app_id, entry.app_id};
+    std::memcpy(&out.presence.user_id, application.data(), sizeof(application));
+    out.presence.status = static_cast<u32>(entry.status);
+    out.presence.last_time_online_timestamp = std::numeric_limits<s64>::max();
+    out.presence.same_presence_group_application =
+        entry.status > 0 && entry.app_id == program_id ? 1 : 0;
+    std::memcpy(out.presence.app_key_value.data(), entry.app_field.data(),
+                std::min(entry.app_field.size(), out.presence.app_key_value.size()));
+    out.is_valid = 1;
+    return out;
+}
+
+std::vector<u64> RequestedIds(HLERequestContext& ctx) {
+    std::vector<u64> ids;
+    if (ctx.CanReadBuffer(0)) {
+        const auto raw = ctx.ReadBuffer(0);
+        ids.resize(std::min(raw.size() / sizeof(u64), MaxRequestedIds));
+        std::memcpy(ids.data(), raw.data(), ids.size() * sizeof(u64));
+    }
+    return ids;
+}
+
+} // namespace
+
 class IFriendService final : public ServiceFramework<IFriendService> {
 public:
     explicit IFriendService(Core::System& system_)
@@ -27,11 +209,11 @@ public:
         static const FunctionInfo functions[] = {
             {0, &IFriendService::GetCompletionEvent, "GetCompletionEvent"},
             {1, &IFriendService::Cancel, "Cancel"},
-            {10100, nullptr, "GetFriendListIds"},
+            {10100, &IFriendService::GetFriendListIds, "GetFriendListIds"},
             {10101, &IFriendService::GetFriendList, "GetFriendList"},
-            {10102, nullptr, "UpdateFriendInfo"},
-            {10110, nullptr, "GetFriendProfileImage"},
-            {10111, nullptr, "GetFriendProfileImageWithImageSize"}, // 18.0.0+
+            {10102, &IFriendService::UpdateFriendInfo, "UpdateFriendInfo"},
+            {10110, &IFriendService::GetFriendProfileImage, "GetFriendProfileImage"},
+            {10111, &IFriendService::GetFriendProfileImage, "GetFriendProfileImageWithImageSize"}, // 18.0.0+
             {10120, &IFriendService::CheckFriendListAvailability, "CheckFriendListAvailability"},
             {10121, nullptr, "EnsureFriendListAvailable"},
             {10200, nullptr, "SendFriendRequestForApplication"},
@@ -39,8 +221,8 @@ public:
             {10400, &IFriendService::GetBlockedUserListIds, "GetBlockedUserListIds"},
             {10420, &IFriendService::CheckBlockedUserListAvailability, "CheckBlockedUserListAvailability"},
             {10421, nullptr, "EnsureBlockedUserListAvailable"},
-            {10500, nullptr, "GetProfileList"},
-            {10501, nullptr, "GetProfileListV2"}, // 18.0.0+
+            {10500, &IFriendService::GetProfileList, "GetProfileList"},
+            {10501, &IFriendService::GetProfileList, "GetProfileListV2"}, // 18.0.0+
             {10600, nullptr, "DeclareOpenOnlinePlaySession"},
             {10601, &IFriendService::DeclareCloseOnlinePlaySession, "DeclareCloseOnlinePlaySession"},
             {10610, &IFriendService::UpdateUserPresence, "UpdateUserPresence"},
@@ -51,14 +233,14 @@ public:
             {11001, nullptr, "GetProfileImageUrlV2"}, // 18.0.0+
             {20100, &IFriendService::GetFriendCount, "GetFriendCount"},
             {20101, &IFriendService::GetNewlyFriendCount, "GetNewlyFriendCount"},
-            {20102, nullptr, "GetFriendDetailedInfo"},
+            {20102, &IFriendService::GetFriendDetailedInfo, "GetFriendDetailedInfo"},
             {20103, nullptr, "SyncFriendList"},
             {20104, &IFriendService::RequestSyncFriendList, "RequestSyncFriendList"},
             {20105, &IFriendService::GetFriendListForViewer, "GetFriendListForViewerV1"},
-            {20106, nullptr, "UpdateFriendInfoForViewerV1"},
-            {20107, nullptr, "GetFriendDetailedInfoV2"}, // 20.0.0+
+            {20106, &IFriendService::GetFriendDetailedInfo, "UpdateFriendInfoForViewerV1"},
+            {20107, &IFriendService::GetFriendDetailedInfo, "GetFriendDetailedInfoV2"}, // 20.0.0+
             {20108, &IFriendService::GetFriendListForViewer, "GetFriendListForViewerV2"}, // 22.0.0+
-            {20109, nullptr, "UpdateFriendInfoForViewerV2"}, // 22.0.0+
+            {20109, &IFriendService::GetFriendDetailedInfo, "UpdateFriendInfoForViewerV2"}, // 22.0.0+
             {20110, nullptr, "LoadFriendSettingV1"},
             {20111, nullptr, "LoadFriendSettingV2"}, // 22.0.0+
             {20200, &IFriendService::GetReceivedFriendRequestCount, "GetReceivedFriendRequestCount"},
@@ -197,20 +379,152 @@ private:
         rb.Push(ResultSuccess);
     }
 
-    void GetFriendList(HLERequestContext& ctx) {
+    // The cached friends that pass filter. Play history isn't kept, so the played-application
+    // conditions don't narrow the list.
+    std::vector<Common::Nextendo::Friend> FilteredFriends(const SizedFriendFilter& filter) {
+        const u64 program_id = system.GetApplicationProcessProgramID();
+        auto friends = Friends(system);
+        std::erase_if(friends, [&filter, program_id](const Common::Nextendo::Friend& entry) {
+            const bool presence =
+                filter.presence == PresenceFilter::Online               ? entry.status == 1
+                : filter.presence == PresenceFilter::OnlinePlay         ? entry.status == 2
+                : filter.presence == PresenceFilter::OnlineOrOnlinePlay ? entry.status != 0
+                                                                        : true;
+            return !presence || (filter.is_favorite && !entry.favorite) ||
+                   (filter.same_app && (entry.status == 0 || entry.app_id != program_id));
+        });
+        return friends;
+    }
+
+    void GetFriendListIds(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
-        const auto friend_offset = rp.Pop<u32>();
-        const auto uuid = rp.PopRaw<Common::UUID>();
-        [[maybe_unused]] const auto filter = rp.PopRaw<SizedFriendFilter>();
-        const auto pid = rp.Pop<u64>();
-        LOG_WARNING(Service_Friend, "(STUBBED) called, offset={}, uuid=0x{}, pid={}", friend_offset,
-                    uuid.RawString(), pid);
+        const auto offset = rp.Pop<u32>();
+        rp.Skip(1, false); // Padding: the Uid that follows is 8-byte aligned
+        [[maybe_unused]] const auto uuid = rp.PopRaw<Common::UUID>();
+        const auto friends = FilteredFriends(rp.PopRaw<SizedFriendFilter>());
+        const bool want_nsa = WantsNsaIds(system);
+        std::vector<u64> ids;
+        for (std::size_t i = offset;
+             i < friends.size() && ids.size() < ctx.GetWriteBufferNumElements<u64>(); ++i) {
+            ids.push_back(AdvertisedId(friends[i], want_nsa));
+        }
+        if (!ids.empty()) {
+            ctx.WriteBuffer(ids);
+        }
+        LOG_DEBUG(Service_Friend, "called, offset={} -> {}", offset, ids.size());
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
+        rb.Push(static_cast<u32>(ids.size()));
+    }
 
-        rb.Push<u32>(0); // Friend count
-        // TODO(ogniK): Return a buffer of u64s which are the "NetworkServiceAccountId"
+    void GetFriendList(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const auto offset = rp.Pop<u32>();
+        rp.Skip(1, false); // Padding: the Uid that follows is 8-byte aligned
+        const auto uuid = rp.PopRaw<Common::UUID>();
+        const auto friends = FilteredFriends(rp.PopRaw<SizedFriendFilter>());
+        const bool want_nsa = WantsNsaIds(system);
+        const u64 program_id = system.GetApplicationProcessProgramID();
+        std::vector<FriendImpl> list;
+        for (std::size_t i = offset;
+             i < friends.size() && list.size() < ctx.GetWriteBufferNumElements<FriendImpl>(); ++i) {
+            list.push_back(
+                MakeFriend(friends[i], AdvertisedId(friends[i], want_nsa), program_id, &uuid));
+        }
+        if (!list.empty()) {
+            ctx.WriteBuffer(list);
+        }
+        LOG_DEBUG(Service_Friend, "called, offset={}, uuid=0x{} -> {}", offset, uuid.RawString(),
+                  list.size());
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push(static_cast<u32>(list.size()));
+    }
+
+    // One record per requested id, in order; an unknown id gets a zeroed (invalid) record.
+    void WriteFriendInfo(HLERequestContext& ctx, const Common::UUID* owner) {
+        const auto ids = RequestedIds(ctx);
+        const auto friends = Friends(system);
+        const u64 program_id = system.GetApplicationProcessProgramID();
+        std::vector<FriendImpl> info(
+            std::min(ids.size(), ctx.GetWriteBufferNumElements<FriendImpl>()));
+        for (std::size_t i = 0; i < info.size(); ++i) {
+            if (const auto* entry = FindFriend(friends, ids[i])) {
+                info[i] = MakeFriend(*entry, ids[i], program_id, owner);
+            }
+        }
+        if (!info.empty()) {
+            ctx.WriteBuffer(info);
+        }
+        LOG_DEBUG(Service_Friend, "called, {} ids", ids.size());
+    }
+
+    void UpdateFriendInfo(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const auto uuid = rp.PopRaw<Common::UUID>();
+        WriteFriendInfo(ctx, &uuid);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetFriendDetailedInfo(HLERequestContext& ctx) {
+        WriteFriendInfo(ctx, nullptr);
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetFriendProfileImage(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_Friend, "called");
+        ctx.WriteBuffer(DefaultFriendIcon);
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push(static_cast<u32>(DefaultFriendIcon.size()));
+    }
+
+    // Names the signed-in account and its friends; other ids get a zeroed record.
+    void GetProfileList(HLERequestContext& ctx) {
+        const auto ids = RequestedIds(ctx);
+        const auto friends = Friends(system);
+        const auto account =
+            Account::Nextendo::LinkedAccount(Account::Nextendo::CurrentProfile(system));
+        std::vector<ProfileImpl> profiles(
+            std::min(ids.size(), ctx.GetWriteBufferNumElements<ProfileImpl>()));
+        u32 resolved = 0;
+        for (std::size_t i = 0; i < profiles.size(); ++i) {
+            const u64 id = ids[i];
+            const auto* entry = FindFriend(friends, id);
+            // Animal Crossing knows the account by its BAAS id (NetworkServiceAccountId).
+            const bool own = account && id != 0 && (account->pid == id || account->baas_nsa == id);
+            if (!own && !entry) {
+                continue;
+            }
+            auto& profile = profiles[i];
+            profile.network_user_id = id;
+            CopyString(profile.nickname, own ? account->username : entry->name);
+            // The address a console gets for the picture; Nextendo's host redirect serves it.
+            constexpr std::string_view host =
+                "https://cdn-image-e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com/1";
+            CopyString(
+                profile.image_url,
+                !own && entry->nsa != 0
+                    ? fmt::format("{}/fr_{:016x}?pid={}", host, entry->nsa, entry->pid)
+                    : fmt::format("{}/pid_{}?pid={}", host, id, own ? account->pid : entry->pid));
+            profile.is_valid = 1;
+            ++resolved;
+        }
+        if (!profiles.empty()) {
+            ctx.WriteBuffer(profiles);
+        }
+        LOG_DEBUG(Service_Friend, "called, {} ids -> {}", ids.size(), resolved);
+
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push(resolved);
     }
 
     void CheckFriendListAvailability(HLERequestContext& ctx) {
@@ -251,9 +565,18 @@ private:
         rb.Push(ResultSuccess);
     }
 
+    // Keeps the game's presence data, which the frontend sends to Nextendo with the presence.
     void UpdateUserPresence(HLERequestContext& ctx) {
-        // Stub used by Retro City Rampage
-        LOG_WARNING(Service_Friend, "(STUBBED) called");
+        LOG_DEBUG(Service_Friend, "called");
+        if (Common::Nextendo::OnlinePlayActive() &&
+            ctx.GetReadBufferSize() >= sizeof(UserPresenceImpl)) {
+            UserPresenceImpl presence{};
+            std::memcpy(&presence, ctx.ReadBuffer().data(), sizeof(presence));
+            Common::Nextendo::SetGameAppField(
+                system.GetApplicationProcessProgramID(),
+                std::string{reinterpret_cast<const char*>(presence.app_key_value.data()),
+                            presence.app_key_value.size()});
+        }
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
@@ -271,11 +594,14 @@ private:
     }
 
     void GetFriendCount(HLERequestContext& ctx) {
-        LOG_DEBUG(Service_Friend, "(STUBBED) called");
+        IPC::RequestParser rp{ctx};
+        [[maybe_unused]] const auto uuid = rp.PopRaw<Common::UUID>();
+        const auto count = FilteredFriends(rp.PopRaw<SizedFriendFilter>()).size();
+        LOG_DEBUG(Service_Friend, "called -> {}", count);
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.Push(0);
+        rb.Push(static_cast<u32>(count));
     }
 
     void GetNewlyFriendCount(HLERequestContext& ctx) {
@@ -296,11 +622,22 @@ private:
     }
 
     void GetFriendListForViewer(HLERequestContext& ctx) {
-        LOG_DEBUG(Service_Friend, "(STUBBED) called");
+        const auto friends = Friends(system);
+        std::vector<u64> ids;
+        for (const auto& entry : friends) {
+            if (ids.size() >= ctx.GetWriteBufferNumElements<u64>()) {
+                break;
+            }
+            ids.push_back(AdvertisedId(entry, false));
+        }
+        if (!ids.empty()) {
+            ctx.WriteBuffer(ids);
+        }
+        LOG_DEBUG(Service_Friend, "called -> {}", ids.size());
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.Push<u32>(0);
+        rb.Push(static_cast<u32>(ids.size()));
     }
 
     void GetReceivedFriendRequestCount(HLERequestContext& ctx) {
@@ -346,7 +683,18 @@ private:
         setting.play_log_permission = 5;
         setting.friend_request_reception = 1;
         setting.friend_code_next_issuable_time = 99999999999;
-        strcpy(setting.friend_code, "0000-0000-0000");
+        std::string_view friend_code = "0000-0000-0000";
+        const auto account =
+            Account::Nextendo::LinkedAccount(Account::Nextendo::CurrentProfile(system));
+        if (account && !account->friend_code.empty()) {
+            // Nextendo codes read SW-0000-0000-0000; the console shows the digits.
+            friend_code = account->friend_code;
+            if (friend_code.starts_with("SW-")) {
+                friend_code.remove_prefix(3);
+            }
+        }
+        std::memcpy(setting.friend_code, friend_code.data(),
+                    std::min(friend_code.size(), sizeof(setting.friend_code) - 1));
         ctx.WriteBuffer(setting);
 
         IPC::ResponseBuilder rb{ctx, 2};

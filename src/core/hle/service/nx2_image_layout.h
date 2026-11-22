@@ -67,11 +67,13 @@ inline Nx2ImageLayout Nx2CalculateNativeImageRequirements(std::span<const u32, 1
                                                          u32 count) {
     auto layout = Nx2CalculateImageLayout(preference.data());
     if (count != 1 || preference[0] != 0 || preference[1] != 2 || preference[3] != 0 ||
-        preference[4] < 3 || preference[4] > 8 || preference[6] != 1 || preference[7] != 1 ||
+        preference[4] < 3 || preference[4] > 8 || preference[6] != 1 ||
+        (preference[7] != 1 && preference[7] != 2) ||
         layout.pitch != u64{preference[5]} * 64 ||
         std::any_of(preference.begin() + 8, preference.end(), [](u32 value) { return value != 0; })) {
         return layout;
     }
+    // Both observed block-format variants allow page-aligned image base offsets.
     layout.alignment = 0x1000;
     return layout;
 }

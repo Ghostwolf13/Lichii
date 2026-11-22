@@ -34,6 +34,14 @@ struct FrontendAppletParameters {
     LaunchType launch_type{};
     s32 program_index{};
     s32 previous_program_index{-1};
+
+    constexpr bool UsesNativeHomeBootstrap(ProgramId process_program_id,
+                                            bool process_is_switch2) const {
+        constexpr ProgramId NativeHomeProgramId = 0x0400000000001000ULL;
+        return process_is_switch2 && applet_type == AppletType::SystemApplet &&
+               applet_id == AppletId::QLaunch &&
+               program_id == NativeHomeProgramId && process_program_id == NativeHomeProgramId;
+    }
 };
 
 class AppletManager {
@@ -48,6 +56,8 @@ public:
     /// the kernel that owns it still runs. The next boot would otherwise free it into its own.
     void DropPendingProcess();
     void OperationModeChanged();
+    /// A HOME button press from the frontend (hotkey), as the controller's HOME button sends.
+    void PressHomeButton();
 
 public:
     void SetWindowSystem(WindowSystem* window_system);

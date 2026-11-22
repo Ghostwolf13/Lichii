@@ -80,6 +80,10 @@ TEST_CASE("RingBuffer: Threaded Test", "[common]") {
     const std::size_t count = 1000000;
     std::size_t full = 0;
     std::size_t empty = 0;
+    // Catch2's assertion macros may only be used from one thread: the threads count what is
+    // wrong and the test checks the counts once they are joined.
+    std::size_t bad_pushes = 0;
+    std::size_t bad_pops = 0;
 
     const auto next_value = [](std::array<char, 2>& value) {
         value[0] += 1;
@@ -91,7 +95,9 @@ TEST_CASE("RingBuffer: Threaded Test", "[common]") {
         std::size_t i = 0;
         while (i < count) {
             if (const std::size_t c = buf.Push(&value[0], 2); c > 0) {
-                REQUIRE(c == 2U);
+                if (c != 2U) {
+                    bad_pushes++;
+                }
                 i++;
                 next_value(value);
             } else {
@@ -106,9 +112,9 @@ TEST_CASE("RingBuffer: Threaded Test", "[common]") {
         std::size_t i = 0;
         while (i < count) {
             if (const std::vector<char> v = buf.Pop(2); v.size() > 0) {
-                REQUIRE(v.size() == 2U);
-                REQUIRE(v[0] == value[0]);
-                REQUIRE(v[1] == value[1]);
+                if (v.size() != 2U || v[0] != value[0] || v[1] != value[1]) {
+                    bad_pops++;
+                }
                 i++;
                 next_value(value);
             } else {
@@ -121,6 +127,8 @@ TEST_CASE("RingBuffer: Threaded Test", "[common]") {
     producer.join();
     consumer.join();
 
+    REQUIRE(bad_pushes == 0U);
+    REQUIRE(bad_pops == 0U);
     REQUIRE(buf.Size() == 0U);
     printf("RingBuffer: Threaded Test: full: %zu, empty: %zu\n", full, empty);
 }

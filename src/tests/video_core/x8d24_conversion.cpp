@@ -41,6 +41,18 @@ TEST_CASE("Native X8Z24 descriptor keeps its depth-only alias format", "[video_c
     REQUIRE(VideoCore::Surface::BytesPerBlock(PixelFormat::X8_D24_UNORM) == 4);
 }
 
+TEST_CASE("Unknown texture tuples have no pixel format", "[video_core][x8d24]") {
+    using Tegra::Texture::ComponentType;
+    using Tegra::Texture::TextureFormat;
+    REQUIRE(VideoCommon::TryPixelFormatFromTextureInfo(
+                TextureFormat::G24R8, ComponentType::UINT, ComponentType::UNORM,
+                ComponentType::UNORM, ComponentType::UNORM, false) ==
+            PixelFormat::S8_UINT_D24_UNORM);
+    REQUIRE(!VideoCommon::TryPixelFormatFromTextureInfo(
+                 TextureFormat::G24R8, ComponentType::UINT, ComponentType::UNORM,
+                 ComponentType::UINT, ComponentType::UINT, false));
+}
+
 TEST_CASE("X8_D24 aliases use raw RGBA bytes rather than color interpretation",
           "[video_core][x8d24]") {
     for (const auto format :

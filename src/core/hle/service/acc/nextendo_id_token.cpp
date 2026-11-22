@@ -6,6 +6,9 @@
 
 #include <chrono>
 #include <cstring>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include <fmt/format.h>
@@ -16,11 +19,13 @@
 
 #include "common/hex_util.h"
 #include "common/logging.h"
+#include "common/settings.h"
 #include "common/uuid.h"
 #include "core/core.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/hle/service/acc/nextendo_id_token.h"
+#include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/hle_ipc.h"
 
 namespace Service::Account::Nextendo {
@@ -95,18 +100,11 @@ bool NeedsAppId(u64 program_id) {
     }
 }
 
-} // namespace
-
-std::optional<Common::Nextendo::Account> LinkedAccount() {
-    if (!Common::Nextendo::OnlinePlayActive()) {
-        return std::nullopt;
-    }
-    return Common::Nextendo::LoadAccount();
-}
-
-std::string BuildIdToken(Core::System& system, const Common::Nextendo::Account& account) {
+// The claims a title reads from its BAAS id_token, signed with the session key. nnex carries the
+// Nextendo account's nx2 token, and is left out of tokens Lichii makes for the user's own server.
+std::string SignedIdToken(const std::string& sub, const std::optional<std::string>& nnex,
+                          u64 program_id, std::string_view version) {
     static const std::string device_id = RandomHex(0x10);
-    const u64 program_id = system.GetApplicationProcessProgramID();
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
                          std::chrono::system_clock::now().time_since_epoch())
                          .count();
@@ -114,7 +112,7 @@ std::string BuildIdToken(Core::System& system, const Common::Nextendo::Account& 
     const nlohmann::ordered_json header{
         {"alg", "RS256"}, {"kid", BaasKeyId}, {"typ", "id_token"}, {"jku", BaasJku}};
     nlohmann::ordered_json payload{
-        {"sub", RandomHex(0x10)},
+        {"sub", sub},
         {"aud", BaasAudience},
         {"iss", BaasIssuer},
         {"typ", "id_token"},
@@ -130,10 +128,10 @@ std::string BuildIdToken(Core::System& system, const Common::Nextendo::Account& 
          {{"dt", "NX Prod 1"}, {"pc", "HAC"}, {"di", device_id}, {"sn", "XAW10000000000"},
           {"ist", false}}},
     };
-    if (!account.nex_token.empty()) {
-        payload["nnex"] = account.nex_token;
+    if (nnex) {
+        payload["nnex"] = *nnex;
     }
-    if (const std::string version = InstalledVersion(system, program_id); !version.empty()) {
+    if (!version.empty()) {
         payload["tv"] = version;
     }
     if (NeedsAppId(program_id)) {
@@ -146,11 +144,45 @@ std::string BuildIdToken(Core::System& system, const Common::Nextendo::Account& 
     if (signature.empty()) {
         LOG_ERROR(Service_ACC, "Could not sign the Nextendo id token");
     }
-    if (account.nex_token.empty()) {
+    return input + "." + signature;
+}
+
+} // namespace
+
+Common::UUID CurrentProfile(const Core::System& system) {
+    return system.GetProfileManager()
+        .GetUser(static_cast<std::size_t>(Settings::values.current_user.GetValue()))
+        .value_or(Common::InvalidUUID);
+}
+
+std::optional<Common::Nextendo::Account> LinkedAccount(const Common::UUID& profile) {
+    if (!Common::Nextendo::OnlinePlayActive()) {
+        return std::nullopt;
+    }
+    return Common::Nextendo::LoadAccount(profile);
+}
+
+std::string BuildIdToken(Core::System& system, const Common::Nextendo::Account& account) {
+    const u64 program_id = system.GetApplicationProcessProgramID();
+    std::optional<std::string> nnex;
+    if (!account.nex_token.empty()) {
+        nnex = account.nex_token;
+    } else {
         LOG_WARNING(Service_ACC, "Nextendo: no nex_token for this account, the game server "
                                  "will refuse the login");
     }
-    return input + "." + signature;
+    return SignedIdToken(RandomHex(0x10), nnex, program_id,
+                         InstalledVersion(system, program_id));
+}
+
+std::string BuildLocalIdToken(Core::System& system, const Common::UUID& profile) {
+    const u64 program_id = system.GetApplicationProcessProgramID();
+    return BuildLocalIdToken(profile, program_id, InstalledVersion(system, program_id));
+}
+
+std::string BuildLocalIdToken(const Common::UUID& profile, u64 program_id,
+                              std::string_view version) {
+    return SignedIdToken(profile.RawString(), std::nullopt, program_id, version);
 }
 
 std::size_t WriteIdToken(HLERequestContext& ctx, std::string_view token) {

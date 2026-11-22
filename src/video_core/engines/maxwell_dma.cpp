@@ -3,11 +3,15 @@
 
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <bit>
 #include <cstdlib>
+#include <cstring>
+#include <ranges>
 #include "common/algorithm.h"
+#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/logging.h"
-#include <ranges>
 #include "common/settings.h"
 #include "core/core.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -32,6 +36,79 @@ MaxwellDMA::~MaxwellDMA() = default;
 
 void MaxwellDMA::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) {
     rasterizer = rasterizer_;
+}
+
+MaxwellDMA::LaunchWrites MaxwellDMA::WritesOfLaunch(std::span<const u32, RegisterCount> registers) {
+    const auto word = [registers](size_t offset) { return registers[offset / sizeof(u32)]; };
+    const auto address = [&word](size_t offset) {
+        return static_cast<GPUVAddr>(PackedGPUVAddr{word(offset), word(offset + sizeof(u32))});
+    };
+    // The power of two bytes a swizzling copy moves per element (as the copies compute it).
+    const auto bpp_shift = [](auto... values) {
+        return Common::FoldRight(
+            4U, [](u32 x, u32 y) { return (std::min)(x, static_cast<u32>(std::countr_zero(y))); },
+            static_cast<u32>(values)...);
+    };
+    LaunchWrites writes{};
+    const auto launch = std::bit_cast<LaunchDMA>(word(offsetof(Regs, launch_dma)));
+    if (launch.semaphore_type == LaunchDMA::SemaphoreType::RELEASE_ONE_WORD_SEMAPHORE) {
+        writes.semaphore = {address(offsetof(Regs, semaphore)), sizeof(u32)};
+    } else if (launch.semaphore_type == LaunchDMA::SemaphoreType::RELEASE_FOUR_WORD_SEMAPHORE) {
+        writes.semaphore = {address(offsetof(Regs, semaphore)), 4 * sizeof(u32)};
+    }
+    const GPUVAddr in = address(offsetof(Regs, offset_in));
+    const GPUVAddr out = address(offsetof(Regs, offset_out));
+    const s32 pitch_out = static_cast<s32>(word(offsetof(Regs, pitch_out)));
+    const u32 length = word(offsetof(Regs, line_length_in));
+    const u32 lines = word(offsetof(Regs, line_count));
+    RemapConst remap;
+    std::memcpy(&remap, &registers[offsetof(Regs, remap_const) / sizeof(u32)], sizeof(remap));
+    DMA::Parameters dst;
+    std::memcpy(&dst, &registers[offsetof(Regs, dst_params) / sizeof(u32)], sizeof(dst));
+    DMA::Parameters src;
+    std::memcpy(&src, &registers[offsetof(Regs, src_params) / sizeof(u32)], sizeof(src));
+    const bool remapping = launch.remap_enable != 0;
+    const u32 base_bpp = !remapping ? 1U
+                                    : (remap.num_dst_components_minus_one + 1) *
+                                          (remap.component_size_minus_one + 1);
+    if (launch.multi_line_enable) {
+        const bool src_pitch = launch.src_memory_layout == LaunchDMA::MemoryLayout::PITCH;
+        const bool dst_pitch = launch.dst_memory_layout == LaunchDMA::MemoryLayout::PITCH;
+        if (!dst_pitch) {
+            // Swizzled into the destination surface (CopyBlockLinearToBlockLinear,
+            // CopyPitchToBlockLinear, or the texture cache's BufferToImage).
+            u32 shift = 0;
+            if (!remapping) {
+                shift = src_pitch ? bpp_shift(dst.width, length, dst.origin.x.Value(), out)
+                                  : bpp_shift(src.width, dst.width, length, src.origin.x.Value(),
+                                              dst.origin.x.Value(), in, out);
+            }
+            writes.destination = {out, CalculateSize(true, base_bpp << shift, dst.width >> shift,
+                                                     dst.height, dst.depth, dst.block_size.height,
+                                                     dst.block_size.depth)};
+        } else if (!src_pitch) {
+            // Lines the pitch apart (CopyBlockLinearToPitch, or the cache's ImageToBuffer).
+            const u64 pitch = static_cast<u64>(std::abs(s64{pitch_out}));
+            writes.destination = {out, (std::max)(pitch, u64{length}) * lines};
+        } else if (lines != 0 && length != 0) {
+            // Lines from the first to the last, whichever way the pitch goes.
+            const s64 last = s64{lines - 1} * pitch_out;
+            const u64 span = static_cast<u64>(last < 0 ? -last : last);
+            writes.destination = {last < 0 ? out - span : out, span + length};
+        }
+    } else if (length != 0) {
+        if (remapping && remap.dst_x == RemapConst::Swizzle::CONST_A) {
+            // A fill: BufferClear counts words, the guest memory write takes length components.
+            writes.destination = {out, u64{length} * sizeof(u32)};
+        } else {
+            // A copy; with a block linear page kind on either side, in 16-byte pieces swizzled
+            // within their 512-byte blocks.
+            const GPUVAddr begin = out & ~GPUVAddr{0x1ff};
+            const GPUVAddr end = Common::AlignUp(out + length, GPUVAddr{0x200});
+            writes.destination = {begin, end - begin};
+        }
+    }
+    return writes;
 }
 
 void MaxwellDMA::ConsumeSinkImpl(Core::System& system) {

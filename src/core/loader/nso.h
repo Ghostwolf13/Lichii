@@ -104,6 +104,7 @@ public:
     LoadResult Load(Kernel::KProcess& process, Core::System& system) override;
 
     ResultStatus ReadNSOModules(Modules& out_modules) override;
+    ResultStatus ReadMainBuildId(Core::System& system, std::array<u8, 0x20>& build_id) override;
 
 private:
     Modules modules;

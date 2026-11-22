@@ -224,6 +224,7 @@ GraphicsPipeline::GraphicsPipeline(const Device& device, TextureCache& texture_c
             info.storage_buffers_descriptors, [](const auto& desc) { return desc.is_written; });
         uses_local_memory |= info.uses_local_memory;
     }
+    on_far_plane = stage_infos[0].position_on_far_plane && (enabled_stages_mask & 0b01110) == 0;
     ASSERT(num_textures <= MAX_TEXTURES);
     ASSERT(num_images <= MAX_IMAGES);
 

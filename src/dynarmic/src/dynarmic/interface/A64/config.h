@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -212,13 +213,21 @@ struct UserConfig {
     std::uint32_t code_cache_size = 128 * 1024 * 1024;  // bytes
 
     /// Diagnostics: when set, the x64 backend counts here the dispatcher's C++ block lookups,
-    /// the blocks it compiles and full code cache clears. The thread that runs the JIT writes
-    /// them (a clear asked for while it is idle runs on the asking thread); JITs that run on the
-    /// same host thread may share one.
+    /// compiled blocks, full code cache clears and handled fastmem faults; the arm64 backend
+    /// counts compiled blocks, compile time, full code cache clears and the fields marked arm64.
+    /// The thread that runs the JIT writes them (a clear asked for while it is idle runs on the
+    /// asking thread); JITs that run on the same host thread may share one.
     struct Counters {
         std::uint64_t block_lookups = 0;
         std::uint64_t blocks_compiled = 0;
         std::uint64_t cache_clears = 0;
+        std::uint64_t compile_ns = 0; ///< Translate, optimize and emit (arm64 only)
+        std::uint64_t full_clears = 0; ///< Clears because the code cache was full (arm64 only)
+        std::uint64_t blocks_invalidated = 0; ///< arm64 only
+        std::uint64_t invalidated_bytes = 0; ///< Code space they keep until a clear (arm64 only)
+        std::uint64_t fastmem_recompiles = 0; ///< Fastmem faults that request block invalidation
+        std::uint64_t fastmem_faults = 0; ///< Faults matched to a fastmem access (x64 only)
+        std::uint64_t code_bytes = 0; ///< Code cache in use at the last update (arm64 only)
     };
     Counters* counters = nullptr;
 
@@ -356,6 +365,14 @@ struct UserConfig {
     /// This tells the translator a wall clock will be used, thus allowing it
     /// to avoid writting certain unnecessary code only needed for cycle timers.
     bool wall_clock_cntpct = false;
+
+    /// x64 wall-clock counter: use the high half of fenced RDTSC times this Q0.64 scale.
+    /// A null factor or nonzero mode uses GetCNTPCT instead.
+    const std::atomic<std::uint64_t>* inline_cntpct_factor = nullptr;
+    const std::atomic<std::uint32_t>* inline_cntpct_mode = nullptr;
+    /// The same previous-read slot that GetCNTPCT updates, for the polling pause.
+    std::uint64_t* inline_cntpct_last = nullptr;
+    std::uint16_t inline_cntpct_spin_ticks = 0;
 
     /// This allows accurately emulating protection fault handlers. If true, we check
     /// for exit after every data memory access by the emulated program.

@@ -64,6 +64,8 @@ else()
         helpers/joycon_driver.h
         helpers/rumble_mapping.cpp
         helpers/rumble_mapping.h
+        helpers/switch2_protocol.cpp
+        helpers/switch2_protocol.h
         helpers/joycon_protocol/calibration.cpp
         helpers/joycon_protocol/calibration.h
         helpers/joycon_protocol/common_protocol.cpp
@@ -85,6 +87,15 @@ else()
 
     target_link_libraries(input_common PRIVATE SDL3::SDL3)
     target_compile_definitions(input_common PRIVATE HAVE_SDL3)
+
+    # C++/WinRT ships with the Windows SDK, not with MinGW.
+    if (WIN32 AND MSVC)
+        target_sources(input_common PRIVATE
+            drivers/switch2_ble.cpp
+            drivers/switch2_ble.h)
+        target_link_libraries(input_common PRIVATE WindowsApp)
+        target_compile_definitions(input_common PRIVATE HAVE_SWITCH2_BLE)
+    endif()
 endif()
 
 if (ENABLE_LIBUSB)

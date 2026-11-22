@@ -309,10 +309,12 @@ public:
     /// the record lacks, while the record was made where translation reads the same values (with
     /// these `read_properties`, see Shader::HostTranslateInfo::EnvironmentReadProperties) or by a
     /// build that didn't record where: then it was made before the translator read the value. A
-    /// record made where they differ can lack it and hold all that translation reads there.
+    /// record made where they differ can lack it and hold all that translation reads there. A
+    /// texture classification the load dropped as stale counts wherever the record was made.
     [[nodiscard]] bool LacksRecordedValue(u32 read_properties) const noexcept {
-        return lacks_recorded_value &&
-               (!recorded_read_properties || *recorded_read_properties == read_properties);
+        return lacks_dropped_value ||
+               (lacks_recorded_value &&
+                (!recorded_read_properties || *recorded_read_properties == read_properties));
     }
 
 private:
@@ -333,7 +335,10 @@ private:
     const GuessMissing* guess{};
     /// The EnvironmentReadProperties of the host that made the record, when its build wrote them
     std::optional<u32> recorded_read_properties;
+    /// Texture handles whose classifications the load dropped for the header byte-offset rule
+    std::vector<u32> dropped_texture_handles;
     bool lacks_recorded_value{};
+    bool lacks_dropped_value{};
 };
 
 /// Where a pipeline is in a cache file, from its environment count to the end of its key, and a

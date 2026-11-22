@@ -64,7 +64,10 @@ public:
     void resize(size_type size) {
         if (size > buffer_capacity) {
             auto new_buffer = std::make_unique_for_overwrite<T[]>(size);
-            std::memcpy(new_buffer.get(), buffer.get(), buffer_capacity * sizeof(T));
+            // Nothing to keep from an empty buffer, whose pointer is null.
+            if (buffer_capacity != 0) {
+                std::memcpy(new_buffer.get(), buffer.get(), buffer_capacity * sizeof(T));
+            }
             buffer = std::move(new_buffer);
             buffer_capacity = size;
         }
@@ -72,11 +75,12 @@ public:
     }
 
     /// This will only grow the buffer's capacity if size is greater than the current capacity.
-    /// The previously held data will be destroyed if a reallocation occurs.
+    /// Growth frees the old buffer first. If allocation fails, the buffer is empty.
     void resize_destructive(size_type size) {
         if (size > buffer_capacity) {
+            release();
+            buffer = std::make_unique_for_overwrite<T[]>(size);
             buffer_capacity = size;
-            buffer = std::make_unique_for_overwrite<T[]>(buffer_capacity);
         }
         last_requested_size = size;
     }

@@ -32,9 +32,7 @@
 #include "video_core/vulkan_common/ffx_files.h"
 #include "lichii/configuration/amd_fsr4_panel.h"
 
-#ifdef LICHII_BUNDLED_OPENSSL
-#include <openssl/cert.h>
-#endif
+#include "common/net/ca_store.h"
 
 namespace {
 
@@ -62,9 +60,7 @@ std::optional<std::string> Fetch(std::string_view entry, std::string& error,
     httplib::Client client{std::string{FfxRuntime::DOWNLOAD_HOST}};
     client.set_connection_timeout(30);
     client.set_read_timeout(30);
-#ifdef LICHII_BUNDLED_OPENSSL
-    client.load_ca_cert_store(kCert, sizeof(kCert));
-#endif
+    Common::Net::ConfigureCaStore(client);
     std::string body;
     int status = 0;
     const auto result = client.Get(

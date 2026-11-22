@@ -7,9 +7,11 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "common/common_types.h"
 
@@ -86,5 +88,43 @@ void WalkArchive(std::span<const u8> data, const std::string& name,
                  const ZstdDictionaries* dictionaries,
                  const std::function<void(const ShaderRecord&)>& on_record,
                  const std::function<void(const std::string&)>& on_member_error);
+
+/// NVN2 programs stored bare in data no container reader knows: a control section followed by its
+/// code (Kirby Air Riders' asset pack members hold a vertex and a pixel program, or a compute one,
+/// this way). Port of Zachary McKenney's reader from #1117.
+void FindBarePrograms(std::span<const u8> data,
+                      const std::function<void(const ShaderRecord&)>& on_record);
+
+/// Whether a RomFS file the container readers don't take (`head` is its first bytes) is a pack
+/// of separately compressed members to scan for zstd frames: Kirby Air Riders' PDAT asset files,
+/// or any other file of 1 GiB or more that isn't media.
+[[nodiscard]] bool IsFramePack(std::span<const u8> head, std::string_view path, u64 size);
+
+struct FrameScanOptions {
+    size_t window = size_t{64} << 20; ///< Bytes read at a time
+    size_t max_frame = size_t{256} << 20; ///< Largest compressed frame read
+};
+
+struct FrameScanResult {
+    u64 frames{};     ///< Frames inflated and walked
+    u64 failed{};     ///< Frames that parse to their end but don't inflate or walk
+    u64 oversized{};  ///< Frames larger than max_frame, not read
+    u64 bytes_read{}; ///< Bytes read through `read`, overlaps and oversized frames included
+    bool stopped{};
+    bool read_failed{}; ///< A read returned less than asked before the end of the file
+};
+
+/// Bytes [offset, offset + length) of a file, shorter only at its end.
+using ReadAt = std::function<std::vector<u8>(u64 offset, size_t length)>;
+
+/// The zstd frames of a file too large to read whole, read through `read` a window at a time and
+/// checked to parse to their end before they are inflated. Each inflated frame is walked like a
+/// shader archive when it starts with a container magic, else searched for bare programs. A
+/// magic cut by a window's end and a frame running past it are read in the next window; a frame
+/// larger than a window is read on its own, up to max_frame. Stops before the next window once
+/// `stop` is requested, and at the first read that returns less than asked (read_failed).
+FrameScanResult ScanFrames(u64 size, const ReadAt& read, const ZstdDictionaries* dictionaries,
+                           const std::function<void(const ShaderRecord&)>& on_record,
+                           std::stop_token stop, const FrameScanOptions& options = {});
 
 } // namespace VideoCommon::ShaderWarm

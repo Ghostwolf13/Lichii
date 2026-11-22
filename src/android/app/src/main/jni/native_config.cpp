@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <string>
+#include <utility>
 
 #include <jni.h>
 
@@ -12,6 +13,7 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "core/file_sys/patch_manager.h"
 #include "frontend_common/config.h"
 #include "frontend_common/settings_generator.h"
 #include "native.h"
@@ -378,7 +380,10 @@ void Java_io_github_zortos293_lichii_utils_NativeConfig_setDisabledAddons(JNIEnv
         auto jaddon = static_cast<jstring>(env->GetObjectArrayElement(jdisabledAddons, i));
         disabled_addons.push_back(Common::Android::GetJString(env, jaddon));
     }
-    Settings::values.disabled_addons[program_id] = disabled_addons;
+    // The add-ons screen sends the unchecked names; built-ins that are off by default are
+    // stored when checked (FileSys::StoredDisabledAddons).
+    Settings::values.disabled_addons[program_id] =
+        FileSys::StoredDisabledAddons(program_id, std::move(disabled_addons));
 }
 
 jobjectArray Java_io_github_zortos293_lichii_utils_NativeConfig_getOverlayControlData(JNIEnv* env,

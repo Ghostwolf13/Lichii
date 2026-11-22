@@ -13,6 +13,7 @@
 #include "core/hle/service/am/service/application_creator.h"
 #include "core/hle/service/am/window_system.h"
 #include "core/hle/service/cmif_serialization.h"
+#include "core/hle/service/ns/game_list_applications.h"
 #include "core/loader/loader.h"
 #include "core/launch_timestamp_cache.h"
 #include "core/hle/api_version.h"
@@ -22,13 +23,25 @@ namespace Service::AM {
 namespace {
 
 Result CreateGuestApplication(SharedPointer<IApplicationAccessor>* out_application_accessor, Core::System& system, WindowSystem& window_system, u64 program_id) {
-    FileSys::VirtualFile nca_raw{};
-
-    // Get the program NCA from storage.
     auto& storage = system.GetContentProviderUnion();
-    nca_raw = storage.GetEntryRaw(program_id, FileSys::ContentRecordType::Program);
+    const auto nca_raw = storage.GetEntryRaw(program_id, FileSys::ContentRecordType::Program);
 
-    // Ensure we retrieved a program NCA.
+    // A Switch 2 program needs the guest counter frequency and memory layout it boots with, and
+    // those were set for the HOME Menu before it started. A game the menu lists from the game list
+    // with no program NCA (NUP, NX) only boots from its file. Both boot in a session of their own.
+    const bool own_session =
+        IsSwitch2Application(system, program_id) ||
+        (nca_raw == nullptr && NS::GetGameListApplicationPath(system, program_id).has_value());
+    if (own_session) {
+        if (system.LaunchInNewSession(program_id)) {
+            LOG_INFO(Service_AM, "{:016X}: booting it in a new session", program_id);
+        } else {
+            LOG_ERROR(Service_AM, "{:016X} needs a session of its own, which this frontend can't start",
+                      program_id);
+        }
+        R_THROW(ResultUnknown);
+    }
+
     R_UNLESS(nca_raw != nullptr, ResultUnknown);
 
     std::vector<u8> control;

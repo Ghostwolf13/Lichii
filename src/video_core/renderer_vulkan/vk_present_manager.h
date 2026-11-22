@@ -48,6 +48,8 @@ struct Frame {
     /// Time the present thread leaves before presenting the next frame. Frame generation sets it
     /// on generated frames, so they share the screen time evenly with the real ones.
     std::chrono::nanoseconds present_spacing{};
+    /// The presents that show this frame's game frame: 1 plus the frames generated for it.
+    u32 game_frame_presents{1};
 #ifdef EGLANTINE_STREAMLINE
     // DLSS Frame Generation: the guest frame presented and where the guest image is in the frame.
     bool frame_gen{};
@@ -95,6 +97,9 @@ public:
     /// How many additional frames can be queued without stalling the render thread
     [[nodiscard]] size_t MaxExtraFrames() const;
 
+    /// Frames GetRenderFrame can take now without waiting for the present thread.
+    [[nodiscard]] size_t FreeFrames();
+
     [[nodiscard]] std::size_t SwapchainImageCount() const { return swapchain_image_count; }
     [[nodiscard]] VkFormat SwapchainImageFormat() const { return swapchain_image_format; }
 
@@ -121,6 +126,16 @@ private:
     void UpdateHdrMetadata();
 
     void SetImageCount();
+
+    /// Waits for each present id to be shown (VK_KHR_present_wait or VK_KHR_present_wait2) and
+    /// publishes it to WaitForDisplay.
+    void PresentWaitThread(std::stop_token token);
+
+    /// While the host display starts the game's frames (VideoCore::HostVsync): holds at most one
+    /// present between the GPU and the display. Before acquiring an image, waits until the
+    /// present before the last one is shown (bounded, and not at all while the display shows
+    /// nothing), then starts the game's next frame.
+    void WaitForDisplay();
 
     /// With EDEN_DKB_FRAME_TRACE=1 and frame generation on, logs the presents of every 10 s.
     void LogPacing(const Frame* frame, std::chrono::steady_clock::duration took,
@@ -164,6 +179,29 @@ private:
     /// See TakeBlockedTime. Atomic: a composite can also run from a syncpoint action on
     /// another thread (GPU::RequestComposite).
     std::atomic<std::chrono::steady_clock::rep> blocked_time{};
+
+    /// A present the present wait thread waits for.
+    struct PresentRecord {
+        u64 generation; ///< Swapchain::Generation() it was presented to
+        u64 id;
+        bool accepted{}; ///< Swapchain::Present accepted it, else it is not waited for
+    };
+    const bool present_wait;
+    u64 last_present_id{}; ///< Ids are given only to presents the display paces (HostVsync)
+    std::atomic<u64> completed_present_id{}; ///< Newest present waited for, shown or not
+    /// Newest present that reached the display, or whose swapchain is gone
+    std::atomic<u64> shown_present_id{};
+    /// Guards the wait on completed_present_id (WaitForDisplay).
+    std::mutex shown_mutex;
+    std::condition_variable shown_cv;
+    /// A present was not shown in time (occluded or minimised window): nothing waits for the
+    /// display until one is shown again.
+    std::atomic<bool> display_silent{};
+    boost::container::deque<PresentRecord> wait_queue;
+    std::mutex wait_mutex;
+    std::condition_variable_any wait_cv;
+    /// Last, so it stops before what it uses is destroyed.
+    std::jthread present_wait_thread;
 };
 
 } // namespace Vulkan

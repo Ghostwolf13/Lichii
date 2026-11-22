@@ -6,6 +6,7 @@
 #include "qt_common/util/game.h"
 
 #include "common/fs/fs.h"
+#include "common/fs/path_util.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "frontend_common/content_manager.h"
 #include "frontend_common/data_manager.h"
@@ -360,6 +361,8 @@ void ClearDataDir(FrontendCommon::DataManager::DataDir dir, const std::string& u
     auto dialog = newProgressDialog(tr("Clearing..."), QString(), 0, 0);
     dialog->show();
 
+    LOG_INFO(Frontend, "Clearing {}",
+             Common::FS::PathToUTF8String(FrontendCommon::DataManager::GetDataDir(dir, user_id)));
     FrontendCommon::DataManager::ClearDir(dir, user_id);
 
     dialog->close();

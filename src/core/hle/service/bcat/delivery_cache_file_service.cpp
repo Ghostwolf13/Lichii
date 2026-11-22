@@ -56,7 +56,8 @@ Result IDeliveryCacheFileService::Read(Out<u64> out_buffer_size, u64 offset,
 
     R_UNLESS(current_file != nullptr, ResultNoOpenEntry);
 
-    *out_buffer_size = std::min<u64>(current_file->GetSize() - offset, out_buffer.size());
+    const u64 size = current_file->GetSize();
+    *out_buffer_size = offset < size ? (std::min<u64>)(size - offset, out_buffer.size()) : 0;
     const auto buffer = current_file->ReadBytes(*out_buffer_size, offset);
     memcpy(out_buffer.data(), buffer.data(), buffer.size());
 
@@ -77,7 +78,7 @@ Result IDeliveryCacheFileService::GetDigest(Out<BcatDigest> out_digest) {
 
     R_UNLESS(current_file != nullptr, ResultNoOpenEntry);
 
-    //*out_digest = DigestFile(current_file);
+    *out_digest = DigestFile(current_file);
     R_SUCCEED();
 }
 

@@ -6,7 +6,10 @@
 #pragma once
 
 #include <span>
+#include <type_traits>
 #include <vector>
+
+#include <boost/container/small_vector.hpp>
 
 #include "common/concepts.h"
 #include "core/hle/service/nvdrv/devices/nvdevice.h"
@@ -30,7 +33,13 @@ struct Null {};
 
 // clang-format off
 
-template <typename FixedArg, typename VarArg, typename InlInVarArg, typename InlOutVarArg, typename F>
+template <typename T, size_t Capacity>
+using IoctlInputBuffer = std::conditional_t<Capacity != 0 && !std::is_same_v<T, Null>,
+                                            boost::container::small_vector<T, Capacity>,
+                                            std::vector<T>>;
+
+template <typename FixedArg, typename VarArg, typename InlInVarArg, typename InlOutVarArg,
+          size_t InputCapacity = 0, typename F>
 NvResult WrapGeneric(F&& callable, std::span<const u8> input, std::span<const u8> inline_input, std::span<u8> output, std::span<u8> inline_output) {
     constexpr bool HasFixedArg     = !std::is_same_v<FixedArg, Null>;
     constexpr bool HasVarArg       = !std::is_same_v<VarArg, Null>;
@@ -51,17 +60,27 @@ NvResult WrapGeneric(F&& callable, std::span<const u8> input, std::span<const u8
 
     // Read the variable-sized inputs.
     const size_t num_var_args = HasVarArg ? ((input.size() - var_offset) / sizeof(VarArg)) : 0;
-    std::vector<VarArg> var_args(num_var_args);
+    IoctlInputBuffer<VarArg, InputCapacity> var_args;
     if constexpr (HasVarArg) {
         if (num_var_args > 0) {
+            if constexpr (InputCapacity == 0) {
+                var_args.resize(num_var_args);
+            } else {
+                var_args.resize(num_var_args, boost::container::default_init);
+            }
             std::memcpy(var_args.data(), input.data() + var_offset, num_var_args * sizeof(VarArg));
         }
     }
 
     const size_t num_inl_in_var_args = HasInlInVarArg ? (inline_input.size() / sizeof(InlInVarArg)) : 0;
-    std::vector<InlInVarArg> inl_in_var_args(num_inl_in_var_args);
+    IoctlInputBuffer<InlInVarArg, InputCapacity> inl_in_var_args;
     if constexpr (HasInlInVarArg) {
         if (num_inl_in_var_args > 0) {
+            if constexpr (InputCapacity == 0) {
+                inl_in_var_args.resize(num_inl_in_var_args);
+            } else {
+                inl_in_var_args.resize(num_inl_in_var_args, boost::container::default_init);
+            }
             std::memcpy(inl_in_var_args.data(), inline_input.data(), num_inl_in_var_args * sizeof(InlInVarArg));
         }
     }
@@ -132,28 +151,30 @@ NvResult WrapVariable(Self* self, F&& callable, std::span<const u8> input, std::
     return WrapGeneric<Null, VarArg, Null, Null>(std::move(Callable), input, {}, output, {});
 }
 
-template <typename Self, typename F, typename... Rest>
+template <size_t InputCapacity = 0, typename Self, typename F, typename... Rest>
 NvResult WrapFixedVariable(Self* self, F&& callable, std::span<const u8> input, std::span<u8> output, Rest&&... rest) {
     using FixedArg = typename std::remove_reference_t<decltype(IoctlTwoArgTraits::GetFirstArgImpl(callable))>;
     using VarArg   = typename std::remove_reference_t<decltype(IoctlTwoArgTraits::GetSecondArgImpl(callable))>::value_type;
 
     const auto Callable = [&](auto& fixed, auto& var, auto& inl_in, auto& inl_out) -> NvResult {
-        return (self->*callable)(fixed, var, std::forward<Rest>(rest)...);
+        return (self->*callable)(fixed, std::span{var.data(), var.size()},
+                                 std::forward<Rest>(rest)...);
     };
 
-    return WrapGeneric<FixedArg, VarArg, Null, Null>(std::move(Callable), input, {}, output, {});
+    return WrapGeneric<FixedArg, VarArg, Null, Null, InputCapacity>(std::move(Callable), input, {}, output, {});
 }
 
-template <typename Self, typename F, typename... Rest>
+template <size_t InputCapacity = 0, typename Self, typename F, typename... Rest>
 NvResult WrapFixedInlIn(Self* self, F&& callable, std::span<const u8> input, std::span<const u8> inline_input, std::span<u8> output, Rest&&... rest) {
     using FixedArg    = typename std::remove_reference_t<decltype(IoctlTwoArgTraits::GetFirstArgImpl(callable))>;
     using InlInVarArg = typename std::remove_reference_t<decltype(IoctlTwoArgTraits::GetSecondArgImpl(callable))>::value_type;
 
     const auto Callable = [&](auto& fixed, auto& var, auto& inl_in, auto& inl_out) -> NvResult {
-        return (self->*callable)(fixed, inl_in, std::forward<Rest>(rest)...);
+        return (self->*callable)(fixed, std::span{inl_in.data(), inl_in.size()},
+                                 std::forward<Rest>(rest)...);
     };
 
-    return WrapGeneric<FixedArg, Null, InlInVarArg, Null>(std::move(Callable), input, inline_input, output, {});
+    return WrapGeneric<FixedArg, Null, InlInVarArg, Null, InputCapacity>(std::move(Callable), input, inline_input, output, {});
 }
 
 // clang-format on

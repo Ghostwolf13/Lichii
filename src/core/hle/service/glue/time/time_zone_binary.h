@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -16,6 +18,10 @@ namespace Core {
 class System;
 }
 
+namespace Service {
+class SystemDataView;
+}
+
 namespace Service::Glue::Time {
 
 class TimeZoneBinary {
@@ -23,8 +29,9 @@ public:
     explicit TimeZoneBinary(Core::System& system_)
         : time_zone_scratch_space(0x2800, 0), system{system_} {}
 
-    Result Mount();
-    bool IsValid(const Service::PSC::Time::LocationName& name);
+    Result Mount(std::shared_ptr<const SystemDataView> isolated_data = {});
+    bool IsValid(const Service::PSC::Time::LocationName& name) const;
+    std::optional<Service::PSC::Time::LocationName> GetConfiguredLocation() const;
     u32 GetTimeZoneCount();
     Result GetTimeZoneVersion(Service::PSC::Time::RuleVersion& out_rule_version);
     Result GetTimeZoneRule(std::span<const u8>& out_rule, size_t& out_rule_size,
@@ -35,12 +42,13 @@ public:
 
 private:
     void Reset();
+    Result ValidateIsolatedData();
+    std::shared_ptr<const FileSys::VfsFile> FindFile(std::string_view path) const;
     Result Read(size_t& out_read_size, std::span<u8> out_buffer, size_t out_buffer_size,
                 std::string_view path);
-    void GetListPath(std::string& out_path);
-    void GetVersionPath(std::string& out_path);
-    void GetTimeZonePath(std::string& out_path, const Service::PSC::Time::LocationName& name);
 
+    std::shared_ptr<const SystemDataView> isolated_system_data;
+    std::optional<Service::PSC::Time::LocationName> startup_location;
     FileSys::VirtualDir time_zone_binary_romfs{};
     Result time_zone_binary_mount_result{ResultUnknown};
     std::vector<u8> time_zone_scratch_space;

@@ -598,8 +598,8 @@
     <string name="emulate_bgr565_description">Fixes problems with inverted colors in games or strange artifacts or strange shadows.</string>
     <string name="rescale_hack">Enable Legacy Rescale Pass</string>
     <string name="rescale_hack_description">Enables a legacy handling for the rescale configuration pass for games by using a quick rescale path</string>
-    <string name="renderer_asynchronous_shaders">Use asynchronous shaders</string>
-    <string name="renderer_asynchronous_shaders_description">Compiles shaders asynchronously. This may reduce stutters but may also introduce glitches.</string>
+    <string name="renderer_asynchronous_shaders">Don\'t wait for shaders that are still compiling</string>
+    <string name="renderer_asynchronous_shaders_description">On (default): a draw or compute pass whose shader is still compiling is skipped for a few frames, so a new shader costs a brief pop-in instead of a freeze. Off (accurate): the game waits for every shader, so nothing is ever missing, but each new shader can freeze the game for up to a few seconds.</string>
     <string name="gpu_unswizzle_settings">GPU Unswizzle Settings</string>
     <string name="gpu_unswizzle_settings_description">Configure GPU-based texture unswizzling parameters or disable it entirely. Adjust these settings to balance performance and texture loading quality.</string>
     <string name="gpu_unswizzle_enable">Enable GPU Unswizzle</string>
@@ -1203,7 +1203,7 @@
 
     <!-- CPU Backend -->
     <string name="cpu_backend_dynarmic" translatable="false">Dynarmic (JIT)</string>
-    <string name="cpu_backend_nce" translatable="false">NCE</string>
+    <string name="cpu_backend_nce" translatable="false">Native (NCE)</string>
 
     <!-- CPU Accuracy -->
     <string name="cpu_accuracy_accurate">Accurate</string>

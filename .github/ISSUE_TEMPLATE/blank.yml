@@ -5,6 +5,7 @@ body:
     attributes:
       value: |
         **If you are not a developer, do not use this issue template. Your issue WILL BE CLOSED if you do not use the appropriate issue template.**
+        Do not post games, keys, firmware, account credentials or unauthorized download links. Do not attach bug bundles, GPU traces, shader caches or memory dumps publicly; ask a maintainer for handling instructions first.
   - type: textarea
     attributes:
       label: "Issue"

@@ -88,7 +88,7 @@
         <item row="2" column="1" colspan="2">
          <widget class="QLineEdit" name="redirect_hosts">
           <property name="toolTip">
-           <string>Comma-separated host names, for example a.example, b.example. Each also covers its subdomains.</string>
+           <string>Host names separated by commas or spaces, for example *.a.example b.example. Each also covers its subdomains.</string>
           </property>
          </widget>
         </item>
@@ -130,7 +130,7 @@
         <item row="5" column="0" colspan="3">
          <widget class="QCheckBox" name="redirect_loopback_only">
           <property name="toolTip">
-           <string>Other host names don't resolve, and games can reach only this PC and the server address. Multiplayer rooms are not affected.</string>
+           <string>Other host names don't resolve, and games can reach only this PC and the server address. Games get an id token Lichii makes for the current user instead of their Nextendo one. Multiplayer rooms are not affected.</string>
           </property>
           <property name="text">
            <string>Block all other network access</string>
@@ -156,7 +156,7 @@
         <item row="1" column="0" colspan="2">
          <widget class="QLabel" name="nextendo_description">
           <property name="text">
-           <string>Nextendo Network is a community service that replaces Nintendo's online servers for Switch 1 games. When this is on, those games connect to Nextendo instead of Nintendo and send your Nextendo account token to it. Airplane mode is turned off.</string>
+           <string>Nextendo Network is a community service that replaces Nintendo's online servers. When this is on, the games it supports connect to Nextendo instead of Nintendo and send your Nextendo game token to it. Airplane mode is turned off. Online play needs a Nextendo account with a verified e-mail address and a linked Discord account.</string>
           </property>
           <property name="wordWrap">
            <bool>true</bool>
@@ -173,14 +173,24 @@
         <item row="2" column="1">
          <widget class="QLineEdit" name="nextendo_client_id"/>
         </item>
-        <item row="3" column="0" colspan="2">
+        <item row="3" column="0">
+         <widget class="QLabel" name="nextendo_profile_label">
+          <property name="text">
+           <string>Profile</string>
+          </property>
+         </widget>
+        </item>
+        <item row="3" column="1">
+         <widget class="QComboBox" name="nextendo_profile"/>
+        </item>
+        <item row="4" column="0" colspan="2">
          <widget class="QLabel" name="nextendo_status">
           <property name="wordWrap">
            <bool>true</bool>
           </property>
          </widget>
         </item>
-        <item row="4" column="0" colspan="2">
+        <item row="5" column="0" colspan="2">
          <layout class="QHBoxLayout" name="nextendo_buttons">
           <item>
            <widget class="QPushButton" name="nextendo_sign_in">
@@ -197,6 +207,90 @@
            </widget>
           </item>
          </layout>
+        </item>
+        <item row="6" column="0" colspan="2">
+         <widget class="QWidget" name="nextendo_friends" native="true">
+          <layout class="QGridLayout" name="nextendo_friends_layout">
+           <property name="leftMargin">
+            <number>0</number>
+           </property>
+           <property name="topMargin">
+            <number>0</number>
+           </property>
+           <property name="rightMargin">
+            <number>0</number>
+           </property>
+           <property name="bottomMargin">
+            <number>0</number>
+           </property>
+           <item row="0" column="0" colspan="3">
+            <widget class="QLabel" name="nextendo_friend_code">
+             <property name="textInteractionFlags">
+              <set>Qt::TextInteractionFlag::TextSelectableByMouse</set>
+             </property>
+            </widget>
+           </item>
+           <item row="1" column="0" colspan="3">
+            <widget class="QListWidget" name="nextendo_friend_list">
+             <property name="maximumSize">
+              <size>
+               <width>16777215</width>
+               <height>120</height>
+              </size>
+             </property>
+            </widget>
+           </item>
+           <item row="2" column="0">
+            <widget class="QPushButton" name="nextendo_accept">
+             <property name="text">
+              <string>Accept</string>
+             </property>
+            </widget>
+           </item>
+           <item row="2" column="1">
+            <widget class="QPushButton" name="nextendo_decline">
+             <property name="text">
+              <string>Decline</string>
+             </property>
+            </widget>
+           </item>
+           <item row="2" column="2">
+            <widget class="QPushButton" name="nextendo_remove">
+             <property name="text">
+              <string>Remove friend</string>
+             </property>
+            </widget>
+           </item>
+           <item row="3" column="0" colspan="2">
+            <widget class="QLineEdit" name="nextendo_add_code">
+             <property name="placeholderText">
+              <string>Friend code, for example SW-0000-0000-0000</string>
+             </property>
+            </widget>
+           </item>
+           <item row="3" column="2">
+            <widget class="QPushButton" name="nextendo_add">
+             <property name="text">
+              <string>Add friend</string>
+             </property>
+            </widget>
+           </item>
+           <item row="4" column="0" colspan="3">
+            <widget class="QLabel" name="nextendo_friends_status">
+             <property name="wordWrap">
+              <bool>true</bool>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </widget>
+        </item>
+        <item row="6" column="0" colspan="2">
+         <widget class="QCheckBox" name="nextendo_sync_profile">
+          <property name="text">
+           <string>Use my Nextendo nickname and picture for the current user (replaces its name and icon)</string>
+          </property>
+         </widget>
         </item>
        </layout>
       </widget>

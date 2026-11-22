@@ -10,6 +10,7 @@
 #include "core/file_sys/vfs/vfs.h"
 #include "core/hle/service/cmif_types.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "core/hle/service/filesystem/fsp/fs_read_throttle.h"
 #include "core/hle/service/service.h"
 
 namespace Service::FileSystem {
@@ -21,11 +22,7 @@ public:
 private:
     FileSys::VirtualFile backend;
 
-    static constexpr s64 ReadBytesPerSecond = 40'000'000;
-    static constexpr u64 AgeOfImprisonmentProgramId = 0x04003F40232DE000ULL;
-    static constexpr s64 AgeOfImprisonmentReadBytesPerSecond = 100'000'000;
-    static constexpr s64 MaxChargedReadSize = 64 * 1024;
-    s64 bytes_per_second = 0;
+    ReadThrottle throttle;
     std::chrono::steady_clock::time_point next_read_tick{};
 
     Result Read(

@@ -33,7 +33,7 @@ constexpr u32 LSFG_RECURRENCE_FRAMES = 2;
 constexpr auto ACTIVITY_LOG_INTERVAL = std::chrono::seconds(10);
 
 [[nodiscard]] std::string ModeText(Settings::FrameGenType active) {
-    const char* type = active == Settings::FrameGenType::Fsr3 ? "FSR3" : "LSFG";
+    const char* type = active == Settings::FrameGenType::OpticalFlow ? "optical flow" : "LSFG";
     const u32 target_rate = Settings::values.frame_gen_target_rate.GetValue();
     if (target_rate != 0) {
         return fmt::format("{} up to {}x towards {} FPS", type, Settings::MAX_FRAME_GEN_MULTIPLIER,
@@ -273,10 +273,10 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
         } else if (nvidia_frame_gen) {
             SetState(VideoCore::FrameGenState::NvidiaFrameGen, format);
         }
-        if (chain || fsr3_chain) {
+        if (chain || optical_flow_chain) {
             scheduler.Finish();
             chain.reset();
-            fsr3_chain.reset();
+            optical_flow_chain.reset();
         }
         warm_streak = 0;
         if (unavailable && Settings::values.frame_gen.GetValue()) {
@@ -299,9 +299,9 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
 
     const VkExtent2D extent{.width = frame->width, .height = frame->height};
     const f32 flow_scale = ConfiguredFlowScale(peak_guest_extent, extent);
-    if ((!chain && !fsr3_chain) || built_type != type || built_extent.width != extent.width ||
-        built_extent.height != extent.height || built_format != format ||
-        built_flow_scale != flow_scale) {
+    if ((!chain && !optical_flow_chain) || built_type != type ||
+        built_extent.width != extent.width || built_extent.height != extent.height ||
+        built_format != format || built_flow_scale != flow_scale) {
         Rebuild(device, extent, format, flow_scale, type);
     }
 
@@ -315,11 +315,11 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
     generated_frames.fetch_add(GeneratedFrameCount(), std::memory_order_relaxed);
     LogActivity();
 
-    const bool use_fsr3 = type == Settings::FrameGenType::Fsr3;
+    const bool use_optical_flow = type == Settings::FrameGenType::OpticalFlow;
 
-    if (use_fsr3 && fsr3_chain) {
+    if (use_optical_flow && optical_flow_chain) {
         scheduler.RequestOutsideRenderPassOperationContext();
-        fsr3_chain->Process(device, scheduler, *frame->image, *frame->storage_view, count);
+        optical_flow_chain->Process(device, scheduler, *frame->image, *frame->storage_view, count);
     } else if (chain) {
         scheduler.RequestOutsideRenderPassOperationContext();
         scheduler.Record([this, source = *frame->image, extent, count,
@@ -349,8 +349,8 @@ void FrameGen::SetState(VideoCore::FrameGenState new_state, VkFormat format) {
         if (Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::NvidiaDlssG) {
             LOG_INFO(Render_Vulkan,
                      "Frame generation: NVIDIA DLSS-G unavailable ({}), using {}, presenting {}",
-                     DlssgBlockedText(DlssgBlocked()), ModeText(Settings::FrameGenType::Fsr3),
-                     string_VkFormat(format));
+                     DlssgBlockedText(DlssgBlocked()),
+                     ModeText(Settings::FrameGenType::OpticalFlow), string_VkFormat(format));
             break;
         }
         LOG_INFO(Render_Vulkan, "Frame generation on: {}, presenting {}",
@@ -374,12 +374,12 @@ void FrameGen::SetState(VideoCore::FrameGenState new_state, VkFormat format) {
     case VideoCore::FrameGenState::MissingLosslessDll:
         LOG_WARNING(Render_Vulkan,
                     "Frame generation is on but not running: LSFG needs Lossless.dll in the "
-                    "lossless folder of the user directory. FSR3 needs nothing");
+                    "lossless folder of the user directory. Optical flow needs nothing");
         break;
     case VideoCore::FrameGenState::UnsupportedGpu:
         LOG_WARNING(Render_Vulkan,
                     "Frame generation is on but not running: this GPU lacks Vulkan features LSFG "
-                    "needs. FSR3 may still work");
+                    "needs. Optical flow may still work");
         break;
     default:
         break;
@@ -406,7 +406,8 @@ void FrameGen::LogActivity() {
         if (activity.generated == 0) {
             LOG_INFO(Render_Vulkan,
                      "Frame generation ({}) idle: {:.0f} game FPS, no frames generated. It waits "
-                     "while the game is below 10 FPS, after hitches and once the target is met",
+                     "while the game is below 10 FPS, after hitches, once the target is met and "
+                     "while the display takes no more presents",
                      ModeText(built_type), static_cast<f32>(activity.frames) / seconds);
         } else {
             LOG_INFO(Render_Vulkan,
@@ -422,13 +423,14 @@ void FrameGen::LogActivity() {
     activity.generated = 0;
 }
 
-size_t FrameGen::WantedGenerations(size_t capacity,
+size_t FrameGen::WantedGenerations(size_t capacity, size_t free_frames,
                                    std::chrono::steady_clock::duration blocked) {
     if (unavailable) {
         plan = {};
         return 0;
     }
     plan = pacer.Plan(capacity, blocked);
+    plan.generations = GenerationsWithoutWaiting(plan.generations, free_frames);
     return plan.generations;
 }
 
@@ -437,15 +439,15 @@ size_t FrameGen::GeneratedFrameCount() const {
 }
 
 void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t generation) {
-    const bool use_fsr3 = built_type == Settings::FrameGenType::Fsr3;
+    const bool use_optical_flow = built_type == Settings::FrameGenType::OpticalFlow;
 
-    if (use_fsr3 && fsr3_chain) {
+    if (use_optical_flow && optical_flow_chain) {
         const f32 blend = static_cast<f32>(generation + 1) / static_cast<f32>(last_generations + 1);
         const f32 flow_scale = ConfiguredFlowScale(peak_guest_extent, built_extent);
 
         scheduler.RequestOutsideRenderPassOperationContext();
-        fsr3_chain->Generate(device, scheduler, *destination->image, *destination->storage_view,
-                             blend, flow_scale);
+        optical_flow_chain->Generate(device, scheduler, *destination->image,
+                                     *destination->storage_view, blend, flow_scale);
     } else if (chain) {
         chain->SetTarget(device, last_generations, generation, destination->index,
                          *destination->storage_view);
@@ -466,13 +468,13 @@ void FrameGen::Rebuild(const Device& device, VkExtent2D extent, VkFormat format,
                        Settings::FrameGenType type) {
     scheduler.Finish();
     chain.reset();
-    fsr3_chain.reset();
+    optical_flow_chain.reset();
 
     built_flow_scale = flow_scale;
     built_type = type;
 
-    if (built_type == Settings::FrameGenType::Fsr3) {
-        fsr3_chain.emplace(device, memory_allocator, extent, format);
+    if (built_type == Settings::FrameGenType::OpticalFlow) {
+        optical_flow_chain.emplace(device, memory_allocator, extent, format);
     } else {
         chain.emplace(device, memory_allocator, *shaders, extent, format, built_flow_scale);
     }

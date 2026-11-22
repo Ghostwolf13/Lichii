@@ -232,7 +232,10 @@ void PutLE(std::vector<u8>& buffer, size_t offset, u64 value, size_t bytes) {
 }
 
 void PutBytes(std::vector<u8>& buffer, size_t offset, std::span<const u8> bytes) {
-    std::memcpy(buffer.data() + offset, bytes.data(), bytes.size());
+    // memcpy takes no null pointers, not even for zero bytes: an empty span can hold one.
+    if (!bytes.empty()) {
+        std::memcpy(buffer.data() + offset, bytes.data(), bytes.size());
+    }
 }
 
 using Digest = std::array<u8, 32>;
@@ -649,6 +652,24 @@ private:
             tlvs.emplace_back(TlvNpdm, std::move(npdm));
         }
 
+        if (kind == KindUpdate) {
+            for (const auto& sidecar_dir : {exefs, dir}) {
+                if (sidecar_dir.empty() || !IsFile(sidecar_dir / "control.nacp")) {
+                    continue;
+                }
+                Common::FS::IOFile file{sidecar_dir / "control.nacp",
+                                        Common::FS::FileAccessMode::Read};
+                if (!file.IsOpen() || file.GetSize() != sizeof(RawNACP)) {
+                    continue;
+                }
+                std::vector<u8> nacp(sizeof(RawNACP));
+                if (file.ReadSpan(std::span{nacp}) == nacp.size()) {
+                    tlvs.emplace_back(TlvNacp, std::move(nacp));
+                    break;
+                }
+            }
+        }
+
         if (kind != KindAddon) {
             if (auto loader = OpenLoader(vfs, dir)) {
                 std::string display_version;
@@ -687,8 +708,8 @@ private:
         return plan.packages.back().title_id;
     }
 
-    // Names, icon and control data belong to the base package, or the first one without a base.
-    // Our dumps rarely carry a control folder; when one does, the base's own wins, then updates.
+    // Keep the application-wide display metadata and fallback control on the base package,
+    // or the first package without a base.
     void AddApplicationMetadata() {
         const auto app = static_cast<u32>(std::distance(
             plan.packages.begin(), std::ranges::find(plan.packages, KindBase, &PlanPackage::kind)));
@@ -705,7 +726,9 @@ private:
             if (!have_control &&
                 loader->ReadControlData(control) == Loader::ResultStatus::Success) {
                 have_control = true;
-                tlvs.emplace_back(TlvNacp, control.GetRawBytes());
+                if (std::ranges::none_of(tlvs, [](const auto& tlv) { return tlv.first == TlvNacp; })) {
+                    tlvs.emplace_back(TlvNacp, control.GetRawBytes());
+                }
                 if (const auto name = control.GetApplicationName(); !name.empty()) {
                     tlvs.emplace_back(TlvTitleName, StringBytes(name));
                 }

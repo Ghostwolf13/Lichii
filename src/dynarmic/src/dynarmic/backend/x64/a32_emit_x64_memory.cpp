@@ -133,6 +133,8 @@ void A32EmitX64::GenFastmemFallbacks() {
     }
 }
 
+static void RecordFastmemFault(const A32::UserConfig&, bool) {}
+
 #define Axx A32
 #include "dynarmic/backend/x64/emit_x64_memory.cpp.inc"
 #undef Axx

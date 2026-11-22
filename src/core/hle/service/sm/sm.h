@@ -113,7 +113,7 @@ private:
     /// WaitForService state, guarded by lock
     bool closing{};
     u32 service_waiters{};
-    std::condition_variable waiters_changed; ///< Close ran, or a waiter left
+    std::condition_variable waiters_changed; ///< A service registered, Close ran, or a waiter left
 
     /// Kernel context
     Kernel::KernelCore& kernel;

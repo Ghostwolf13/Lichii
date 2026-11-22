@@ -317,18 +317,18 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         .noted = report_noted,
     };
     const auto operation_body = [this, op = report_op] {
-        const DAddr cpu_addr = op.cpu_addr;
-        const GPUVAddr addr = op.addr;
+        const DAddr op_cpu_addr = op.cpu_addr;
+        const GPUVAddr op_addr = op.addr;
         const size_t asid = op.asid;
-        const QueryType counter_type = static_cast<QueryType>(op.counter_type);
-        const bool mirrored = op.mirrored;
-        const u64 report_size = op.wide ? 16 : 4;
-        const QueryLocation query_location = op.location;
+        const QueryType op_counter_type = static_cast<QueryType>(op.counter_type);
+        const bool op_mirrored = op.mirrored;
+        const u64 op_report_size = op.wide ? 16 : 4;
+        const QueryLocation op_location = op.location;
         QueryBase* const query_base = op.query;
-        auto* const streamer = impl->streamers[query_location.stream_id.Value()];
+        auto* const op_streamer = impl->streamers[op_location.stream_id.Value()];
         SCOPE_EXIT {
             if (op.noted) {
-                impl->rasterizer.FinishReport(cpu_addr, report_size);
+                impl->rasterizer.FinishReport(op_cpu_addr, op_report_size);
             }
         };
         if (True(query_base->flags & QueryFlagBits::IsInvalidated)) {
@@ -336,10 +336,10 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                 LOG_INFO(HW_GPU,
                          "DKB_QUERY discard n={} as={} gpu={:#x} device={:#x} type={} "
                          "reason=invalidated flags={:#x}",
-                         trace, asid, addr, cpu_addr, static_cast<u32>(counter_type),
+                         trace, asid, op_addr, op_cpu_addr, static_cast<u32>(op_counter_type),
                          static_cast<u32>(query_base->flags));
             }
-            impl->pending_unregister.push_back(query_location);
+            impl->pending_unregister.push_back(op_location);
             return;
         }
         if (False(query_base->flags & QueryFlagBits::IsFinalValueSynced)) [[unlikely]] {
@@ -347,50 +347,51 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                 LOG_INFO(HW_GPU,
                          "DKB_QUERY discard n={} as={} gpu={:#x} device={:#x} type={} "
                          "reason=unsynchronized flags={:#x}",
-                         trace, asid, addr, cpu_addr, static_cast<u32>(counter_type),
+                         trace, asid, op_addr, op_cpu_addr, static_cast<u32>(op_counter_type),
                          static_cast<u32>(query_base->flags));
             }
             LOG_ERROR(HW_GPU,
                       "Query report value not synchronized. Consider increasing GPU accuracy.");
-            impl->pending_unregister.push_back(query_location);
+            impl->pending_unregister.push_back(op_location);
             return;
         }
-        query_base->value += streamer->GetAmendValue();
-        streamer->SetAccumulationValue(query_base->value);
-        FinishReads(cpu_addr, True(query_base->flags & QueryFlagBits::HasTimestamp) ? 16 : 4);
-        u8* const pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
-        u8* const pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
+        query_base->value += op_streamer->GetAmendValue();
+        op_streamer->SetAccumulationValue(query_base->value);
+        FinishReads(op_cpu_addr, True(query_base->flags & QueryFlagBits::HasTimestamp) ? 16 : 4);
+        u8* const op_pointer = impl->device_memory.template GetPointer<u8>(op_cpu_addr);
+        u8* const op_pointer_timestamp =
+            impl->device_memory.template GetPointer<u8>(op_cpu_addr + 8);
         auto& shadow = Tegra::Nx2MirrorShadow::Get();
-        if (pointer == nullptr) {
+        if (op_pointer == nullptr) {
             // Unmapped since the report: nothing to write.
-        } else if (mirrored && shadow.Diverts(cpu_addr)) {
+        } else if (op_mirrored && shadow.Diverts(op_cpu_addr)) {
             u32 guest;
-            std::memcpy(&guest, pointer, sizeof(guest));
-            shadow.Set(cpu_addr, static_cast<u32>(query_base->value), guest);
+            std::memcpy(&guest, op_pointer, sizeof(guest));
+            shadow.Set(op_cpu_addr, static_cast<u32>(query_base->value), guest);
         } else if (True(query_base->flags & QueryFlagBits::HasTimestamp)) {
             u64 timestamp = impl->gpu.GetTicks();
-            if (pointer_timestamp != nullptr) {
-                std::memcpy(pointer_timestamp, &timestamp, sizeof(timestamp));
+            if (op_pointer_timestamp != nullptr) {
+                std::memcpy(op_pointer_timestamp, &timestamp, sizeof(timestamp));
             }
-            std::memcpy(pointer, &query_base->value, sizeof(query_base->value));
+            std::memcpy(op_pointer, &query_base->value, sizeof(query_base->value));
         } else {
             u32 value = static_cast<u32>(query_base->value);
-            std::memcpy(pointer, &value, sizeof(value));
+            std::memcpy(op_pointer, &value, sizeof(value));
         }
-        if (!mirrored && counter_type == QueryType::Payload) {
-            shadow.NoteDirectRelease(cpu_addr, addr);
+        if (!op_mirrored && op_counter_type == QueryType::Payload) {
+            shadow.NoteDirectRelease(op_cpu_addr, op_addr);
         }
-        Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, static_cast<u32>(query_base->value));
+        Tegra::Nx2SemaphoreWaiters::Get().OnWrite(op_cpu_addr, static_cast<u32>(query_base->value));
         if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Write)) {
             const bool wide = True(query_base->flags & QueryFlagBits::HasTimestamp);
             LOG_INFO(HW_GPU,
                      "DKB_QUERY write n={} path=completion as={} gpu={:#x} device={:#x} type={} "
                      "bytes={} value={:#x} flags={:#x}",
-                     trace, asid, addr, cpu_addr, static_cast<u32>(counter_type), wide ? 8 : 4,
-                     wide ? query_base->value : static_cast<u32>(query_base->value),
+                     trace, asid, op_addr, op_cpu_addr, static_cast<u32>(op_counter_type),
+                     wide ? 8 : 4, wide ? query_base->value : static_cast<u32>(query_base->value),
                      static_cast<u32>(query_base->flags));
         }
-        impl->pending_unregister.push_back(query_location);
+        impl->pending_unregister.push_back(op_location);
     };
     static_assert(sizeof(operation_body) <= 48,
                   "the report operation must fit MSVC's std::function storage");

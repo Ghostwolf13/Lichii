@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "core/hle/service/cmif_types.h"
 #include "core/hle/service/service.h"
 #include "core/hle/service/set/settings_types.h"
@@ -16,14 +18,18 @@ class System;
 namespace Service::Set {
 using KeyCodeMap = std::array<u8, 0x1000>;
 
+class ISystemSettingsServer;
+
 LanguageCode GetLanguageCodeFromIndex(std::size_t idx);
 
 class ISettingsServer final : public ServiceFramework<ISettingsServer> {
 public:
-    explicit ISettingsServer(Core::System& system_);
+    explicit ISettingsServer(Core::System& system_,
+                             std::shared_ptr<ISystemSettingsServer> scratch_profile = {});
     ~ISettingsServer() override;
 
 private:
+    LanguageCode GetEffectiveLanguageCode() const;
     Result GetLanguageCode(Out<LanguageCode> out_language_code);
 
     Result GetAvailableLanguageCodes(Out<s32> out_count,
@@ -50,6 +56,8 @@ private:
         OutLargeData<std::array<u8, 0x80>, BufferAttr_HipcMapAlias> out_device_name);
 
     Result GetKeyCodeMapByPort(OutLargeData<KeyCodeMap, BufferAttr_HipcMapAlias> out_key_code_map, u32 port);
+
+    const std::shared_ptr<ISystemSettingsServer> scratch_profile;
 };
 
 } // namespace Service::Set

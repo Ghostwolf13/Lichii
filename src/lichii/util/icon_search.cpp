@@ -36,11 +36,9 @@
 
 #include "common/httplib.h"
 #include "common/logging.h"
+#include "common/net/ca_store.h"
 #include "common/string_util.h"
 #include "qt_common/config/uisettings.h"
-#ifdef LICHII_BUNDLED_OPENSSL
-#include <openssl/cert.h>
-#endif
 
 namespace {
 
@@ -214,9 +212,7 @@ HttpResult HttpGet(const std::string& full_url, std::chrono::steady_clock::time_
         client.set_write_timeout(std::min(remaining, ConnectTimeout));
         client.set_max_timeout(remaining);
         client.set_follow_location(true);
-#ifdef LICHII_BUNDLED_OPENSSL
-        client.load_ca_cert_store(kCert, sizeof(kCert));
-#endif
+        Common::Net::ConfigureCaStore(client);
         httplib::Headers headers{{"User-Agent", "Lichii"}};
         if (!bearer_token.empty()) {
             headers.emplace("Authorization", "Bearer " + bearer_token);

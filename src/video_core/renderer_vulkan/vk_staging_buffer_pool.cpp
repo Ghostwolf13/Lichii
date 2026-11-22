@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <initializer_list>
 #include <utility>
 #include <vector>
 
@@ -14,6 +15,8 @@
 #include "common/bit_util.h"
 #include "common/common_types.h"
 #include "common/literals.h"
+#include "common/logging.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/nx2_stutter_trace.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -95,8 +98,11 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
         .pNext = nullptr,
         .flags = 0,
         .size = stream_buffer_size + STREAM_BUFFER_TAIL,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
-                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        // Transfer destination too: GPU-written list words are copied over their placeholders
+        // in the constant buffers streamed here (Nx2ListSlots::PatchUniform).
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
@@ -108,7 +114,7 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
         stream_ci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
     stream_buffer = memory_allocator.CreateBuffer(stream_ci, MemoryUsage::Stream);
-    if (device.HasDebuggingToolAttached()) {
+    if (device.NamesObjects()) {
         stream_buffer.SetObjectNameEXT("Stream Buffer");
     }
     if (device.IsBufferDeviceAddressSupported()) {
@@ -128,15 +134,11 @@ StagingBufferRef StagingBufferPool::Request(size_t size, MemoryUsage usage, bool
 }
 
 void StagingBufferPool::FreeDeferred(StagingBufferRef& ref) {
-    auto& entries = GetCache(ref.usage)[ref.log2_level].entries;
-    const auto is_this_one = [&ref](const StagingBuffer& entry) {
-        return entry.index == ref.index;
-    };
-    auto it = std::find_if(entries.begin(), entries.end(), is_this_one);
-    ASSERT(it != entries.end());
-    ASSERT(it->deferred);
-    it->tick = scheduler.CurrentTick();
-    it->deferred = false;
+    StagingBuffers& cache_level = GetCache(ref.usage)[ref.log2_level];
+    auto node = cache_level.deferred.extract(ref.index);
+    ASSERT(!node.empty());
+    node.mapped().tick = scheduler.CurrentTick();
+    cache_level.entries.push_back(std::move(node.mapped()));
 }
 
 void StagingBufferPool::TickFrame() {
@@ -204,7 +206,7 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
     StagingBuffers& cache_level = GetCache(usage)[Common::Log2Ceil(size)];
 
     const auto is_free = [this](const StagingBuffer& entry) {
-        return !entry.deferred && scheduler.IsFree(entry.tick);
+        return scheduler.IsFree(entry.tick);
     };
     auto& entries = cache_level.entries;
     const auto hint_it = entries.begin() + cache_level.iterate_index;
@@ -215,11 +217,21 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
             return std::nullopt;
         }
     }
-    cache_level.iterate_index = std::distance(entries.begin(), it) + 1;
-    it->tick = deferred ? (std::numeric_limits<u64>::max)() : scheduler.CurrentTick();
-    ASSERT(!it->deferred);
-    it->deferred = deferred;
-    return it->Ref();
+    const size_t position = static_cast<size_t>(std::distance(entries.begin(), it));
+    const StagingBufferRef ref = it->Ref();
+    if (!deferred) {
+        cache_level.iterate_index = position + 1;
+        it->tick = scheduler.CurrentTick();
+        return ref;
+    }
+    // The last entry takes its place, so the next lookup starts there.
+    cache_level.iterate_index = position;
+    cache_level.deferred.emplace(it->index, std::move(*it));
+    if (it != entries.end() - 1) {
+        *it = std::move(entries.back());
+    }
+    entries.pop_back();
+    return ref;
 }
 
 StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage usage, bool deferred) {
@@ -244,8 +256,50 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
     if (device.IsBufferDeviceAddressSupported()) {
         buffer_ci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
-    vk::Buffer buffer = memory_allocator.CreateBuffer(buffer_ci, usage);
-    if (device.HasDebuggingToolAttached()) {
+    vk::Buffer buffer = memory_allocator.TryCreateBuffer(buffer_ci, usage);
+    if (!buffer) {
+        // No memory left for it (#262: Mario Kart World on an 8 GB laptop with Intel UHD, a
+        // 128 MiB upload). Free the idle staging buffers and try again, then wait for the GPU.
+        ReleaseIdleBuffers();
+        buffer = memory_allocator.TryCreateBuffer(buffer_ci, usage);
+        if (!buffer) {
+            ReleaseMemory();
+            buffer = memory_allocator.TryCreateBuffer(buffer_ci, usage);
+        }
+    }
+    if (!buffer) {
+        static u32 logged{};
+        if (logged++ == 0) {
+            LogMemoryTrace(device);
+        }
+        // The submitted ticks are done, so the stream buffer after its last range is free unless
+        // the open tick wrapped into it. The ranges before it may hold data for commands not
+        // recorded yet, so it does not wrap.
+        if (usage != MemoryUsage::Upload || deferred || iterator + size >= stream_buffer_size ||
+            AreRegionsActive(Region(iterator), Region(iterator + size) + 1)) {
+            LOG_CRITICAL(Render_Vulkan, "No memory for a {} byte staging buffer (usage {})", size,
+                         static_cast<u32>(usage));
+            throw vk::Exception(VK_ERROR_OUT_OF_DEVICE_MEMORY);
+        }
+        if (logged <= 32) {
+            LOG_ERROR(Render_Vulkan,
+                      "No memory for a {} byte upload buffer; using the stream buffer", size);
+        }
+        const size_t offset = iterator;
+        free_iterator = (std::max)(free_iterator, offset + size);
+        iterator = Common::AlignUp(offset + size, MAX_ALIGNMENT);
+        return StagingBufferRef{
+            .buffer = *stream_buffer,
+            .device_address = stream_buffer_address,
+            .offset = static_cast<VkDeviceSize>(offset),
+            .mapped_span = stream_pointer.subspan(offset, size),
+            .usage{},
+            .log2_level{},
+            .index{},
+        };
+    }
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::StagingCreates, 1);
+    if (device.NamesObjects()) {
         ++buffer_index;
         buffer.SetObjectNameEXT(fmt::format("Staging Buffer {}", buffer_index).c_str());
     }
@@ -254,17 +308,23 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         device.IsBufferDeviceAddressSupported()
             ? device.GetLogical().GetBufferDeviceAddress(*buffer)
             : VkDeviceAddress{};
-    StagingBuffer& entry = GetCache(usage)[log2_size].entries.emplace_back(StagingBuffer{
+    StagingBuffer entry{
         .buffer = std::move(buffer),
         .device_address = buffer_address,
         .mapped_span = mapped_span,
         .usage = usage,
         .log2_level = log2_size,
         .index = unique_ids++,
-        .tick = deferred ? (std::numeric_limits<u64>::max)() : scheduler.CurrentTick(),
-        .deferred = deferred,
-    });
-    return entry.Ref();
+        .tick = scheduler.CurrentTick(),
+    };
+    const StagingBufferRef ref = entry.Ref();
+    StagingBuffers& cache_level = GetCache(usage)[log2_size];
+    if (deferred) {
+        cache_level.deferred.emplace(entry.index, std::move(entry));
+    } else {
+        cache_level.entries.push_back(std::move(entry));
+    }
+    return ref;
 }
 
 StagingBufferPool::StagingBuffersCache& StagingBufferPool::GetCache(MemoryUsage usage) {
@@ -285,11 +345,32 @@ u64 StagingBufferPool::CachedBytes(MemoryUsage usage) {
     u64 bytes{};
     const StagingBuffersCache& cache = GetCache(usage);
     for (size_t level = 0; level < NUM_LEVELS; ++level) {
-        if (!cache[level].entries.empty()) {
-            bytes += u64{cache[level].entries.size()} << level;
+        const size_t count = cache[level].entries.size() + cache[level].deferred.size();
+        if (count != 0) {
+            bytes += u64{count} << level;
         }
     }
     return bytes;
+}
+
+void StagingBufferPool::ReleaseMemory() {
+    // Waits for the submitted ticks only (#1993). This runs while a draw or dispatch is set up,
+    // and a submit would leave its earlier bindings in the submitted command buffer. Buffers
+    // handed out in the open tick stay busy, as they may feed commands not recorded yet.
+    scheduler.Wait(scheduler.CurrentTick() - 1);
+    ReleaseIdleBuffers();
+}
+
+void StagingBufferPool::ReleaseIdleBuffers() {
+    for (StagingBuffersCache* const cache : {&device_local_cache, &upload_cache, &download_cache}) {
+        for (StagingBuffers& staging : *cache) {
+            std::erase_if(staging.entries, [this](const StagingBuffer& entry) {
+                return scheduler.IsFree(entry.tick);
+            });
+            staging.delete_index = 0;
+            staging.iterate_index = 0;
+        }
+    }
 }
 
 void StagingBufferPool::ReleaseCache(MemoryUsage usage) {
@@ -323,7 +404,8 @@ void StagingBufferPool::ReleaseLevel(StagingBuffersCache& cache, size_t log2) {
     const auto is_deletable = [this](const StagingBuffer& entry) {
         return scheduler.IsFree(entry.tick);
     };
-    const size_t begin_offset = staging.delete_index;
+    // Deferred checkouts take entries out of the vector since the last sweep.
+    const size_t begin_offset = (std::min)(staging.delete_index, old_size);
     const size_t end_offset = (std::min)(begin_offset + deletions_per_tick, old_size);
     const auto begin = entries.begin() + begin_offset;
     const auto end = entries.begin() + end_offset;

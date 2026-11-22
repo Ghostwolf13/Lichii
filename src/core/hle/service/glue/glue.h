@@ -5,12 +5,18 @@
 
 #pragma once
 
+#include <memory>
+
 namespace Core {
 class System;
 } // namespace Core
 
 namespace Service::Glue {
 
-void LoopProcess(Core::System& system);
+namespace Time {
+class TimeZoneBinary;
+}
+
+void LoopProcess(Core::System& system, std::shared_ptr<Time::TimeZoneBinary> isolated_time_zone);
 
 } // namespace Service::Glue
